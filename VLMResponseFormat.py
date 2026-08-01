@@ -1,37 +1,59 @@
 from pydantic import BaseModel
 from typing import Optional
 
+class TextBlock(BaseModel):
+    type: str
+    content: str
+
+class Person(BaseModel):
+    age_group: str
+    gender: str
+    face_visible: bool
+    actions: list[str]
+    emotion: Optional[str]
 
 class ObjectItem(BaseModel):
     name: str
+    category: str
     count: int
-    location: Optional[str] = None  # e.g. center, top-left, foreground
+    confidence: float
 
+class ContentSafety(BaseModel):
+    is_safe_for_work: bool
+    adult: float
+    violence: float
+    medical: float
 
-class Person(BaseModel):
-    actions: list[str]
+class StatItem(BaseModel):
+    metric_or_subject: str
+    value: str
 
+class InfographicData(BaseModel):
+    is_infographic: bool
+    data_visualizations_present: list[str]
+    statistics: list[StatItem]
+    geographic_data: list[str]
 
 class ImagePayload(BaseModel):
-    # Descriptions
     short_description: str
     description: str
-
-    # Classification
-    primary_category: str  # photo, screenshot, document, artwork, meme, infographic
-    content_type: str      # portrait, landscape, food, product, nature, etc.
-
-    # Search metadata
+    primary_category: str
+    content_type: str
+    infographic_data: InfographicData
+    content_safety: ContentSafety
+    entities_brands: list[str]
+    entities_landmarks: list[str]
     tags: list[str]
-    entities: list[str]
-
-    # Visual content
+    search_terms: list[str]
+    sparse_keywords: list[str]
     objects: list[ObjectItem]
     people: list[Person]
-
-    # OCR
+    text_blocks: list[TextBlock]
     has_text: bool
-    ocr_text: Optional[str] = None
-
-    # Appearance
+    weather: Optional[str]
+    time_of_day: Optional[str]
+    lighting: Optional[str]
     dominant_colors: list[str]
+    orientation: str
+    shot_type: str
+    is_selfie: bool

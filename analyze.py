@@ -33,7 +33,7 @@ def preprocess_image(image_path: str) -> bytes:
 
 def analyse_image(image_path: str) -> ImagePayload:
     client = ollama.Client(host=config.OLLAMA_HOST)
-    # image_bytes = preprocess_image(image_path)
+    image_bytes = preprocess_image(image_path)
     print(f"[imagent] Sending image to Ollama model: {config.OLLAMA_MODEL} @ {config.OLLAMA_HOST} …")
     response = client.chat(
         model=config.OLLAMA_MODEL,
