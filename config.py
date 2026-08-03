@@ -6,6 +6,7 @@ dotenv.load_dotenv(".env")
 
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "")
+OLLAMA_EMBEDDING_MODEL: str = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
 OLLAMA_TIMEOUT: int = 300
 OLLAMA_NUM_CTX: int = 8192
 
