@@ -5,24 +5,24 @@ analyze.py — Imagent image indexing pipeline entrypoint.
 Prompts the user for a root folder, discovers all supported images, and runs
 each one through the full indexing pipeline:
 
-  file_scan → metadata_extraction → embedding_generation → database_write → file_move
+  file_scan → metadata_extraction → embedding_generation → database_write
 
-Indexed images are moved into ``<root>/indexed/`` preserving their relative
-directory structure.  All activity is stored in ``<root>/imagent.db``.
+All activity is stored in ``<root>/imagent.db``.
 """
+
+from __future__ import annotations
 
 import array
 import json
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import config
 from db.connection import init_db
 from db.operations import (
-    lookup_by_path,
-    update_image_path,
+    lookup_by_file_id,
+    update_image_file_path,
     upsert_image_data,
     upsert_text_embedding,
 )
@@ -30,7 +30,6 @@ from image_processing.hashing import compute_hash
 from image_processing.metadata import extract_file_metadata
 from pipeline.discovery import discover_images
 from pipeline.error_logger import log_error
-from pipeline.file_mover import move_to_indexed
 from pipeline.validation import validate_folder
 from text_processing.formatters import build_search_text
 from vlm.analyzer import analyse_image, embed_search_text
@@ -82,7 +81,7 @@ def is_unchanged(existing: dict | None, file_hash: str, modified_at: str) -> boo
 # Per-image pipeline
 # ---------------------------------------------------------------------------
 
-def index_image(conn, image_path: Path, root: Path) -> str:
+def index_image(conn, image_path: Path) -> str:
     """Run the complete indexing pipeline for a single image.
 
     Stages (in order):
@@ -90,10 +89,6 @@ def index_image(conn, image_path: Path, root: Path) -> str:
       2. metadata_extraction — VLM analysis
       3. embedding_generation — build search doc + embed
       4. database_write      — atomic upsert of image_data + text_embeddings
-      5. file_move           — move to indexed/ and update stored path
-
-    The file_move stage is best-effort: a failure there is logged but does not
-    roll back the database writes, so the image is still considered indexed.
 
     Returns:
         ``'skipped'``  — file is unchanged since the last run.
@@ -101,22 +96,24 @@ def index_image(conn, image_path: Path, root: Path) -> str:
         ``'indexed'``  — new image, not previously seen.
     """
     path_str = str(image_path)
-    image_id: str | None = None
+    file_id: str | None = None
 
     # ------------------------------------------------------------------
     # Stage 1: file_scan — gather hash and file-level metadata
     # ------------------------------------------------------------------
     file_hash = compute_hash(path_str)
     file_meta = extract_file_metadata(path_str)
+    file_id = file_meta["file_id"]
     modified_at: str = file_meta["modified_at"]
 
-    existing = lookup_by_path(conn, path_str)
+    existing = lookup_by_file_id(conn, file_id)
 
     if is_unchanged(existing, file_hash, modified_at):
+        if existing["file_path"] != path_str:
+            update_image_file_path(conn, file_id, path_str)
+            conn.commit()
         return "skipped"
 
-    # Preserve the existing image_id on updates so foreign keys stay stable.
-    image_id = existing["image_id"] if existing else str(uuid.uuid4())
     is_update = existing is not None
 
     # ------------------------------------------------------------------
@@ -139,8 +136,8 @@ def index_image(conn, image_path: Path, root: Path) -> str:
     # Stage 4: database_write — atomic transaction
     # ------------------------------------------------------------------
     record = {
-        "image_id": image_id,
-        "path": path_str,
+        "file_id": file_id,
+        "file_path": path_str,
         "hash": file_hash,
         "short_description": payload.short_description,
         "description": payload.description,
@@ -155,25 +152,8 @@ def index_image(conn, image_path: Path, root: Path) -> str:
     # ``with conn`` starts a transaction; commits on success, rolls back on error.
     with conn:
         upsert_image_data(conn, record)
-        upsert_text_embedding(conn, image_id, embedding_bytes, config.OLLAMA_EMBEDDING_MODEL)
+        upsert_text_embedding(conn, file_id, embedding_bytes, config.OLLAMA_EMBEDDING_MODEL)
     # ↑ Commit point — image is now considered fully indexed in the database.
-
-    # ------------------------------------------------------------------
-    # Stage 5: file_move — best-effort; does not roll back DB on failure
-    # ------------------------------------------------------------------
-    try:
-        new_path = move_to_indexed(image_path, root)
-        update_image_path(conn, image_id, str(new_path))
-        conn.commit()
-    except Exception as move_exc:
-        log_error(
-            conn,
-            stage="file_move",
-            exc=move_exc,
-            image_id=image_id,
-            path=path_str,
-            metadata={"root": str(root)},
-        )
 
     return "updated" if is_update else "indexed"
 
@@ -213,7 +193,7 @@ def run(root: Path) -> None:
         print(f"  [{i:>{len(str(total))}}/{total}] {rel} ... ", end="", flush=True)
 
         try:
-            result = index_image(conn, image_path, root)
+            result = index_image(conn, image_path)
             counts[result] += 1
             print(result)
         except Exception as exc:
@@ -223,7 +203,7 @@ def run(root: Path) -> None:
                 conn,
                 stage="pipeline",
                 exc=exc,
-                path=str(image_path),
+                file_path=str(image_path),
                 metadata={"root": str(root)},
             )
 

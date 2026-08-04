@@ -5,6 +5,8 @@ Reads OS-level stat data (size, timestamps) and opens the image with Pillow to
 determine pixel dimensions and MIME type.  Does not call the VLM.
 """
 
+from __future__ import annotations
+
 import mimetypes
 import os
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ def extract_file_metadata(path: str) -> dict:
     """Return a dict of file-level metadata for the image at *path*.
 
     Keys returned:
+        file_id (str)           — OS-provided file identifier.
         width (int | None)       — pixel width; None if Pillow cannot open the file.
         height (int | None)      — pixel height; None if Pillow cannot open the file.
         file_size (int)          — file size in bytes.
@@ -48,6 +51,7 @@ def extract_file_metadata(path: str) -> dict:
         created_at = _iso_utc(stat.st_birthtime)
 
     return {
+        "file_id": str(stat.st_ino),
         "width": width,
         "height": height,
         "file_size": stat.st_size,

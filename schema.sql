@@ -11,13 +11,13 @@ PRAGMA foreign_keys = ON;
 -- When: Populated or updated whenever an image is scanned, analyzed, or re-indexed.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS image_data (
-    -- Stable unique identifier for the image (e.g. UUIDv4 or content-based ID).
+    -- Stable OS-provided file identifier.
     -- Used as the primary key and referenced by other tables (like text_embeddings).
-    image_id TEXT PRIMARY KEY,
+    file_id TEXT PRIMARY KEY,
 
     -- Absolute path to the image on disk.
     -- Used to locate the image and must be unique to prevent indexing the same path multiple times.
-    path TEXT NOT NULL UNIQUE,
+    file_path TEXT NOT NULL UNIQUE,
 
     -- Content hash (e.g. SHA-256 or BLAKE3) of the image.
     -- Used for duplicate detection (same image at different paths) and change detection.
@@ -77,14 +77,27 @@ CREATE TABLE IF NOT EXISTS image_data (
     vlm_model TEXT
 );
 
--- Index on path to optimize lookups by absolute path during file system scans.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_image_data_path ON image_data(path);
+-- Index on file_path to optimize lookups by absolute path during file system scans.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_image_data_file_path ON image_data(file_path);
 
 -- Index on hash to optimize duplicate detection queries.
 CREATE INDEX IF NOT EXISTS idx_image_data_hash ON image_data(hash);
 
 -- Index on modified_at to optimize delta-indexing scans detecting modified files.
 CREATE INDEX IF NOT EXISTS idx_image_data_modified_at ON image_data(modified_at);
+
+
+-- ============================================================================
+-- TABLE: backlog
+--
+-- What: Stores files that need to be indexed or re-indexed after a filesystem scan.
+-- Why:  Decouples cheap filesystem scanning from expensive VLM processing.
+-- When: Populated by scan.py for new or modified files.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS backlog (
+    file_id TEXT PRIMARY KEY,
+    file_path TEXT NOT NULL
+);
 
 
 -- ============================================================================
@@ -96,8 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_image_data_modified_at ON image_data(modified_at)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS text_embeddings (
     -- Unique identifier of the image this embedding belongs to.
-    -- References image_data(image_id) to link vector embeddings to image files.
-    image_id TEXT PRIMARY KEY,
+    -- References image_data(file_id) to link vector embeddings to image files.
+    file_id TEXT PRIMARY KEY,
 
     -- Serialized embedding vector (usually an array of floats) generated from the search document.
     -- Used for vector distance calculations during semantic search queries.
@@ -112,7 +125,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
     created_at DATETIME,
 
     -- Maintain database integrity by cascading deletions when an image is deleted.
-    FOREIGN KEY (image_id) REFERENCES image_data(image_id) ON DELETE CASCADE
+    FOREIGN KEY (file_id) REFERENCES image_data(file_id) ON DELETE CASCADE
 );
 
 
@@ -131,15 +144,15 @@ CREATE TABLE IF NOT EXISTS error_logs (
     -- Used to paginate, sort, and reference individual error entries.
     id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-    -- The image_id of the image being processed when the error occurred, if known.
-    -- May be NULL if the error happened before an image_id could be determined
+    -- The file_id of the image being processed when the error occurred, if known.
+    -- May be NULL if the error happened before a file_id could be determined
     -- (e.g. during initial file discovery or path validation).
-    image_id TEXT,
+    file_id TEXT,
 
     -- Absolute path to the image file being processed when the error occurred.
-    -- Stored separately from image_id so errors can be reported even when no
+    -- Stored separately from file_id so errors can be reported even when no
     -- image_data row exists yet.
-    path TEXT,
+    file_path TEXT,
 
     -- The named stage in the processing pipeline where the error was caught.
     -- Valid values: 'file_scan', 'metadata_extraction', 'embedding_generation', 'database_write'.
@@ -167,13 +180,13 @@ CREATE TABLE IF NOT EXISTS error_logs (
     -- Used for chronological filtering, rate analysis, and correlating errors with deployments.
     created_at DATETIME NOT NULL,
 
-    -- If image_id is present, cascade deletions from image_data to keep error_logs consistent.
+    -- If file_id is present, cascade deletions from image_data to keep error_logs consistent.
     -- Errors for deleted images are removed automatically to prevent orphaned records.
-    FOREIGN KEY (image_id) REFERENCES image_data(image_id) ON DELETE CASCADE
+    FOREIGN KEY (file_id) REFERENCES image_data(file_id) ON DELETE CASCADE
 );
 
--- Index on image_id to efficiently retrieve all errors associated with a specific image.
-CREATE INDEX IF NOT EXISTS idx_error_logs_image_id ON error_logs(image_id);
+-- Index on file_id to efficiently retrieve all errors associated with a specific image.
+CREATE INDEX IF NOT EXISTS idx_error_logs_file_id ON error_logs(file_id);
 
 -- Index on stage to filter and aggregate errors by pipeline phase.
 CREATE INDEX IF NOT EXISTS idx_error_logs_stage ON error_logs(stage);
