@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-analyze.py — Imagent image indexing pipeline entrypoint.
+analyze_and_index.py — Imagent image indexing pipeline entrypoint.
 
-Prompts the user for a root folder, discovers all supported images, and runs
-each one through the full indexing pipeline:
+Pulls every file currently queued in the ``backlog`` table (populated by
+scan.py) and runs each one through the full indexing pipeline:
 
   file_scan → metadata_extraction → embedding_generation → database_write
 
-All activity is stored in ``<root>/imagent.db``.
+Successfully processed files (indexed/updated/skipped) are removed from the
+backlog; failed files are kept so they are retried on the next run.
+
+All activity is stored in the user-level database at ``~/.imagent/imagent.db``
+(overridable via the ``IMAGENT_HOME`` environment variable).
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from pathlib import Path
 import config
 from db.connection import init_db
 from db.operations import (
+    delete_backlog,
+    get_backlog,
     lookup_by_file_id,
     update_image_file_path,
     upsert_image_data,
@@ -28,14 +34,9 @@ from db.operations import (
 )
 from image_processing.hashing import compute_hash
 from image_processing.metadata import extract_file_metadata
-from pipeline.discovery import discover_images
 from pipeline.error_logger import log_error
-from pipeline.validation import validate_folder
 from text_processing.formatters import build_search_text
 from vlm.analyzer import analyse_image, embed_search_text
-
-# Name of the SQLite database file, created inside the root folder.
-DB_FILENAME = "imagent.db"
 
 # Increment this when the stored metadata schema changes incompatibly.
 METADATA_VERSION = 1
@@ -162,22 +163,22 @@ def index_image(conn, image_path: Path) -> str:
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
-def run(root: Path) -> None:
-    """Initialise the database, discover images, and index them one by one.
+def run() -> None:
+    """Initialise the database, pull pending files from the backlog, and index them.
 
     Progress is printed for each image.  Failures are logged to ``error_logs``
-    and do not stop processing of the remaining images.  A summary is printed
-    at the end.
+    and their backlog row is kept so the file is retried on the next run;
+    every other outcome (indexed/updated/skipped) removes the row from the
+    backlog.  A summary is printed at the end.
     """
-    db_path = str(root / DB_FILENAME)
+    db_path = str(config.DB_PATH)
     conn = init_db(db_path)
 
-    print(f"\n[imagent] Root     : {root}")
-    print(f"[imagent] Database : {db_path}")
+    print(f"\n[imagent] Database : {db_path}")
 
-    images = discover_images(root)
-    total = len(images)
-    print(f"[imagent] Discovered {total} image(s)\n")
+    backlog_rows = get_backlog(conn)
+    total = len(backlog_rows)
+    print(f"[imagent] Backlog  : {total} file(s) pending\n")
 
     if total == 0:
         print("[imagent] Nothing to index.")
@@ -187,15 +188,17 @@ def run(root: Path) -> None:
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
 
-    for i, image_path in enumerate(images, start=1):
-        rel = image_path.relative_to(root)
+    for i, row in enumerate(backlog_rows, start=1):
+        image_path = Path(row["file_path"])
         # Print progress inline; result appended on the same line after processing.
-        print(f"  [{i:>{len(str(total))}}/{total}] {rel} ... ", end="", flush=True)
+        print(f"  [{i:>{len(str(total))}}/{total}] {image_path} ... ", end="", flush=True)
 
         try:
             result = index_image(conn, image_path)
             counts[result] += 1
             print(result)
+            with conn:
+                delete_backlog(conn, row["file_id"])
         except Exception as exc:
             counts["failed"] += 1
             print(f"FAILED  ({type(exc).__name__}: {exc})")
@@ -204,14 +207,14 @@ def run(root: Path) -> None:
                 stage="pipeline",
                 exc=exc,
                 file_path=str(image_path),
-                metadata={"root": str(root)},
+                metadata={"file_id": row["file_id"]},
             )
 
     elapsed = time.perf_counter() - wall_start
 
     # Final summary
     print(f"\n{'─' * 52}")
-    print(f"  Total discovered  : {total}")
+    print(f"  Total in backlog  : {total}")
     print(f"  Indexed (new)     : {counts['indexed']}")
     print(f"  Updated           : {counts['updated']}")
     print(f"  Skipped           : {counts['skipped']}")
@@ -227,10 +230,8 @@ def run(root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Prompt the user for a folder path and kick off the indexing pipeline."""
-    raw_path = input("Enter the folder path to index: ").strip()
-    root = validate_folder(raw_path)
-    run(root)
+    """Run the indexing pipeline over whatever is currently queued in the backlog."""
+    run()
 
 
 if __name__ == "__main__":

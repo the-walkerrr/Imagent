@@ -22,6 +22,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with ``row_factory`` set to
         ``sqlite3.Row`` so columns are accessible by name.
     """
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 

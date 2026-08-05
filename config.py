@@ -4,6 +4,11 @@ import dotenv
 
 dotenv.load_dotenv(".env")
 
+# User-level storage directory for Imagent's database (analogous to ~/.claude).
+# Overridable via IMAGENT_HOME for testing or non-standard setups.
+IMAGENT_HOME: Path = Path(os.getenv("IMAGENT_HOME", str(Path.home() / ".imagent")))
+DB_PATH: Path = IMAGENT_HOME / "imagent.db"
+
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "")
 OLLAMA_EMBEDDING_MODEL: str = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")

@@ -101,6 +101,17 @@ def delete_image_data(conn: sqlite3.Connection, file_id: str) -> None:
     conn.execute("DELETE FROM image_data WHERE file_id = ?", (file_id,))
 
 
+def get_backlog(conn: sqlite3.Connection) -> list[dict]:
+    """Return every pending backlog row as a dict with file_id and file_path."""
+    rows = conn.execute("SELECT file_id, file_path FROM backlog ORDER BY file_id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_backlog(conn: sqlite3.Connection, file_id: str) -> None:
+    """Remove a backlog row once it has been processed (or no longer needs indexing)."""
+    conn.execute("DELETE FROM backlog WHERE file_id = ?", (file_id,))
+
+
 def delete_image_data_not_in(conn: sqlite3.Connection, file_ids: set[str]) -> int:
     """Delete image_data rows whose file_id was not seen during a filesystem scan."""
     if not file_ids:

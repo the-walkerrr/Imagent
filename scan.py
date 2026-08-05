@@ -6,17 +6,19 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import config
+from analyze_and_index import run as run_indexing
 from db.connection import init_db
 from db.operations import (
     delete_image_data,
     delete_image_data_not_in,
+    get_backlog,
     lookup_by_file_id,
     update_image_file_path,
     upsert_backlog,
 )
+from pipeline.discovery import discover_images
 from pipeline.validation import validate_folder
-
-DB_FILENAME = "imagent.db"
 
 
 def file_scan_metadata(file_path: Path) -> dict[str, str]:
@@ -29,24 +31,9 @@ def file_scan_metadata(file_path: Path) -> dict[str, str]:
     }
 
 
-def discover_files(root: Path) -> list[Path]:
-    """Return every regular file below root except SQLite sidecar files."""
-    ignored_names = {
-        DB_FILENAME,
-        f"{DB_FILENAME}-journal",
-        f"{DB_FILENAME}-shm",
-        f"{DB_FILENAME}-wal",
-    }
-    return sorted(
-        file_path
-        for file_path in root.rglob("*")
-        if file_path.is_file() and file_path.name not in ignored_names
-    )
-
-
 def scan(root: Path) -> dict[str, int]:
     """Scan root and synchronize image_data/backlog state."""
-    conn = init_db(str(root / DB_FILENAME))
+    conn = init_db(str(config.DB_PATH))
     counts = {
         "scanned": 0,
         "queued_new": 0,
@@ -58,7 +45,7 @@ def scan(root: Path) -> dict[str, int]:
     seen_file_ids: set[str] = set()
 
     try:
-        for file_path in discover_files(root):
+        for file_path in discover_images(root):
             metadata = file_scan_metadata(file_path)
             file_id = metadata["file_id"]
             current_file_path = metadata["file_path"]
@@ -103,13 +90,31 @@ def main() -> None:
     counts = scan(root)
 
     print(f"\n[imagent] Root     : {root}")
-    print(f"[imagent] Database : {root / DB_FILENAME}")
+    print(f"[imagent] Database : {config.DB_PATH}")
     print(f"[imagent] Scanned  : {counts['scanned']}")
     print(f"[imagent] New      : {counts['queued_new']}")
     print(f"[imagent] Modified : {counts['queued_modified']}")
     print(f"[imagent] Moved    : {counts['paths_updated']}")
     print(f"[imagent] Unchanged: {counts['unchanged']}")
     print(f"[imagent] Deleted  : {counts['deleted']}\n")
+
+    conn = init_db(str(config.DB_PATH))
+    try:
+        backlog_size = len(get_backlog(conn))
+    finally:
+        conn.close()
+
+    if backlog_size == 0:
+        return
+
+    answer = input(
+        f"[imagent] {backlog_size} file(s) in the backlog are pending indexing. "
+        "Run indexing now? [y/N]: "
+    ).strip().lower()
+    if answer in ("y", "yes"):
+        run_indexing()
+    else:
+        print("[imagent] Skipping indexing. Run analyze_and_index.py later to process the backlog.")
 
 
 if __name__ == "__main__":
