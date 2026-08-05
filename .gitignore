@@ -5,3 +5,5 @@ __pycache__
 temp.json
 .agents
 Response
+.claude/settings.local.json
+.claude/scripts/
