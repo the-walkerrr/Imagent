@@ -34,6 +34,18 @@ class InfographicData(BaseModel):
     statistics: list[StatItem]
     geographic_data: list[str]
 
+class QueryUnderstanding(BaseModel):
+    normalized_query: str
+    required_details: list[str]
+    hypothetical_description: str
+
+class RelevanceVerdict(BaseModel):
+    matched_details: list[str]
+    missing_requirements: list[str]
+    is_match: bool
+    confidence: float
+    reasoning: str
+
 class ImagePayload(BaseModel):
     short_description: str
     description: str

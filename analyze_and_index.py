@@ -16,7 +16,6 @@ All activity is stored in the user-level database at ``~/.imagent/imagent.db``
 
 from __future__ import annotations
 
-import array
 import json
 import time
 from datetime import datetime, timezone
@@ -29,12 +28,14 @@ from db.operations import (
     get_backlog,
     lookup_by_file_id,
     update_image_file_path,
+    upsert_fts_entry,
     upsert_image_data,
     upsert_text_embedding,
 )
 from image_processing.hashing import compute_hash
 from image_processing.metadata import extract_file_metadata
 from pipeline.error_logger import log_error
+from pipeline.serialisation import serialize_embedding
 from text_processing.formatters import build_search_text
 from vlm.analyzer import analyse_image, embed_search_text
 
@@ -45,15 +46,6 @@ METADATA_VERSION = 1
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def serialize_embedding(embedding: list[float]) -> bytes:
-    """Pack a float list into raw bytes (IEEE 754 single precision).
-
-    Using ``array`` from the stdlib keeps the stored size at 4 bytes per
-    dimension and avoids adding a numpy dependency.
-    """
-    return array.array("f", embedding).tobytes()
-
 
 def build_vlm_metadata_json(payload) -> str:
     """Serialise all VLM payload fields except ``short_description`` and ``description``.
@@ -154,6 +146,7 @@ def index_image(conn, image_path: Path) -> str:
     with conn:
         upsert_image_data(conn, record)
         upsert_text_embedding(conn, file_id, embedding_bytes, config.OLLAMA_EMBEDDING_MODEL)
+        upsert_fts_entry(conn, file_id, search_text)
     # ↑ Commit point — image is now considered fully indexed in the database.
 
     return "updated" if is_update else "indexed"

@@ -152,3 +152,81 @@ def upsert_text_embedding(
         """,
         (file_id, embedding_bytes, model, datetime.now(timezone.utc).isoformat()),
     )
+
+
+def get_all_embeddings(conn: sqlite3.Connection, model: str) -> list[dict]:
+    """Return every stored embedding whose model matches ``model``.
+
+    Used by search to compare only embeddings generated with the currently
+    configured embedding model — comparing vectors from different embedding
+    spaces produces meaningless similarity scores.
+    """
+    rows = conn.execute(
+        "SELECT file_id, embedding FROM text_embeddings WHERE model = ?",
+        (model,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_embeddings_model_counts(conn: sqlite3.Connection) -> list[dict]:
+    """Return the count of stored embeddings grouped by model name.
+
+    Used by search to detect and report images indexed under a different
+    embedding model than the one currently configured.
+    """
+    rows = conn.execute(
+        "SELECT model, COUNT(*) AS n FROM text_embeddings GROUP BY model"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_image_summary(conn: sqlite3.Connection, file_id: str) -> dict | None:
+    """Return display/reconstruction fields for a single image.
+
+    Used by search to present results (file_path, short_description) and to
+    rebuild an image's search text from stored VLM metadata when backfilling
+    image_search_fts.
+    """
+    row = conn.execute(
+        """
+        SELECT file_id, file_path, short_description, description, vlm_metadata_json
+        FROM image_data WHERE file_id = ?
+        """,
+        (file_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# image_search_fts
+# ---------------------------------------------------------------------------
+
+def upsert_fts_entry(conn: sqlite3.Connection, file_id: str, search_text: str) -> None:
+    """Insert or replace the full-text search entry for an image.
+
+    FTS5 virtual tables don't support ON CONFLICT upserts, so an existing
+    entry is deleted before the new one is inserted.
+    """
+    conn.execute("DELETE FROM image_search_fts WHERE file_id = ?", (file_id,))
+    conn.execute(
+        "INSERT INTO image_search_fts (file_id, search_text) VALUES (?, ?)",
+        (file_id, search_text),
+    )
+
+
+def fts_search(conn: sqlite3.Connection, query: str, limit: int) -> list[dict]:
+    """Return up to ``limit`` file_ids matching ``query`` via full-text search.
+
+    Ranked by SQLite's bm25 relevance (more negative = more relevant).
+    """
+    rows = conn.execute(
+        """
+        SELECT file_id, bm25(image_search_fts) AS rank
+        FROM image_search_fts
+        WHERE image_search_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (query, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]

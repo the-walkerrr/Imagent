@@ -130,6 +130,31 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 
 
 -- ============================================================================
+-- TABLE: image_search_fts
+--
+-- What: Full-text index over each image's search text (descriptions, tags,
+--       objects, people, OCR text, search terms, scene, entities).
+-- Why:  Complements semantic (embedding) search with exact keyword matching,
+--       so images surface for brand names, OCR'd words, or specific terms
+--       even when they don't score well on vector similarity alone.
+-- When: Populated alongside text_embeddings whenever an image is indexed.
+-- ============================================================================
+CREATE VIRTUAL TABLE IF NOT EXISTS image_search_fts USING fts5(
+    file_id UNINDEXED,
+    search_text
+);
+
+-- FTS5 virtual tables cannot declare a FOREIGN KEY, so cascading deletion of
+-- image_search_fts rows when their image_data row is removed is handled by
+-- this trigger instead of a FK constraint (unlike text_embeddings above).
+CREATE TRIGGER IF NOT EXISTS trg_image_data_delete_fts
+AFTER DELETE ON image_data
+BEGIN
+    DELETE FROM image_search_fts WHERE file_id = OLD.file_id;
+END;
+
+
+-- ============================================================================
 -- TABLE: error_logs
 --
 -- What: Tracks all indexing failures and unexpected errors encountered during
