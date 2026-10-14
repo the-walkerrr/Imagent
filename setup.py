@@ -25,7 +25,6 @@ RELAUNCHED_ENV = "IMAGENT_SETUP_RELAUNCHED"
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
 RED = "fg:ansibrightred"
-TOTAL_STEPS = 5
 INDENT = "  "  # left padding for everything under a step heading
 QMARK = INDENT + "?"
 POINTER = INDENT + "»"
@@ -47,9 +46,9 @@ def say(message: str = "", style: str = "") -> None:
         print(message)
 
 
-def step(number: int, title: str) -> None:
+def step(title: str) -> None:
     os.system("")  # enables ANSI colours in Windows terminals
-    print(f"\n\033[1m▌Step {number} of {TOTAL_STEPS}: {title}\033[0m\n")
+    print(f"\n\033[1m▌{title}\033[0m\n")
 
 
 def fail(message: str) -> None:
@@ -323,8 +322,10 @@ def _field_choice(label: str, value: str, key: str):
     return questionary.Choice([("fg:ansibrightred", f"○ {label} not set")], value=key)
 
 
-def ask_models(current: dict):
-    """One menu: open any field, copy the AI prompt, or continue once both names are set."""
+def ask_models(current: dict, cancellable: bool = False):
+    """One menu: open any field, copy the AI prompt, or continue once both names are set.
+
+    Returns (vlm, embedding), or None if the user cancels (only offered when `cancellable`)."""
     vlm, embedding = current.get("vlm_model", ""), current.get("embedding_model", "")
     say("Fill in both model names, then choose Continue.\n")
     copied = False
@@ -339,12 +340,16 @@ def ask_models(current: dict):
             questionary.Choice("Continue", value="continue",
                                disabled=None if ready else "enter both model names first"),
         ]
+        if cancellable:
+            choices.append(questionary.Choice("Cancel", value="cancel"))
         default = "continue" if ready else ("embedding" if vlm else "vlm")
         choice = ask(questionary.select(
             "What would you like to do?", choices=choices, default=default,
             qmark=QMARK, pointer=POINTER, style=STYLE))
         if choice == "continue":
             return vlm, embedding
+        if choice == "cancel":
+            return None
         _erase_last_line()
         if choice == "ask":
             copied = offer_prompt_copy()
@@ -566,50 +571,149 @@ def download_models(host: str, models: list) -> bool:
             return False
 
 
-# --- Re-run: show installed models --------------------------------------------
+# --- Choosing models (first run, and "Enter different models") ---------------
 
-def show_installed_models(config: dict) -> None:
-    """Setup was run before: list every model installed in Ollama, marking the ones in use."""
+def save_config(host: str, vlm: str, embedding: str) -> None:
+    IMAGENT_HOME.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        json.dumps({"ollama_host": host, "vlm_model": vlm, "embedding_model": embedding}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def choose_models(vlm: str, embedding: str, host, saved: dict, input_step, download_step, cancellable=False):
+    """Input boxes -> verify on ollama.com -> specs -> download. Returns (vlm, embedding, host),
+    or None if the user cancels.
+
+    `input_step` / `download_step` are step headings; download_step may be None."""
+    saved_embedding = saved.get("embedding_model", "")
+    step(input_step)
+    while True:
+        chosen = ask_models({"vlm_model": vlm, "embedding_model": embedding}, cancellable)
+        if chosen is None:
+            return None
+        vlm, embedding = chosen
+        proceed, missing = review_models(vlm, embedding)
+        if not proceed:
+            # Clear only the names that were not found; keep the valid one.
+            vlm = "" if vlm in missing else vlm
+            embedding = "" if embedding in missing else embedding
+            step(input_step)
+            continue
+        if saved_embedding and _normalize(embedding) != _normalize(saved_embedding):
+            say(f"\nHeads up: your images were indexed with '{saved_embedding}'. Searches using '{embedding}'", "fg:ansimagenta")
+            say("will not find them until they are indexed again.\n", "fg:ansimagenta")
+            if not ask(questionary.confirm("Switch the embedding model anyway?", default=False, qmark=QMARK, style=STYLE)):
+                step(input_step)
+                continue
+        if download_step:
+            step(download_step)
+        if host is None:
+            host = ask(questionary.text(
+                "Where is Ollama running? Press Enter if it is on this computer:",
+                default=saved.get("ollama_host", DEFAULT_HOST), qmark=QMARK, style=STYLE,
+            )).strip() or DEFAULT_HOST
+            say("")
+        if download_models(host, [vlm, embedding]):
+            return vlm, embedding, host
+        step(input_step)
+
+
+# --- Re-run: manage installed models ------------------------------------------
+
+def _installed(client) -> dict:
+    return {_normalize(m.model): m.size or 0 for m in client.list().models}
+
+
+def _reinstall(client, name: str) -> None:
+    """Pull a configured model that was removed from Ollama, after a disk-space check."""
+    try:
+        needed = fetch_model_specs(name)["bytes"]
+        if needed * 1.1 > shutil.disk_usage(Path.home()).free:
+            say(f"✗ Not enough free disk space for {name} ({_fmt_bytes(needed)}). Free up space and try again.", RED)
+            return
+    except ModelNotFound:
+        say(f"✗ '{name}' no longer exists on ollama.com. Choose \"Enter different models…\" instead.", RED)
+        return
+    except RegistryUnreachable:
+        pass  # offline check failed; let the pull report any real problem
+    try:
+        _pull_models(client, [name])
+    except Exception as exc:
+        print()
+        say(f"✗ Download failed: {exc}", RED)
+
+
+def manage_models(config: dict) -> None:
+    """Setup was run before: list installed models, offer reinstall for missing ones, or new models."""
     say("Setup was already completed. Checking your installed models…\n")
-    roles = {_normalize(config["vlm_model"]): "VLM", _normalize(config["embedding_model"]): "Embedding"}
+    config = dict(config)
     with ollama_client(config["ollama_host"]) as client:
         if client is None:
             sys.exit(1)
-        try:
-            installed = {_normalize(m.model): m.size or 0 for m in client.list().models}
-        except Exception as exc:
-            fail(f"Could not read the model list from Ollama: {exc}")
-
-        in_use = [n for n in roles if n in installed]
-        missing = [n for n in roles if n not in installed]
-        others = sorted(n for n in installed if n not in roles)
-        width = max(len(n) for n in [*in_use, *missing, *others, ""])
-
-        say("Installed models:", "bold")
-        for name in in_use:
-            say(f"✓ {name:<{width}}  {_fmt_bytes(installed[name]):>8}  {roles[name]} (in use)", "fg:ansigreen")
-        for name in missing:
-            say(f"✗ {name:<{width}}  {'':>8}  {roles[name]} (in use, NOT installed)", RED)
-        for name in others:
-            say(f"  {name:<{width}}  {_fmt_bytes(installed[name]):>8}")
-        if not installed:
-            say("  (no models installed)")
-        say("\nTo change the models you use, run change_model.py.")
-
-        if missing and ask(questionary.confirm(
-                "\nDownload the missing model(s) now?", default=True, qmark=QMARK, style=STYLE)):
+        while True:
             try:
-                _pull_models(client, [config["vlm_model"], config["embedding_model"]])
+                installed = _installed(client)
             except Exception as exc:
-                print()
-                fail(f"Download failed: {exc}")
+                fail(f"Could not read the model list from Ollama: {exc}")
+
+            roles = [("VLM", config["vlm_model"]), ("Embedding", config["embedding_model"])]
+            role_of = {_normalize(name): role for role, name in roles}
+            in_use = [n for n in role_of if n in installed]
+            missing = [(role, name) for role, name in roles if _normalize(name) not in installed]
+            others = sorted(n for n in installed if n not in role_of)
+            width = max([len(n) for n in [*in_use, *others]] + [1])
+
+            say("Installed models:", "bold")
+            for name in in_use:
+                say(f"✓ {name:<{width}}  {_fmt_bytes(installed[name]):>8}  {role_of[name]} (in use)", "fg:ansigreen")
+            for name in others:
+                say(f"  {name:<{width}}  {_fmt_bytes(installed[name]):>8}")
+            if not installed:
+                say("  (no models installed)")
+            say("")
+
+            choices = [
+                questionary.Choice(
+                    [(RED, f"✗ {role} model: {name} is not installed. Select to reinstall")], value=("reinstall", name))
+                for role, name in missing
+            ]
+            if choices:
+                choices.append(questionary.Separator())
+            choices += [
+                questionary.Choice("Enter different models…", value=("change", "")),
+                questionary.Choice("Done", value=("done", "")),
+            ]
+            action, name = ask(questionary.select(
+                "What would you like to do?", choices=choices, default=choices[0].value if missing else ("done", ""),
+                qmark=QMARK, pointer=POINTER, style=STYLE))
+            _erase_last_line()
+
+            if action == "done":
+                say("✓ Setup complete.", "fg:green")
+                return
+            if action == "reinstall":
+                _reinstall(client, name)
+            else:
+                result = choose_models(
+                    "", "", config["ollama_host"], config,
+                    input_step="Change models", download_step=None, cancellable=True)
+                if result is None:
+                    say("Cancelled. Your models were not changed.\n")
+                    continue
+                vlm, embedding, host = result
+                config = {"ollama_host": host, "vlm_model": vlm, "embedding_model": embedding}
+                save_config(host, vlm, embedding)
+                say(f"✓ Saved your choices to {CONFIG_PATH}\n", "fg:green")
+            say("")
 
 
 # --- Main ---------------------------------------------------------------------
 
 def load_existing_config() -> dict:
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -619,50 +723,24 @@ def main() -> None:
         fail("Setup needs an interactive terminal. Run it directly: python3 setup.py")
 
     if not os.getenv(RELAUNCHED_ENV):
-        step(1, "Your computer")
+        step("Your computer")
         say(system_details())
-        step(2, "Required packages")
+        step("Required packages")
     ensure_packages()
 
-    step(3, "Ollama")
+    step("Ollama")
     ensure_ollama_installed()
 
     current = load_existing_config()
     if all(current.get(k) for k in ("ollama_host", "vlm_model", "embedding_model")):
-        global TOTAL_STEPS
-        TOTAL_STEPS = 4
-        step(4, "Installed models")
-        show_installed_models(current)
+        step("Installed models")
+        manage_models(current)
         return
 
-    step(4, "Models")
-    vlm_model, embedding_model = current.get("vlm_model", ""), current.get("embedding_model", "")
-    host = None
-    while True:
-        vlm_model, embedding_model = ask_models({"vlm_model": vlm_model, "embedding_model": embedding_model})
-        proceed, missing = review_models(vlm_model, embedding_model)
-        if not proceed:
-            # Clear only the names that were not found; keep the valid one.
-            vlm_model = "" if vlm_model in missing else vlm_model
-            embedding_model = "" if embedding_model in missing else embedding_model
-            step(4, "Models")
-            continue
-        step(5, "Download")
-        if host is None:
-            host = ask(questionary.text(
-                "Where is Ollama running? Press Enter if it is on this computer:",
-                default=current.get("ollama_host", DEFAULT_HOST), qmark=QMARK, style=STYLE,
-            )).strip() or DEFAULT_HOST
-            say("")
-        if download_models(host, [vlm_model, embedding_model]):
-            break
-        step(4, "Models")
-
-    IMAGENT_HOME.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(
-        json.dumps({"ollama_host": host, "vlm_model": vlm_model, "embedding_model": embedding_model}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    vlm, embedding, host = choose_models(
+        current.get("vlm_model", ""), current.get("embedding_model", ""), None, current,
+        input_step="Models", download_step="Download")
+    save_config(host, vlm, embedding)
     say(f"\n✓ Setup complete. Your choices are saved in {CONFIG_PATH}", "fg:green")
 
 
