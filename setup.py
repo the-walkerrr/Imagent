@@ -318,7 +318,7 @@ def _erase_last_line() -> None:
 def _field_choice(label: str, value: str, key: str):
     """Menu row for a model field: green once filled, light red while unset."""
     if value:
-        return questionary.Choice([("fg:ansigreen", f"✓ {label} {value}")], value=key)
+        return questionary.Choice([("fg:ansigreen", f"○ {label} {value}")], value=key)
     return questionary.Choice([("fg:ansibrightred", f"○ {label} not set")], value=key)
 
 
@@ -335,13 +335,13 @@ def ask_models(current: dict, cancellable: bool = False):
             _field_choice("VLM model:      ", vlm, "vlm"),
             _field_choice("Embedding model:", embedding, "embedding"),
             questionary.Separator(),
-            questionary.Choice([("fg:ansigreen", COPIED)] if copied else ASK_AI, value="ask"),
+            questionary.Choice([("fg:ansigreen", f"○ {COPIED}")] if copied else f"○ {ASK_AI}", value="ask"),
             questionary.Separator(),
-            questionary.Choice("Continue", value="continue",
+            questionary.Choice("○ Continue" if ready else "Continue", value="continue",
                                disabled=None if ready else "enter both model names first"),
         ]
         if cancellable:
-            choices.append(questionary.Choice("Cancel", value="cancel"))
+            choices.append(questionary.Choice("○ Cancel", value="cancel"))
         default = "continue" if ready else ("embedding" if vlm else "vlm")
         choice = ask(questionary.select(
             "What would you like to do?", choices=choices, default=default,
@@ -457,9 +457,9 @@ def review_models(vlm: str, embedding: str):
     choice = ask(questionary.select(
         "Ready to download?",
         choices=[
-            questionary.Choice("← Go back and change the models", value="back"),
+            questionary.Choice("○ ← Go back and change the models", value="back"),
             questionary.Separator(),
-            questionary.Choice("Continue: download the models", value="go",
+            questionary.Choice("○ Continue: download the models" if enough_space else "Continue: download the models", value="go",
                                disabled=None if enough_space else "not enough disk space"),
         ],
         default="go" if enough_space else "back",
@@ -675,14 +675,14 @@ def manage_models(config: dict) -> None:
 
             choices = [
                 questionary.Choice(
-                    [(RED, f"✗ {role} model: {name} is not installed. Select to reinstall")], value=("reinstall", name))
+                    [(RED, f"○ {role} model: {name} is not installed. Select to reinstall")], value=("reinstall", name))
                 for role, name in missing
             ]
             if choices:
                 choices.append(questionary.Separator())
             choices += [
-                questionary.Choice("Enter different models…", value=("change", "")),
-                questionary.Choice("Done", value=("done", "")),
+                questionary.Choice("○ Enter different models…", value=("change", "")),
+                questionary.Choice("○ Done", value=("done", "")),
             ]
             action, name = ask(questionary.select(
                 "What would you like to do?", choices=choices, default=choices[0].value if missing else ("done", ""),
