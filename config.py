@@ -1,17 +1,19 @@
+import json
 import os
 from pathlib import Path
-import dotenv
-
-dotenv.load_dotenv(".env")
 
 # User-level storage directory for Imagent's database (analogous to ~/.claude).
 # Overridable via IMAGENT_HOME for testing or non-standard setups.
 IMAGENT_HOME: Path = Path(os.getenv("IMAGENT_HOME", str(Path.home() / ".imagent")))
 DB_PATH: Path = IMAGENT_HOME / "imagent.db"
+CONFIG_PATH: Path = IMAGENT_HOME / "config.json"
 
-OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "")
-OLLAMA_EMBEDDING_MODEL: str = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
+# User settings written by setup.py.
+_settings: dict = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+
+OLLAMA_HOST: str = _settings.get("ollama_host", "")
+OLLAMA_MODEL: str = _settings.get("vlm_model", "")
+OLLAMA_EMBEDDING_MODEL: str = _settings.get("embedding_model", "bge-m3")
 OLLAMA_TIMEOUT: int = 300
 OLLAMA_NUM_CTX: int = 8192
 
