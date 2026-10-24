@@ -17,7 +17,7 @@ def analyse_image(image_path: str) -> ImagePayload:
             "images": [image_path],
         }],
         format=ImagePayload.model_json_schema(),
-        options={"num_ctx": config.OLLAMA_NUM_CTX},
+        options={"num_ctx": config.OLLAMA_NUM_CTX, "use_mmap": config.OLLAMA_USE_MMAP},
     )
     return ImagePayload.model_validate_json(response.message.content)
 
@@ -26,6 +26,7 @@ def embed_search_text(search_text: str) -> list[float]:
     response = client.embed(
         model=config.OLLAMA_EMBEDDING_MODEL,
         input=[search_text],
+        options={"use_mmap": config.OLLAMA_USE_MMAP},
     )
     return list(response.embeddings[0])
 
@@ -38,7 +39,7 @@ def understand_query(query: str) -> QueryUnderstanding:
             "content": f"{config.QUERY_PROMPT}\n\nUser query: {query}",
         }],
         format=QueryUnderstanding.model_json_schema(),
-        options={"num_ctx": config.OLLAMA_NUM_CTX, "temperature": 0},
+        options={"num_ctx": config.OLLAMA_NUM_CTX, "use_mmap": config.OLLAMA_USE_MMAP, "temperature": 0},
     )
     return QueryUnderstanding.model_validate_json(response.message.content)
 
@@ -55,6 +56,6 @@ def judge_candidate(query: str, document: str, required_details: list[str] | Non
         model=config.OLLAMA_MODEL,
         messages=[{"role": "user", "content": content}],
         format=RelevanceVerdict.model_json_schema(),
-        options={"num_ctx": config.OLLAMA_NUM_CTX, "temperature": 0},
+        options={"num_ctx": config.OLLAMA_NUM_CTX, "use_mmap": config.OLLAMA_USE_MMAP, "temperature": 0},
     )
     return RelevanceVerdict.model_validate_json(response.message.content)

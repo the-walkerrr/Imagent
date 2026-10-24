@@ -16,6 +16,7 @@ OLLAMA_MODEL: str = _settings.get("vlm_model", "")
 OLLAMA_EMBEDDING_MODEL: str = _settings.get("embedding_model", "bge-m3")
 OLLAMA_TIMEOUT: int = 300
 OLLAMA_NUM_CTX: int = 8192
+OLLAMA_USE_MMAP: bool = False  # mmap made the VLM's image encoder run out of GPU memory on 8 GB Macs (empty responses)
 
 IMAGE_MAX_LONG_EDGE: int = int(os.getenv("IMAGE_MAX_LONG_EDGE", "1120"))
 IMAGE_JPEG_QUALITY: int = int(os.getenv("IMAGE_JPEG_QUALITY", "85"))
