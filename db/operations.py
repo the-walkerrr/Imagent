@@ -79,6 +79,14 @@ def update_image_file_path(conn: sqlite3.Connection, file_id: str, file_path: st
     )
 
 
+def update_image_modified_at(conn: sqlite3.Connection, file_id: str, modified_at: str) -> None:
+    """Update the stored modification timestamp for a file with a stable OS file ID."""
+    conn.execute(
+        "UPDATE image_data SET modified_at = ? WHERE file_id = ?",
+        (modified_at, file_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # backlog
 # ---------------------------------------------------------------------------

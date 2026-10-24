@@ -37,3 +37,23 @@ Z_SIGMA_FLOOR: float = 0.02      # guards divide-by-~0 when the pool is unusuall
 Z_MIN_POOL: int = 5              # below this many pool candidates, skip the z computation
 UNCERTAIN_TOP_K: int = 3         # max candidates sent to the relevance judge per search
 JUDGE_CONFIDENCE_MIN: float = 0.7  # minimum judge confidence required to accept a match
+
+
+# ---------------------------------------------------------------------------
+# Config file helpers
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    """Return the full config.json as a dict, or {} if the file is missing / unreadable."""
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config_value(key: str, value) -> None:
+    """Merge a single key into config.json, preserving every other field."""
+    data = load_config()
+    data[key] = value
+    IMAGENT_HOME.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
