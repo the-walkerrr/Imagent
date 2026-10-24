@@ -145,26 +145,59 @@ def system_details() -> str:
 # --- AI prompt ----------------------------------------------------------------
 
 def build_ai_prompt() -> str:
-    return f"""I need you to recommend two Ollama models for a local-first image search tool. Everything runs on my machine through Ollama.
+    return f"""I need your help choosing the AI models for a local-first image search tool. Everything runs on my own computer through Ollama. I am not technical, so explain everything in plain, friendly language. Avoid jargon, and if you must use a technical word, explain it in a few words.
 
-## My system
+## My computer
 {system_details()}
 
-## How the models will be used
-1. VLM (vision-language model): looks at each image once and writes a structured JSON description (scene, objects, people, visible text, mood). It is also used at search time to interpret the user's query and to judge whether a candidate image matches. I may index thousands of images, so speed matters as well as quality.
-2. Embedding model: turns those text descriptions and the user's search queries into vectors for cosine-similarity search. Descriptions and queries are short text, and queries may be multilingual.
+## What the models do
+1. VLM (vision-language model): looks at each image once and writes a structured JSON description (scene, objects, people, visible text, mood). It is also used at search time to understand my query and to judge whether a candidate image matches.
+2. Embedding model: turns those descriptions and my search queries into vectors for similarity search. The text is short, and queries may be in several languages.
+
+## How the tool works (use this for your calculations)
+- I may index thousands of images, so speed matters as much as accuracy. Both are my goal: a reliable and accurate search that does not take forever.
+- Each image is resized so its longest side is at most 1120 pixels, and the VLM runs with a context window of 8192 tokens.
+- The tool alternates between the VLM and the embedding model for every image, so both must stay loaded in memory together. If they do not fit, Ollama reloads them again and again and indexing becomes very slow.
+- While it runs, the tool checks my free memory and decides by itself how many images the VLM analyzes at the same time (Ollama's OLLAMA_NUM_PARALLEL). I never choose this. My only job is to choose the models, so pick models that leave room for it.
+- Verify this online, then use it: simultaneous requests share ONE copy of the model in memory. Each extra simultaneous image only adds its own working memory (the KV cache, which grows with the context window). So memory needed is roughly: model size + (images at the same time x working memory per image) + about 1 GB overhead.
+- The tool turns memory-mapping off (Ollama's use_mmap=false). The whole model is copied into memory and stays there, so do not count on the operating system to free or share part of it under pressure.
+- Reading an image needs extra working memory for the VLM's image encoder, on top of the model size and the context window. Add it to the formula above. In my own test on an 8 GB Apple Silicon Mac, a 3B VLM needed about 2.3 GB for this, and when everything did not fit, Ollama returned an empty answer instead of an error. Check this figure for every VLM you recommend (the Ollama page or the model's documentation), label it "estimate" if you cannot verify it, and leave room for it.
+- The embedding model cannot be changed later without re-analyzing every image, so choose it with care.
 
 ## Hard rules (follow all of them)
 1. Search the web now. Do NOT rely on your training data. Use only information you found online during this conversation, and state the date each source was last updated.
 2. Only recommend models that exist in the official Ollama library (https://ollama.com/library) and that I can install with `ollama pull <name>:<tag>`. Open each model's page and confirm the exact tag exists. Never invent or guess a tag.
-3. The VLM must accept image input (the "vision" capability on Ollama) and be able to follow a JSON output schema reliably.
-4. The embedding model must be a dedicated embedding model that works with `ollama embed` ("embedding" capability). Do not suggest a chat model for embeddings.
-5. The VLM must fit comfortably on my hardware: model file size plus about 20% for context and overhead should stay under 70% of my available VRAM, or of RAM if I have no dedicated GPU (unified memory counts as VRAM). The embedding model should be small (ideally under 2 GB) so both can stay loaded together. The tool alternates between the two models for every image, so if both do not fit, Ollama reloads them repeatedly and indexing becomes very slow. Show the numbers.
+3. Every VLM must have the "vision" capability on Ollama and follow a JSON output schema reliably.
+4. The embedding model must be a dedicated embedding model that works with `ollama embed` ("embedding" capability). Never suggest a chat model for embeddings.
+5. Never suggest anything that does not fit. Budget: about 85% of my dedicated VRAM, or of my RAM if I have no dedicated GPU, with the rest left for the system. On Apple Silicon, check how much unified memory macOS actually lets the GPU use, because the default limit is below total RAM. If my answers later show the computer sits idle, you may allow more. If I use it while indexing, allow less.
 6. Prefer the newest actively maintained models. Do not recommend deprecated, superseded or abandoned models.
-7. Check the specifications on the Ollama page for each candidate: parameter count, quantization, download size, context length and license.
-8. If you cannot verify something, say so plainly. Do not guess.
-9. Give at most 3 candidates per category, ranked, with a one-line reason and the source URL for each.
-10. End with a final answer in exactly this format, using only verified tags:
+7. For every candidate, check the Ollama page for parameter count, quantization, download size, context length and license.
+8. If you cannot verify something, say so plainly. If a number is your own estimate, label it "estimate". Never present a guess as a fact, and never claim a speed-up you cannot back up.
+9. Keep every reply short, clean and easy to scan: short headings, small tables, one-line reasons. No long essays.
+
+## What to do, in this order
+**Step 1: Research.** Search the web for the current best vision models and embedding models on the Ollama library.
+
+**Step 2: Memory check, before recommending anything.** Tell me in two or three plain sentences, with numbers:
+- how much memory the models can use on my computer,
+- whether a small VLM leaves enough room to analyze 2 or more images at the same time,
+- whether a large VLM fits, and how many images at the same time it would allow.
+If my computer is too small for several images at once, say so honestly.
+
+**Step 3: VLM options.** Show every VLM that fits, from small to large (at most 5), as a table with these columns: name:tag, download size, memory needed, speed (fast / medium / slow), accuracy (good / very good / excellent), how many images at the same time my computer could handle (estimate), best for, source URL. Mark one as "Recommended" and say why in one line. Explain the speed and accuracy differences in plain words.
+
+**Step 4: One big model or several images at once.** Explain in plain words, for MY computer, the trade-off between one large accurate VLM and a smaller VLM that analyzes several images at the same time. Give the pros and cons of each on speed and accuracy. Say clearly when the smaller model wins (for example, plenty of memory for many images at once) and when the larger one wins (for example, accuracy matters most and the speed loss is acceptable). Say how much accuracy is given up by going smaller, with evidence if you found any.
+
+**Step 5: Embedding options.** Show 2 or 3 small embedding models in a short table (name:tag, size, languages supported, one-line reason) and mark one as "Recommended".
+
+**Step 6: Ask me follow-up questions.** Ask at most 4 short questions, numbered, each answerable in a few words, so I can get the exact model for my needs. Ask only what would change your recommendation, for example:
+- Is this computer always on and idle, in daily use, or used for indexing only at night?
+- What matters more: finishing fast, or the best possible accuracy?
+- Roughly how many images will I index?
+- Are my photos mostly people and scenes, or documents and screenshots with text? Do I search in more than one language?
+Then STOP and wait for my answers. Do not give the final answer yet.
+
+**Step 7: Final answer.** After I answer, narrow it down to one VLM and one embedding model, explain why in two or three plain sentences, and offer to answer more questions or change the pick. When I confirm, end with exactly this format, using only verified tags:
 VLM_MODEL=<name>:<tag>
 EMBEDDING_MODEL=<name>:<tag>
 """
@@ -244,8 +277,8 @@ def ensure_packages() -> None:
         ("qmark", "fg:ansidefault bold"),
         ("question", "fg:ansidefault bold"),
         ("pointer", "fg:ansidefault bold"),
-        ("highlighted", "fg:ansidefault bold"),
-        ("selected", "noreverse fg:ansidefault bold"),
+        ("highlighted", "fg:ansidefault bold underline"),
+        ("selected", "noreverse fg:ansidefault bold underline"),
         ("answer", "fg:ansidefault bold"),
         ("instruction", "fg:ansibrightblack"),
         ("disabled", "fg:ansibrightblack italic"),
@@ -322,18 +355,23 @@ def _field_choice(label: str, value: str, key: str):
     return questionary.Choice([("fg:ansibrightred", f"○ {label} not set")], value=key)
 
 
-def ask_models(current: dict, cancellable: bool = False):
+def ask_models(current: dict, cancellable: bool = False, locked_embedding: str = ""):
     """One menu: open any field, copy the AI prompt, or continue once both names are set.
 
+    When `locked_embedding` is set the embedding row is omitted entirely — it cannot be changed.
     Returns (vlm, embedding), or None if the user cancels (only offered when `cancellable`)."""
     vlm, embedding = current.get("vlm_model", ""), current.get("embedding_model", "")
-    say("Fill in both model names, then choose Continue.\n")
+    if locked_embedding:
+        embedding = locked_embedding
+    say("Fill in the VLM model name, then choose Continue.\n" if locked_embedding
+        else "Fill in both model names, then choose Continue.\n")
     copied = False
     while True:
         ready = bool(vlm and embedding)
-        choices = [
-            _field_choice("VLM model:      ", vlm, "vlm"),
-            _field_choice("Embedding model:", embedding, "embedding"),
+        choices = [_field_choice("VLM model:      ", vlm, "vlm")]
+        if not locked_embedding:
+            choices.append(_field_choice("Embedding model:", embedding, "embedding"))
+        choices += [
             questionary.Separator(),
             questionary.Choice([("fg:ansigreen", f"○ {COPIED}")] if copied else f"○ {ASK_AI}", value="ask"),
             questionary.Separator(),
@@ -342,7 +380,7 @@ def ask_models(current: dict, cancellable: bool = False):
         ]
         if cancellable:
             choices.append(questionary.Choice("○ Cancel", value="cancel"))
-        default = "continue" if ready else ("embedding" if vlm else "vlm")
+        default = "continue" if ready else "vlm"
         choice = ask(questionary.select(
             "What would you like to do?", choices=choices, default=default,
             qmark=QMARK, pointer=POINTER, style=STYLE))
@@ -581,15 +619,21 @@ def save_config(host: str, vlm: str, embedding: str) -> None:
     )
 
 
-def choose_models(vlm: str, embedding: str, host, saved: dict, input_step, download_step, cancellable=False):
+def choose_models(vlm: str, embedding: str, host, saved: dict, input_step, download_step,
+                  cancellable=False, locked_embedding: str = ""):
     """Input boxes -> verify on ollama.com -> specs -> download. Returns (vlm, embedding, host),
     or None if the user cancels.
+
+    When `locked_embedding` is set the embedding field is shown read-only so the user cannot
+    change it (each embedding model produces different vectors; switching would break existing
+    searches until a full re-index is performed).
 
     `input_step` / `download_step` are step headings; download_step may be None."""
     saved_embedding = saved.get("embedding_model", "")
     step(input_step)
     while True:
-        chosen = ask_models({"vlm_model": vlm, "embedding_model": embedding}, cancellable)
+        chosen = ask_models({"vlm_model": vlm, "embedding_model": embedding}, cancellable,
+                            locked_embedding=locked_embedding)
         if chosen is None:
             return None
         vlm, embedding = chosen
@@ -597,10 +641,12 @@ def choose_models(vlm: str, embedding: str, host, saved: dict, input_step, downl
         if not proceed:
             # Clear only the names that were not found; keep the valid one.
             vlm = "" if vlm in missing else vlm
-            embedding = "" if embedding in missing else embedding
+            if not locked_embedding:
+                embedding = "" if embedding in missing else embedding
             step(input_step)
             continue
-        if saved_embedding and _normalize(embedding) != _normalize(saved_embedding):
+        # When the embedding is locked we never allow switching it, so skip the confirmation.
+        if not locked_embedding and saved_embedding and _normalize(embedding) != _normalize(saved_embedding):
             say(f"\nHeads up: your images were indexed with '{saved_embedding}'. Searches using '{embedding}'", "fg:ansimagenta")
             say("will not find them until they are indexed again.\n", "fg:ansimagenta")
             if not ask(questionary.confirm("Switch the embedding model anyway?", default=False, qmark=QMARK, style=STYLE)):
@@ -672,6 +718,13 @@ def manage_models(config: dict) -> None:
             if not installed:
                 say("  (no models installed)")
             say("")
+            say("Note: the embedding model cannot be changed once set. Each embedding model produces",
+                "fg:ansibrightblack")
+            say("different vectors for the same text, so switching models would break all existing",
+                "fg:ansibrightblack")
+            say("image searches until the entire library is re-indexed with the new model.",
+                "fg:ansibrightblack")
+            say("")
 
             choices = [
                 questionary.Choice(
@@ -696,8 +749,9 @@ def manage_models(config: dict) -> None:
                 _reinstall(client, name)
             else:
                 result = choose_models(
-                    "", "", config["ollama_host"], config,
-                    input_step="Change models", download_step=None, cancellable=True)
+                    config["vlm_model"], config["embedding_model"], config["ollama_host"], config,
+                    input_step="Change models", download_step=None, cancellable=True,
+                    locked_embedding=config["embedding_model"])
                 if result is None:
                     say("Cancelled. Your models were not changed.\n")
                     continue
