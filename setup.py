@@ -145,59 +145,29 @@ def system_details() -> str:
 # --- AI prompt ----------------------------------------------------------------
 
 def build_ai_prompt() -> str:
-    return f"""I need your help choosing the AI models for a local-first image search tool. Everything runs on my own computer through Ollama. I am not technical, so explain everything in plain, friendly language. Avoid jargon, and if you must use a technical word, explain it in a few words.
+    return f"""I need to choose two AI models for a local image search tool that runs on my computer through Ollama.
 
 ## My computer
 {system_details()}
 
-## What the models do
-1. VLM (vision-language model): looks at each image once and writes a structured JSON description (scene, objects, people, visible text, mood). It is also used at search time to understand my query and to judge whether a candidate image matches.
-2. Embedding model: turns those descriptions and my search queries into vectors for similarity search. The text is short, and queries may be in several languages.
+## The models
+- VLM (vision model): describes each image as JSON and understands my search queries.
+- Embedding model: turns descriptions and queries into vectors for search. Queries may be in several languages.
 
-## How the tool works (use this for your calculations)
-- I may index thousands of images, so speed matters as much as accuracy. Both are my goal: a reliable and accurate search that does not take forever.
-- Each image is resized so its longest side is at most 1120 pixels, and the VLM runs with a context window of 8192 tokens.
-- The tool alternates between the VLM and the embedding model for every image, so both must stay loaded in memory together. If they do not fit, Ollama reloads them again and again and indexing becomes very slow.
-- While it runs, the tool checks my free memory and decides by itself how many images the VLM analyzes at the same time (Ollama's OLLAMA_NUM_PARALLEL). I never choose this. My only job is to choose the models, so pick models that leave room for it.
-- Verify this online, then use it: simultaneous requests share ONE copy of the model in memory. Each extra simultaneous image only adds its own working memory (the KV cache, which grows with the context window). So memory needed is roughly: model size + (images at the same time x working memory per image) + about 1 GB overhead.
-- The tool turns memory-mapping off (Ollama's use_mmap=false). The whole model is copied into memory and stays there, so do not count on the operating system to free or share part of it under pressure.
-- Reading an image needs extra working memory for the VLM's image encoder, on top of the model size and the context window. Add it to the formula above. In my own test on an 8 GB Apple Silicon Mac, a 3B VLM needed about 2.3 GB for this, and when everything did not fit, Ollama returned an empty answer instead of an error. Check this figure for every VLM you recommend (the Ollama page or the model's documentation), label it "estimate" if you cannot verify it, and leave room for it.
-- The embedding model cannot be changed later without re-analyzing every image, so choose it with care.
+## Rules
+- Search the web now. Do not rely on your memory.
+- Only models from https://ollama.com/library, with the exact tag confirmed on the model's page (`ollama pull <name>:<tag>`).
+- VLM: needs the "vision" capability and must follow a JSON schema reliably.
+- Embedding model: needs the "embedding" capability. Never a chat model.
+- Both models stay loaded together, so both plus the VLM's image working memory (about 2.3 GB for a 3B VLM, at an 8192-token context) must fit in about 85% of my VRAM (or RAM if there is no dedicated GPU; on Apple Silicon, the memory macOS lets the GPU use).
+- Speed matters as much as accuracy: I may index thousands of images.
+- Newest, actively maintained models only. Mark any figure you could not verify as "estimate".
 
-## Hard rules (follow all of them)
-1. Search the web now. Do NOT rely on your training data. Use only information you found online during this conversation, and state the date each source was last updated.
-2. Only recommend models that exist in the official Ollama library (https://ollama.com/library) and that I can install with `ollama pull <name>:<tag>`. Open each model's page and confirm the exact tag exists. Never invent or guess a tag.
-3. Every VLM must have the "vision" capability on Ollama and follow a JSON output schema reliably.
-4. The embedding model must be a dedicated embedding model that works with `ollama embed` ("embedding" capability). Never suggest a chat model for embeddings.
-5. Never suggest anything that does not fit. Budget: about 85% of my dedicated VRAM, or of my RAM if I have no dedicated GPU, with the rest left for the system. On Apple Silicon, check how much unified memory macOS actually lets the GPU use, because the default limit is below total RAM. If my answers later show the computer sits idle, you may allow more. If I use it while indexing, allow less.
-6. Prefer the newest actively maintained models. Do not recommend deprecated, superseded or abandoned models.
-7. For every candidate, check the Ollama page for parameter count, quantization, download size, context length and license.
-8. If you cannot verify something, say so plainly. If a number is your own estimate, label it "estimate". Never present a guess as a fact, and never claim a speed-up you cannot back up.
-9. Keep every reply short, clean and easy to scan: short headings, small tables, one-line reasons. No long essays.
+## Answer format (short, tables only, no extra text)
+**VLM, 3 best options:** name:tag | download size | memory needed | speed | accuracy | one-line reason. Mark one "Recommended".
+**Embedding model, 3 best options:** name:tag | size | languages | one-line reason. Mark one "Recommended".
 
-## What to do, in this order
-**Step 1: Research.** Search the web for the current best vision models and embedding models on the Ollama library.
-
-**Step 2: Memory check, before recommending anything.** Tell me in two or three plain sentences, with numbers:
-- how much memory the models can use on my computer,
-- whether a small VLM leaves enough room to analyze 2 or more images at the same time,
-- whether a large VLM fits, and how many images at the same time it would allow.
-If my computer is too small for several images at once, say so honestly.
-
-**Step 3: VLM options.** Show every VLM that fits, from small to large (at most 5), as a table with these columns: name:tag, download size, memory needed, speed (fast / medium / slow), accuracy (good / very good / excellent), how many images at the same time my computer could handle (estimate), best for, source URL. Mark one as "Recommended" and say why in one line. Explain the speed and accuracy differences in plain words.
-
-**Step 4: One big model or several images at once.** Explain in plain words, for MY computer, the trade-off between one large accurate VLM and a smaller VLM that analyzes several images at the same time. Give the pros and cons of each on speed and accuracy. Say clearly when the smaller model wins (for example, plenty of memory for many images at once) and when the larger one wins (for example, accuracy matters most and the speed loss is acceptable). Say how much accuracy is given up by going smaller, with evidence if you found any.
-
-**Step 5: Embedding options.** Show 2 or 3 small embedding models in a short table (name:tag, size, languages supported, one-line reason) and mark one as "Recommended".
-
-**Step 6: Ask me follow-up questions.** Ask at most 4 short questions, numbered, each answerable in a few words, so I can get the exact model for my needs. Ask only what would change your recommendation, for example:
-- Is this computer always on and idle, in daily use, or used for indexing only at night?
-- What matters more: finishing fast, or the best possible accuracy?
-- Roughly how many images will I index?
-- Are my photos mostly people and scenes, or documents and screenshots with text? Do I search in more than one language?
-Then STOP and wait for my answers. Do not give the final answer yet.
-
-**Step 7: Final answer.** After I answer, narrow it down to one VLM and one embedding model, explain why in two or three plain sentences, and offer to answer more questions or change the pick. When I confirm, end with exactly this format, using only verified tags:
+End with exactly these two lines, using the recommended models:
 VLM_MODEL=<name>:<tag>
 EMBEDDING_MODEL=<name>:<tag>
 """
