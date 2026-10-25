@@ -42,13 +42,15 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> None:
             short_description, description, vlm_metadata_json,
             width, height, file_size, mime_type,
             created_at, modified_at, indexed_at,
-            processing_time_ms, metadata_version, vlm_model
+            processing_time_ms, metadata_version, vlm_model,
+            taken_at, camera_make, camera_model, gps_lat, gps_lon
         ) VALUES (
             :file_id, :file_path, :hash,
             :short_description, :description, :vlm_metadata_json,
             :width, :height, :file_size, :mime_type,
             :created_at, :modified_at, :indexed_at,
-            :processing_time_ms, :metadata_version, :vlm_model
+            :processing_time_ms, :metadata_version, :vlm_model,
+            :taken_at, :camera_make, :camera_model, :gps_lat, :gps_lon
         )
         ON CONFLICT(file_id) DO UPDATE SET
             file_path           = excluded.file_path,
@@ -65,7 +67,12 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> None:
             indexed_at          = excluded.indexed_at,
             processing_time_ms  = excluded.processing_time_ms,
             metadata_version    = excluded.metadata_version,
-            vlm_model           = excluded.vlm_model
+            vlm_model           = excluded.vlm_model,
+            taken_at            = excluded.taken_at,
+            camera_make         = excluded.camera_make,
+            camera_model        = excluded.camera_model,
+            gps_lat             = excluded.gps_lat,
+            gps_lon             = excluded.gps_lon
         """,
         record,
     )
@@ -220,6 +227,33 @@ def upsert_fts_entry(conn: sqlite3.Connection, file_id: str, search_text: str) -
         "INSERT INTO image_search_fts (file_id, search_text) VALUES (?, ?)",
         (file_id, search_text),
     )
+
+
+def upsert_partial_fts_entry(conn: sqlite3.Connection, file_id: str, partial_text: str) -> None:
+    """Insert or replace the trigram (partial-word) entry for an image."""
+    conn.execute("DELETE FROM image_text_fts WHERE file_id = ?", (file_id,))
+    conn.execute(
+        "INSERT INTO image_text_fts (file_id, partial_text) VALUES (?, ?)",
+        (file_id, partial_text),
+    )
+
+
+def partial_fts_search(conn: sqlite3.Connection, query: str, limit: int) -> list[dict]:
+    """Return up to ``limit`` file_ids whose visible text contains a fragment of ``query``.
+
+    Ranked by SQLite's bm25 relevance (more negative = more relevant).
+    """
+    rows = conn.execute(
+        """
+        SELECT file_id, bm25(image_text_fts) AS rank
+        FROM image_text_fts
+        WHERE image_text_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (query, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def fts_search(conn: sqlite3.Connection, query: str, limit: int) -> list[dict]:

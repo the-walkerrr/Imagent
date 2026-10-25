@@ -74,7 +74,21 @@ CREATE TABLE IF NOT EXISTS image_data (
 
     -- The name of the Vision-Language Model used to generate the metadata (e.g., 'llama3.2-vision').
     -- Used to track which model generated the content and determine if re-analysis is needed.
-    vlm_model TEXT
+    vlm_model TEXT,
+
+    -- Local capture date and time from the image's EXIF data (ISO 8601, no timezone), e.g. '2026-09-06T07:24:12'.
+    -- Used for date and time-of-day search; NULL when the image has no EXIF capture time.
+    taken_at TEXT,
+
+    -- Camera manufacturer and model from EXIF (e.g. 'iQOO', 'iQOO Neo9 Pro').
+    -- Used to filter or describe images by the device that took them; NULL when absent.
+    camera_make TEXT,
+    camera_model TEXT,
+
+    -- GPS position from EXIF in signed decimal degrees (south and west are negative).
+    -- Used for location search; NULL when the image has no GPS data.
+    gps_lat REAL,
+    gps_lon REAL
 );
 
 -- Index on file_path to optimize lookups by absolute path during file system scans.
@@ -139,18 +153,36 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 --       even when they don't score well on vector similarity alone.
 -- When: Populated alongside text_embeddings whenever an image is indexed.
 -- ============================================================================
+-- The porter tokenizer stems words, so 'playing' and 'players' both match 'play'.
 CREATE VIRTUAL TABLE IF NOT EXISTS image_search_fts USING fts5(
     file_id UNINDEXED,
-    search_text
+    search_text,
+    tokenize = 'porter unicode61'
+);
+
+
+-- ============================================================================
+-- TABLE: image_text_fts
+--
+-- What: Trigram index over each image's visible text, brand names and landmarks.
+-- Why:  Matches part of a word, so 'infra' finds a sign that reads 'INFRATECH'.
+--       It does not tolerate misspellings; the whole search fragment must appear.
+-- When: Populated alongside image_search_fts whenever an image is indexed.
+-- ============================================================================
+CREATE VIRTUAL TABLE IF NOT EXISTS image_text_fts USING fts5(
+    file_id UNINDEXED,
+    partial_text,
+    tokenize = 'trigram'
 );
 
 -- FTS5 virtual tables cannot declare a FOREIGN KEY, so cascading deletion of
--- image_search_fts rows when their image_data row is removed is handled by
--- this trigger instead of a FK constraint (unlike text_embeddings above).
+-- the FTS rows when their image_data row is removed is handled by this
+-- trigger instead of a FK constraint (unlike text_embeddings above).
 CREATE TRIGGER IF NOT EXISTS trg_image_data_delete_fts
 AFTER DELETE ON image_data
 BEGIN
     DELETE FROM image_search_fts WHERE file_id = OLD.file_id;
+    DELETE FROM image_text_fts WHERE file_id = OLD.file_id;
 END;
 
 

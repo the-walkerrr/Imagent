@@ -2,8 +2,9 @@
 """
 search.py — Imagent natural-language image search.
 
-Given a natural language query, returns the single best-matching indexed
-image, or ``None`` if nothing genuinely matches — never an unfiltered list.
+Given a natural language query, returns up to three matching indexed images,
+best first, or an empty list if nothing genuinely matches — never an
+unfiltered list.
 
 Pipeline:
   1. understand_query — an LLM rewrites the query (typo/abbreviation fixes),
@@ -11,9 +12,10 @@ Pipeline:
      image description (HyDE) to embed alongside the raw query. Falls back
      to the raw query alone on any failure — this stage is an enhancement,
      not a hard dependency.
-  2. Rank candidates by three signals — semantic similarity to the raw
-     query, semantic similarity to the HyDE description, and FTS5 keyword
-     match — fused via Reciprocal Rank Fusion (RRF).
+  2. Rank candidates by four signals — semantic similarity to the raw
+     query, semantic similarity to the HyDE description, FTS5 keyword
+     match (with stemming), and partial-word match against visible text,
+     brands and landmarks — fused via Reciprocal Rank Fusion (RRF).
   3. A cheap numeric gate (assess_confidence) checks the raw query's cosine
      similarity against the rest of its own candidate pool. If the best
      score is below an absolute floor, nothing in the library is even
@@ -22,9 +24,9 @@ Pipeline:
   4. Otherwise, an LLM judge reads each top candidate's stored record (the
      same text that was embedded and indexed) against the query and
      checklist, and decides — strictly, defaulting to "no match" when
-     uncertain — whether it is genuinely the requested image. The first
-     accepted candidate wins; if the judge rejects all of them, the result
-     is "not found".
+     uncertain — whether it is genuinely the requested image. Every
+     accepted candidate is returned, highest judge confidence first; if
+     the judge rejects all of them, the result is "not found".
 
 All activity reads from the user-level database at ``~/.imagent/imagent.db``
 (overridable via the ``IMAGENT_HOME`` environment variable).
@@ -46,6 +48,7 @@ from db.operations import (
     get_all_embeddings,
     get_embeddings_model_counts,
     get_image_summary,
+    partial_fts_search,
 )
 from pipeline.error_logger import log_error
 from pipeline.serialisation import deserialize_embedding
@@ -56,6 +59,7 @@ from vlm.analyzer import embed_search_text, judge_candidate, understand_query
 RRF_K = 60  # standard Reciprocal Rank Fusion damping constant
 CANDIDATE_POOL = 50  # candidates each ranking method contributes before fusion
 _FTS_TOKEN_RE = re.compile(r"[0-9A-Za-z]+")
+_PARTIAL_MIN_TOKEN_LEN = 4  # shortest query word used for partial-word (trigram) matching
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +109,7 @@ def _semantic_candidates(conn, query_embedding: list[float]) -> tuple[list[dict]
     return candidates, skipped
 
 
-def _fts_match_expression(query: str) -> str | None:
+def _fts_match_expression(query: str, min_length: int = 3) -> str | None:
     """Build a safe FTS5 MATCH expression from a natural-language query.
 
     Bare multi-token strings are an implicit AND in FTS5, so a natural
@@ -113,14 +117,14 @@ def _fts_match_expression(query: str) -> str | None:
     including "a"/"on"/"the", would need to appear in the same document).
     Tokenizing and OR-ing double-quoted terms fixes that; quoting also
     neutralizes FTS5 operators (AND/OR/NEAR/-/') as literal text, which
-    doubles as sanitization against MATCH syntax errors. Tokens of length
-    <=2 are dropped as noise. Returns None if no usable tokens remain.
+    doubles as sanitization against MATCH syntax errors. Tokens shorter than
+    ``min_length`` are dropped as noise. Returns None if no usable tokens remain.
     """
     tokens = []
     seen = set()
     for match in _FTS_TOKEN_RE.finditer(query.lower()):
         token = match.group(0)
-        if len(token) <= 2 or token in seen:
+        if len(token) < min_length or token in seen:
             continue
         seen.add(token)
         tokens.append(token)
@@ -131,18 +135,24 @@ def _fts_match_expression(query: str) -> str | None:
     return " OR ".join(f'"{token}"' for token in tokens)
 
 
-def _keyword_candidates(conn, query: str) -> list[dict]:
+def _keyword_candidates(conn, query: str, partial: bool = False) -> list[dict]:
     """Rank images by full-text keyword match against the search query.
+
+    With ``partial=True`` the match runs against the trigram index of visible
+    text, brands and landmarks instead, so a fragment of a word is enough.
+    Only tokens of ``_PARTIAL_MIN_TOKEN_LEN`` characters or more are used there,
+    because short fragments match almost any text.
 
     Drops zero-IDF matches (bm25 ~ -0.0000, i.e. a term present in nearly
     every document) — those carry no discriminative signal and shouldn't
     earn rank-based fusion credit.
     """
-    expression = _fts_match_expression(query)
+    expression = _fts_match_expression(query, min_length=_PARTIAL_MIN_TOKEN_LEN if partial else 3)
     if expression is None:
         return []
     try:
-        rows = fts_search(conn, expression, limit=CANDIDATE_POOL)
+        search_fn = partial_fts_search if partial else fts_search
+        rows = search_fn(conn, expression, limit=CANDIDATE_POOL)
     except sqlite3.OperationalError as exc:
         log_error(conn, stage="search", exc=exc, metadata={"query": query, "expression": expression})
         return []
@@ -236,21 +246,22 @@ def _build_document(summary: dict) -> str | None:
 # Public entrypoint
 # ---------------------------------------------------------------------------
 
-def search(query: str) -> dict | None:
-    """Return the single best-matching image for ``query``, or ``None``.
+def search(query: str) -> list[dict]:
+    """Return the images the judge accepts for ``query``, best first; empty if none.
 
     Combines semantic similarity (raw query + HyDE description), keyword
     relevance (full-text search), a numeric confidence gate, and an LLM
-    relevance judge. A result dict has: file_id, file_path,
-    short_description, is_match, confidence, reasoning, matched_details,
-    sources, plus the gate diagnostics (cos1, margin, z, gate_decision).
+    relevance judge that reviews up to ``config.UNCERTAIN_TOP_K`` candidates.
+    Each result dict has: file_id, file_path, short_description, is_match,
+    confidence, reasoning, matched_details, sources, plus the gate
+    diagnostics (cos1, margin, z, gate_decision).
     """
     conn = init_db(str(config.DB_PATH))
     try:
         model_counts = get_embeddings_model_counts(conn)
         if not model_counts:
             print("[imagent] No indexed images found. Run scan.py and analyze_and_index.py first.")
-            return None
+            return []
 
         other_models = [row for row in model_counts if row["model"] != config.OLLAMA_EMBEDDING_MODEL]
         if other_models:
@@ -267,7 +278,7 @@ def search(query: str) -> dict | None:
         except Exception as exc:
             log_error(conn, stage="search", exc=exc, metadata={"query": query})
             print(f"[imagent] Could not reach the embedding model ({type(exc).__name__}: {exc}).")
-            return None
+            return []
 
         required_details: list[str] = []
         keyword_query = query
@@ -288,16 +299,18 @@ def search(query: str) -> dict | None:
 
         gate = assess_confidence(semantic_raw)
         if gate["decision"] == "NOT_FOUND":
-            return None
+            return []
 
         ranked_lists = [("semantic_raw", semantic_raw)]
         if hyde_embedding is not None:
             semantic_hyde, _ = _semantic_candidates(conn, hyde_embedding)
             ranked_lists.append(("semantic_hyde", semantic_hyde))
         ranked_lists.append(("keyword", _keyword_candidates(conn, keyword_query)))
+        ranked_lists.append(("partial_text", _keyword_candidates(conn, keyword_query, partial=True)))
 
         fused = _fuse_rrf(*ranked_lists)
 
+        accepted: list[dict] = []
         for entry in fused[: config.UNCERTAIN_TOP_K]:
             summary = get_image_summary(conn, entry["file_id"])
             if summary is None:
@@ -318,7 +331,7 @@ def search(query: str) -> dict | None:
                 continue
 
             if verdict.is_match and verdict.confidence >= config.JUDGE_CONFIDENCE_MIN:
-                return {
+                accepted.append({
                     "file_id": entry["file_id"],
                     "file_path": summary["file_path"],
                     "short_description": summary["short_description"],
@@ -331,27 +344,30 @@ def search(query: str) -> dict | None:
                     "cos1": gate["cos1"],
                     "margin": gate["margin"],
                     "z": gate["z"],
-                }
+                })
 
-        return None
+        # Stable sort: candidates with equal confidence keep their fused ranking order.
+        accepted.sort(key=lambda result: result["confidence"], reverse=True)
+        return accepted
     finally:
         conn.close()
 
 
 def main() -> None:
     raw_query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Enter your search query: ").strip()
-    result = search(raw_query)
+    results = search(raw_query)
 
-    if result is None:
+    if not results:
         print(f"\n[imagent] No matching image found for: {raw_query!r}\n")
         return
 
-    print(f"\n[imagent] Match for: {raw_query!r}\n")
-    print(f"[imagent] {result['file_path']}")
-    print(f"[imagent]   {result['short_description']}")
-    print(f"[imagent]   confidence={result['confidence']:.2f}  sources={'+'.join(result['sources'])}")
-    print(f"[imagent]   reasoning: {result['reasoning']}")
-    print()
+    print(f"\n[imagent] {len(results)} match(es) for: {raw_query!r}\n")
+    for position, result in enumerate(results, start=1):
+        print(f"[imagent] {position}. {result['file_path']}")
+        print(f"[imagent]    {result['short_description']}")
+        print(f"[imagent]    confidence={result['confidence']:.2f}  sources={'+'.join(result['sources'])}")
+        print(f"[imagent]    reasoning: {result['reasoning']}")
+        print()
 
 
 if __name__ == "__main__":

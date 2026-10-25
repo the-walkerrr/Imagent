@@ -1,38 +1,46 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
 
-class TextBlock(BaseModel):
-    type: str
-    content: str
+Category = Literal["photo", "screenshot", "document", "artwork", "meme", "infographic"]
+Weather = Optional[Literal["sunny", "cloudy", "rainy", "snowy", "foggy"]]
+TimeOfDay = Optional[Literal["morning", "afternoon", "evening", "night", "golden_hour"]]
+Lighting = Optional[Literal["natural", "artificial", "mixed", "low_light"]]
 
-class Person(BaseModel):
-    age_group: str
-    gender: str
-    face_visible: bool
-    actions: list[str]
-    emotion: Optional[str]
+class ImageAnalysis(BaseModel):
+    """What the VLM returns for one image; its JSON schema is sent to Ollama.
 
-class ObjectItem(BaseModel):
-    name: str
-    category: str
-    count: int
-    confidence: float
+    The description is asked for in sections, which the model fills in order;
+    ``analyse_image`` joins them into the single stored ``description``.
+    """
+    short_description: str
+    scene: str = Field(min_length=200, max_length=700)
+    objects_and_layout: str = Field(min_length=200, max_length=700)
+    people_details: str = Field(min_length=30, max_length=600)
+    colors_light_mood: str = Field(min_length=100, max_length=500)
+    primary_category: Category
+    objects: list[str] = Field(max_length=15)
+    people_count: int
+    landmarks: list[str] = Field(max_length=3)
+    weather: Weather
+    time_of_day: TimeOfDay
+    lighting: Lighting
+    tags: list[str] = Field(max_length=10)
 
-class ContentSafety(BaseModel):
-    is_safe_for_work: bool
-    adult: float
-    violence: float
-    medical: float
-
-class StatItem(BaseModel):
-    metric_or_subject: str
-    value: str
-
-class InfographicData(BaseModel):
-    is_infographic: bool
-    data_visualizations_present: list[str]
-    statistics: list[StatItem]
-    geographic_data: list[str]
+class ImagePayload(BaseModel):
+    """Everything stored and indexed for one image, after post-processing."""
+    short_description: str
+    description: str
+    primary_category: Category
+    objects: list[str]
+    people_count: int
+    landmarks: list[str]
+    weather: Weather
+    time_of_day: TimeOfDay
+    lighting: Lighting
+    tags: list[str]
+    visible_text: list[str]
+    orientation: str
+    dominant_colors: list[str]
 
 class QueryUnderstanding(BaseModel):
     normalized_query: str
@@ -45,27 +53,3 @@ class RelevanceVerdict(BaseModel):
     is_match: bool
     confidence: float
     reasoning: str
-
-class ImagePayload(BaseModel):
-    short_description: str
-    description: str
-    primary_category: str
-    content_type: str
-    infographic_data: InfographicData
-    content_safety: ContentSafety
-    entities_brands: list[str]
-    entities_landmarks: list[str]
-    tags: list[str]
-    search_terms: list[str]
-    sparse_keywords: list[str]
-    objects: list[ObjectItem]
-    people: list[Person]
-    text_blocks: list[TextBlock]
-    has_text: bool
-    weather: Optional[str]
-    time_of_day: Optional[str]
-    lighting: Optional[str]
-    dominant_colors: list[str]
-    orientation: str
-    shot_type: str
-    is_selfie: bool

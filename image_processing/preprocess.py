@@ -1,10 +1,10 @@
 import io
-from PIL import Image
+from PIL import Image, ImageOps
 import config
 
 def preprocess_image(image_path: str) -> bytes:
     with Image.open(image_path) as img:
-        img = img.convert("RGB")
+        img = ImageOps.exif_transpose(img).convert("RGB")
         w, h = img.size
         long_edge = max(w, h)
         if long_edge > config.IMAGE_MAX_LONG_EDGE:

@@ -14,6 +14,9 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
+_EXIF_IFD = 0x8769  # pointer to the Exif sub-directory (DateTimeOriginal lives here)
+_GPS_IFD = 0x8825   # pointer to the GPS sub-directory
+
 
 def extract_file_metadata(path: str) -> dict:
     """Return a dict of file-level metadata for the image at *path*.
@@ -26,15 +29,20 @@ def extract_file_metadata(path: str) -> dict:
         mime_type (str | None)   — guessed MIME type (e.g. 'image/jpeg').
         created_at (str | None)  — ISO 8601 UTC timestamp of file birth (macOS/Windows only).
         modified_at (str)        — ISO 8601 UTC timestamp of last modification.
+        taken_at (str | None)    — ISO 8601 local capture time from EXIF (no timezone); None if absent.
+        camera_make (str | None), camera_model (str | None) — from EXIF; None if absent.
+        gps_lat (float | None), gps_lon (float | None)      — decimal degrees from EXIF; None if absent.
     """
     stat = os.stat(path)
 
-    # --- Dimensions ---
+    # --- Dimensions and EXIF ---
     width: int | None = None
     height: int | None = None
+    exif_fields = _extract_exif(None)
     try:
         with Image.open(path) as img:
             width, height = img.size
+            exif_fields = _extract_exif(img)
     except (UnidentifiedImageError, Exception):
         # Non-fatal: dimensions stay None; the rest of the metadata is still valid.
         pass
@@ -58,7 +66,49 @@ def extract_file_metadata(path: str) -> dict:
         "mime_type": mime_type,
         "created_at": created_at,
         "modified_at": modified_at,
+        **exif_fields,
     }
+
+
+def _extract_exif(img: Image.Image | None) -> dict:
+    """Read capture time, camera and GPS from EXIF. Fields the file lacks stay None."""
+    fields = {"taken_at": None, "camera_make": None, "camera_model": None, "gps_lat": None, "gps_lon": None}
+    if img is None:
+        return fields
+    try:
+        exif = img.getexif()
+        if not exif:
+            return fields
+        fields["camera_make"] = _clean_text(exif.get(0x010F))
+        fields["camera_model"] = _clean_text(exif.get(0x0110))
+        raw = exif.get_ifd(_EXIF_IFD).get(0x9003) or exif.get(0x0132)  # DateTimeOriginal, else DateTime
+        if raw:
+            try:
+                fields["taken_at"] = datetime.strptime(str(raw).strip(), "%Y:%m:%d %H:%M:%S").isoformat()
+            except ValueError:
+                pass
+        gps = exif.get_ifd(_GPS_IFD)
+        fields["gps_lat"] = _gps_degrees(gps.get(2), gps.get(1))
+        fields["gps_lon"] = _gps_degrees(gps.get(4), gps.get(3))
+    except Exception:
+        # Non-fatal: EXIF is optional extra metadata; keep whatever was read.
+        pass
+    return fields
+
+
+def _clean_text(value) -> str | None:
+    text = str(value).replace("\x00", "").strip() if value is not None else ""
+    return text or None
+
+
+def _gps_degrees(dms, ref) -> float | None:
+    """Convert EXIF (degrees, minutes, seconds) plus an N/S/E/W reference to signed decimal degrees."""
+    try:
+        degrees, minutes, seconds = (float(part) for part in dms)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    value = degrees + minutes / 60 + seconds / 3600
+    return -value if ref in ("S", "W") else value
 
 
 def _iso_utc(timestamp: float) -> str:

@@ -30,13 +30,14 @@ from db.operations import (
     update_image_file_path,
     upsert_fts_entry,
     upsert_image_data,
+    upsert_partial_fts_entry,
     upsert_text_embedding,
 )
 from image_processing.hashing import compute_hash
 from image_processing.metadata import extract_file_metadata
 from pipeline.error_logger import log_error
 from pipeline.serialisation import serialize_embedding
-from text_processing.formatters import build_search_text
+from text_processing.formatters import build_partial_match_text, build_search_text
 from vlm.analyzer import analyse_image, embed_search_text
 
 # Increment this when the stored metadata schema changes incompatibly.
@@ -147,6 +148,7 @@ def index_image(conn, image_path: Path) -> str:
         upsert_image_data(conn, record)
         upsert_text_embedding(conn, file_id, embedding_bytes, config.OLLAMA_EMBEDDING_MODEL)
         upsert_fts_entry(conn, file_id, search_text)
+        upsert_partial_fts_entry(conn, file_id, build_partial_match_text(payload))
     # ↑ Commit point — image is now considered fully indexed in the database.
 
     return "updated" if is_update else "indexed"

@@ -17,6 +17,9 @@ OLLAMA_EMBEDDING_MODEL: str = _settings.get("embedding_model", "bge-m3")
 OLLAMA_TIMEOUT: int = 300
 OLLAMA_NUM_CTX: int = 8192
 OLLAMA_USE_MMAP: bool = False  # mmap made the VLM's image encoder run out of GPU memory on 8 GB Macs (empty responses)
+OLLAMA_ALL_GPU_LAYERS: int = 99  # Ollama's num_gpu: more layers than any model has, so every layer runs on the GPU (the default split left 22 of 37 on the CPU on an 8 GB Mac)
+OLLAMA_MAX_OUTPUT_TOKENS: int = 2200  # cap on the image-analysis reply; without it a runaway reply fills the whole context window
+OCR_MIN_CONFIDENCE: float = 0.6  # OCR blocks scoring below this are dropped
 
 IMAGE_MAX_LONG_EDGE: int = int(os.getenv("IMAGE_MAX_LONG_EDGE", "1120"))
 IMAGE_JPEG_QUALITY: int = int(os.getenv("IMAGE_JPEG_QUALITY", "85"))
@@ -35,7 +38,7 @@ MARGIN_CONFIDENT: float = 0.08   # diagnostic only (kept for future calibration)
 Z_POOL_SIZE: int = 20            # candidates ranked 2..21 form the background pool for the z-score
 Z_SIGMA_FLOOR: float = 0.02      # guards divide-by-~0 when the pool is unusually homogeneous
 Z_MIN_POOL: int = 5              # below this many pool candidates, skip the z computation
-UNCERTAIN_TOP_K: int = 3         # max candidates sent to the relevance judge per search
+UNCERTAIN_TOP_K: int = 3         # max candidates sent to the relevance judge per search (and so the max results returned)
 JUDGE_CONFIDENCE_MIN: float = 0.7  # minimum judge confidence required to accept a match
 
 
