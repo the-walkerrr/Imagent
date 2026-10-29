@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import scan_and_index
+from scan_and_index import scan_and_index
 from db.operations import get_backlog, get_or_add_root, list_images_for_root
 from pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed

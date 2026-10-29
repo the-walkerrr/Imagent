@@ -12,7 +12,7 @@ import ollama
 from pydantic import ValidationError
 
 import config
-import scan_and_index
+from scan_and_index import scan_and_index
 from db.operations import get_backlog, get_or_add_root, upsert_backlog
 from tests.support import IsolatedHome
 from vlm import analyzer

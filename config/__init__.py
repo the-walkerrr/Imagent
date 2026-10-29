@@ -100,7 +100,7 @@ IMAGE_MAX_LONG_EDGE: int = 1024
 IMAGE_SIZE_MULTIPLE: int = 1  # resized sides are rounded down to a multiple of this; 1 = no rounding
 IMAGE_JPEG_QUALITY: int = 85
 
-SAMPLE_IMAGES_DIR: Path = Path(__file__).parent / "sample_images"  # folder used by benchmarks/all_sample_images.py
+SAMPLE_IMAGES_DIR: Path = Path(__file__).parent.parent / "sample_images"  # folder used by benchmarks/all_sample_images.py
 
 # --- Database and indexing ---------------------------------------------------
 SQLITE_BUSY_TIMEOUT_S: int = 30  # how long a connection waits for another process's write lock
@@ -114,7 +114,12 @@ ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
 
+# --- Launchers ---------------------------------------------------------------
+# What messages tell the user to run, for the OS they are on.
+INSTALL_COMMAND: str = "install.bat" if platform.system() == "Windows" else "sh install.sh"
+RUN_COMMAND: str = "run.bat" if platform.system() == "Windows" else "sh run.sh"
+
 # --- Prompts -----------------------------------------------------------------
-PROMPTS_DIR: Path = Path(__file__).parent / "prompts"
+PROMPTS_DIR: Path = Path(__file__).parent.parent / "prompts"
 ANALYSIS_PROMPT: str = (PROMPTS_DIR / "analysis_prompt.txt").read_text(encoding="utf-8")
 QUERY_PROMPT: str = (PROMPTS_DIR / "query_prompt.txt").read_text(encoding="utf-8")

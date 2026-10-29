@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import search
+from search import search
 from db.operations import get_or_add_root, upsert_text_embedding
 from pipeline.serialisation import serialize_embedding
 from tests.support import IsolatedHome, add_indexed
@@ -77,7 +77,7 @@ class SearchTests(IsolatedHome):
             search.main()
 
     def test_a_search_that_cannot_start_ends_the_session(self):
-        with mock.patch.object(search, "check_ready", side_effect=search.NotReady("Run: python3 install.py")), \
+        with mock.patch.object(search, "check_ready", side_effect=search.NotReady("Run the installer")), \
                 mock.patch.object(sys, "argv", ["search.py", "anything"]), mock.patch("builtins.input") as ask:
             search.main()
         ask.assert_not_called()

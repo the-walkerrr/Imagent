@@ -1,7 +1,7 @@
 """
-pipeline/uninstall.py — Take Imagent off this computer: show what will be lost, ask three times, then delete.
+uninstall/uninstall.py — Take Imagent off this computer: show what will be lost, ask three times, then delete.
 
-Started by uninstall.sh / uninstall.bat with a Python that is not the one in .venv, because it deletes .venv.
+Started by uninstall/uninstall.sh / uninstall/uninstall.bat with a Python that is not the one in .venv, because it deletes .venv.
 Standard library only. It removes:
   * the Ollama models that install.py downloaded (listed in install_record.json); a model you already had
     before Imagent is never removed;
@@ -26,6 +26,9 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
+
+# Make the project root importable when this file is run directly (``python uninstall/uninstall.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 from pipeline.console import make_output_safe, run_cli
@@ -308,7 +311,7 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        sys.exit("[imagent] Uninstalling needs an interactive terminal. Run: sh uninstall.sh (or uninstall.bat on Windows)")
+        sys.exit("[imagent] Uninstalling needs an interactive terminal. Run: sh uninstall/uninstall.sh (or uninstall/uninstall.bat on Windows)")
     if VENV_DIR.exists() and Path(sys.prefix).resolve() == VENV_DIR.resolve():
         sys.exit("[imagent] This is running inside Imagent's own .venv, which it needs to delete. "
                  "Run `deactivate` (or open a new terminal) and start the uninstaller again.")

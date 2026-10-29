@@ -56,7 +56,7 @@ def describe_db_error(exc: Exception, path=None) -> str:
         return "The disk reported an input/output error. If the data lives on an external or network drive, check it is connected."
     if "not a database" in text or "malformed" in text or "corrupt" in text:
         return (f"The Imagent database is damaged: {path}. If you have a copy of it, restore the copy. "
-                "Otherwise rename or delete that file, run install.py again, and scan your folders again. "
+                f"Otherwise rename or delete that file, run {config.INSTALL_COMMAND} again, and scan your folders again. "
                 "Your image files are not affected.")
     return f"The Imagent database reported an error ({type(exc).__name__}: {exc})."
 

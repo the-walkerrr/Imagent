@@ -1,9 +1,9 @@
 @echo off
-rem Imagent launcher for Windows: finds Python 3.9 or newer and runs install.py with it.
+rem Imagent launcher for Windows: finds Python 3.9 or newer and runs install/install.py with it.
 rem It installs nothing; if Python is missing it says how to get it.
 rem Usage: install.bat   (double-click it, or run it in a terminal)
 setlocal
-set "SCRIPT=%~dp0install.py"
+set "SCRIPT=%~dp0install\install.py"
 set "DOUBLE_CLICKED="
 echo %cmdcmdline% | find /i "%~nx0" >nul && set "DOUBLE_CLICKED=1"
 

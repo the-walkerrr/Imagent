@@ -22,16 +22,20 @@ from pathlib import Path
 if sys.version_info < (3, 9):  # before the project's own modules, which need 3.9 just to be imported
     _how = {"Darwin": "brew install python", "Windows": "winget install Python.Python.3.12"}.get(
         platform.system(), "sudo apt install python3 python3-venv (or your package manager)")
+    _installer = "install.bat" if platform.system() == "Windows" else "sh install.sh"
     sys.exit(f"Imagent needs Python 3.9 or newer, and this is Python {platform.python_version()}. "
              f"Install a newer one (for example: {_how}, or https://www.python.org/downloads/), "
-             "then run install.py with it, for example: python3.12 install.py")
+             f"then run it again: {_installer}")
+
+# Make the project root importable when this file is run directly (``python install/install.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config as app_config
 from db.connection import init_db
 from db.operations import get_model_settings, set_model_settings
 from pipeline.console import make_output_safe, run_cli
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_DIR / ".venv"
 REQUIREMENTS = PROJECT_DIR / "requirements.txt"
 CONFIG_PATH = app_config.CONFIG_PATH
@@ -299,7 +303,7 @@ def _pip_install(python: str) -> None:
     cmd = [python, "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS)]
     if not _succeeds(cmd):
         fail("Could not install the required packages (the messages above say which one). Check your internet connection and "
-             f"run install.py again. If a package has no version for your Python ({platform.python_version()}), try another Python, "
+             f"run {app_config.INSTALL_COMMAND} again. If a package has no version for your Python ({platform.python_version()}), try another Python, "
              "such as 3.11 or 3.12.")
 
 
@@ -324,7 +328,7 @@ def _sync_packages(python: str) -> None:
             say(f"  - {item}")
     say("They go into .venv only; Python and the packages elsewhere on your computer are not touched.")
     if not _confirm("Install them now? (this can take a minute)"):
-        fail("The packages are required. Run install.py again when you are ready.")
+        fail(f"The packages are required. Run {app_config.INSTALL_COMMAND} again when you are ready.")
     _pip_install(python)
 
 
@@ -334,7 +338,7 @@ def _prepare_venv() -> None:
     if python.exists() and not _venv_works(python):
         say(".venv exists but its Python does not work (it was probably made by a Python that has since been removed or updated).")
         if not _confirm("Delete .venv and create it again?"):
-            fail("Delete the .venv folder yourself, then run install.py again.")
+            fail(f"Delete the .venv folder yourself, then run {app_config.INSTALL_COMMAND} again.")
         shutil.rmtree(VENV_DIR, ignore_errors=True)
     if not python.exists():
         say("Creating a private Python environment in .venv (one time only)…")
@@ -351,7 +355,7 @@ def ensure_packages() -> None:
     global questionary, STYLE
     if not _in_project_venv():
         if RELAUNCH_FLAG in sys.argv:  # the relaunch did not end up inside .venv; stop rather than loop
-            fail("Could not start inside .venv. Delete the .venv folder and run install.py again.")
+            fail(f"Could not start inside .venv. Delete the .venv folder and run {app_config.INSTALL_COMMAND} again.")
         _prepare_venv()
         result = subprocess.run([str(_venv_python()), str(Path(__file__).resolve()), RELAUNCH_FLAG, *sys.argv[1:]])
         sys.exit(result.returncode)
@@ -422,12 +426,12 @@ def ensure_ollama_current() -> None:
     say(f"Your Ollama is version {'.'.join(map(str, version))}, but Imagent needs {needed} or newer.", "fg:ansimagenta")
     cmd = install_command(upgrade=True)
     if cmd is None:
-        fail("Please update Ollama from https://ollama.com/download, then run install.py again.")
+        fail(f"Please update Ollama from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     say(f"Update command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
     if not ask(questionary.confirm("Update Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail(f"Imagent needs Ollama {needed} or newer. Update it from https://ollama.com/download, then run install.py again.")
+        fail(f"Imagent needs Ollama {needed} or newer. Update it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     if not _succeeds(cmd):
-        fail("The Ollama update did not finish. Update it from https://ollama.com/download, then run install.py again.")
+        fail(f"The Ollama update did not finish. Update it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     say("✓ Ollama updated. If the Ollama app is open, quit and reopen it so it uses the new version.", "fg:green")
 
 
@@ -439,12 +443,12 @@ def ensure_ollama_installed() -> None:
     say("Ollama is the program that runs the AI models on your computer. It is not installed yet.", "fg:ansimagenta")
     cmd = install_command()
     if cmd is None:
-        fail("Please install Ollama from https://ollama.com/download, then run install.py again.")
+        fail(f"Please install Ollama from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     say(f"Install command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
     if not ask(questionary.confirm("Install Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail("Ollama is required. Install it from https://ollama.com/download, then run install.py again.")
+        fail(f"Ollama is required. Install it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     if not _succeeds(cmd):
-        fail("The Ollama install did not finish. Install it from https://ollama.com/download, then run install.py again.")
+        fail(f"The Ollama install did not finish. Install it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
     if shutil.which("ollama"):
         say("✓ Ollama installed.", "fg:green")
     else:
@@ -661,7 +665,7 @@ def ollama_client(host: str):
                 yield None
                 return
             if not shutil.which("ollama"):
-                say("✗ The `ollama` command was not found. Open a new terminal window and run install.py again.", RED)
+                say(f"✗ The `ollama` command was not found. Open a new terminal window and run {app_config.INSTALL_COMMAND} again.", RED)
                 yield None
                 return
             say("Starting Ollama in the background…")
@@ -674,7 +678,7 @@ def ollama_client(host: str):
         if version is not None and version < MIN_OLLAMA_VERSION:
             say(f"✗ The Ollama at {host} is version {'.'.join(map(str, version))}, but Imagent needs "
                 f"{'.'.join(map(str, MIN_OLLAMA_VERSION))} or newer. Update it (on that computer, if it is another one), "
-                "then run install.py again.", RED)
+                f"then run {app_config.INSTALL_COMMAND} again.", RED)
             yield None
             return
         yield client
@@ -735,7 +739,7 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
             problems[name] = f"could not be inspected ({type(exc).__name__}: {exc})."
             continue
         if capabilities is None:
-            problems[name] = "cannot be checked because your Ollama is too old. Update Ollama, then run install.py again."
+            problems[name] = f"cannot be checked because your Ollama is too old. Update Ollama, then run {app_config.INSTALL_COMMAND} again."
         elif needed not in capabilities:
             problems[name] = f"is not {what}. Ollama lists its abilities as: {', '.join(capabilities) or 'none'}."
     if problems:
@@ -896,7 +900,7 @@ def manage_models(settings: dict, host: str) -> None:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        fail("Setup needs an interactive terminal. Run it directly: python3 install.py")
+        fail(f"Setup needs an interactive terminal. Run it directly: {app_config.INSTALL_COMMAND}")
 
     if RELAUNCH_FLAG not in sys.argv:
         step("Your computer")

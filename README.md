@@ -25,7 +25,7 @@ install.bat            # Windows (double-click it, or run it in a terminal)
 The launcher is the only thing you need to run to set Imagent up. It finds a Python 3.9 or newer and
 starts `install.py` with it; if there is none, it prints how to install one for your OS and stops
 (open a new terminal after installing). It changes nothing else. If you already have Python you can run
-`python3 install.py` (or `py install.py` on Windows) directly.
+`python3 install/install.py` (or `py install/install.py` on Windows) directly.
 
 `install.py` is an interactive first-run script that works
 the same on macOS, Windows and Linux. It checks your Python version, creates a `.venv`, and
@@ -50,12 +50,19 @@ model that was removed from Ollama.
 Then:
 
 ```bash
-python scan_and_index.py [folder]       # find new/moved/changed/deleted images, then offer to index everything waiting
-python search.py "your query"  # search the indexed images
+sh run.sh          # macOS / Linux
+run.bat            # Windows (double-click it, or run it in a terminal)
 ```
 
-`scan_and_index.py` and `search.py` prompt for the folder or query when it is not given.
-Run them with the Python from `.venv`.
+It asks what to do:
+
+1. Search your images: asks for a query and shows the closest images.
+2. Scan folders and index images: asks for a folder, finds new/moved/changed/deleted images, then offers to index everything waiting.
+3. Uninstall Imagent (shown in red): starts the uninstaller described below.
+
+Search and scan run inside `.venv`; the uninstaller does not, because it deletes `.venv`.
+
+You can also run `search/search.py` or `scan_and_index/scan_and_index.py [folder]` yourself with the Python from `.venv`.
 
 You can scan several folders; they share one index and one search. Scanning a folder only
 updates that folder's images. Folders that contain or lie inside an already scanned folder are
@@ -96,8 +103,8 @@ folder; attach that file when you report it.
 ## Uninstalling
 
 ```bash
-sh uninstall.sh        # macOS / Linux
-uninstall.bat          # Windows
+sh uninstall/uninstall.sh        # macOS / Linux
+uninstall\uninstall.bat          # Windows
 ```
 
 This takes Imagent off the computer and leaves only the project's source files. It first shows what you
@@ -121,14 +128,16 @@ project folder yourself if you no longer want the source. Like `install.sh`, the
 
 | Path | Purpose |
 | --- | --- |
-| `install.sh`, `install.bat`, `install.py`, `uninstall.sh`, `uninstall.bat`, `scan_and_index.py`, `search.py` | Command-line entry points |
+| `install.sh`, `install.bat` | Setup launchers; they start `install/install.py` |
+| `run.sh`, `run.bat` | Menu launchers: choose search, scan and index, or uninstall, then they run it |
+| `install/`, `search/`, `scan_and_index/`, `uninstall/` | One folder per command-line flow: its Python script (`uninstall/` also holds its `.sh` / `.bat` launcher) |
 | `tests/` | Automated tests (standard library only; need no Ollama) |
-| `config.py` | Every setting (no environment variables are read), the per-OS storage paths and prompt loading |
+| `config/` | Every setting (no environment variables are read), the per-OS storage paths and prompt loading |
 | `prompts/` | Prompt templates sent to the model |
 | `db/` | SQLite connection, database schema (`schema.sql`), schema versioning and queries |
 | `image_processing/` | Hashing, metadata/EXIF, OCR, preprocessing, colour features |
 | `text_processing/` | Cleaning and search-text formatting |
-| `pipeline/` | Folder discovery, validation, serialisation, error logging, progress display, run lock, command-line wrapper, the uninstaller (`uninstall.py`) |
+| `pipeline/` | Folder discovery, validation, serialisation, error logging, progress display, run lock, command-line wrapper |
 | `vlm/` | Ollama client and readiness check, image analysis, embeddings, query understanding, Pydantic models for the model replies (`response_format.py`) |
 
 ## Tests
@@ -141,7 +150,7 @@ The tests use a temporary folder for the database and never touch your real inde
 
 ## Configuration
 
-Every setting is a constant in `config.py`; no environment variables or `.env` file are read.
+Every setting is a constant in `config/__init__.py`; no environment variables or `.env` file are read.
 Edit the file to change one. The ones you are most likely to tune:
 
 | Setting | Default | Meaning |

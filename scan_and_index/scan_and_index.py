@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scan_and_index.py — Imagent: scan folders for images, then index them.
+scan_and_index/scan_and_index.py — Imagent: scan folders for images, then index them.
 
 Scanning compares a folder with the index and queues the new or modified images (an image that moved or
 was renamed keeps its record, and one that disappeared is forgotten). Indexing then takes every file queued
@@ -27,43 +27,50 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-import httpx
-import ollama
+# Make the project root importable when this file is run directly (``python scan_and_index/scan_and_index.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config
-from db.connection import describe_db_error, init_db
-from db.operations import (
-    delete_backlog,
-    delete_backlog_paths,
-    delete_images,
-    get_backlog,
-    get_backlog_paths_for_root,
-    get_exhausted_backlog,
-    get_or_add_root,
-    list_images_for_root,
-    list_roots,
-    lookup_by_path,
-    mark_root_scanned,
-    record_backlog_failure,
-    update_image_location,
-    update_image_modified_at,
-    upsert_backlog,
-    upsert_image_data,
-    upsert_text_embedding,
-)
-from image_processing import ocr
-from image_processing.hashing import compute_hash
-from image_processing.metadata import extract_file_metadata, iso_utc
-from pipeline.console import make_output_safe, run_cli
-from pipeline.discovery import discover
-from pipeline.error_logger import log_error
-from pipeline.locking import AlreadyRunning, single_instance
-from pipeline.progress import Progress
-from pipeline.serialisation import serialize_embedding
-from pipeline.validation import find_overlapping_root, validate_folder
-from text_processing.formatters import build_search_text
-from vlm.analyzer import analyse_image, embed_search_text
-from vlm.client import NotReady, check_ready, unload_model
+try:
+    import httpx
+    import ollama
+
+    import config
+    from db.connection import describe_db_error, init_db
+    from db.operations import (
+        delete_backlog,
+        delete_backlog_paths,
+        delete_images,
+        get_backlog,
+        get_backlog_paths_for_root,
+        get_exhausted_backlog,
+        get_or_add_root,
+        list_images_for_root,
+        list_roots,
+        lookup_by_path,
+        mark_root_scanned,
+        record_backlog_failure,
+        update_image_location,
+        update_image_modified_at,
+        upsert_backlog,
+        upsert_image_data,
+        upsert_text_embedding,
+    )
+    from image_processing import ocr
+    from image_processing.hashing import compute_hash
+    from image_processing.metadata import extract_file_metadata, iso_utc
+    from pipeline.console import make_output_safe, run_cli
+    from pipeline.discovery import discover
+    from pipeline.error_logger import log_error
+    from pipeline.locking import AlreadyRunning, single_instance
+    from pipeline.progress import Progress
+    from pipeline.serialisation import serialize_embedding
+    from pipeline.validation import find_overlapping_root, validate_folder
+    from text_processing.formatters import build_search_text
+    from vlm.analyzer import analyse_image, embed_search_text
+    from vlm.client import NotReady, check_ready, unload_model
+except ModuleNotFoundError as exc:
+    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
+             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
 
 try:
     import questionary
@@ -759,7 +766,7 @@ def main() -> None:
     ):
         run()
     else:
-        print("[imagent] Skipping indexing. Run scan_and_index.py later to process the backlog.")
+        print(f"[imagent] Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
 
 
 if __name__ == "__main__":

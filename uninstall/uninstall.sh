@@ -1,15 +1,14 @@
 #!/bin/sh
 # Imagent uninstaller launcher for macOS and Linux: finds Python 3.9 or newer and runs the uninstaller with it.
 # The uninstaller shows what will be lost and asks three times before it deletes anything.
-# Usage: sh uninstall.sh
+# Usage: sh uninstall/uninstall.sh
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-cd "$DIR" || exit 1
 
 for candidate in python3 python python3.13 python3.12 python3.11 python3.10 python3.9; do
     if command -v "$candidate" >/dev/null 2>&1 &&
         "$candidate" -c "import sys; sys.exit(sys.version_info < (3, 9))" >/dev/null 2>&1; then
-        exec "$candidate" -B -m pipeline.uninstall "$@"
+        exec "$candidate" -B "$DIR/uninstall.py" "$@"
     fi
 done
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-search.py — Imagent natural-language image search.
+search/search.py — Imagent natural-language image search.
 
 Given a natural language query, returns the three indexed images whose descriptions are
 closest to it, best first.
@@ -25,22 +25,30 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
-import numpy as np
+# Make the project root importable when this file is run directly (``python search/search.py``).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config
-from db.connection import init_db
-from db.operations import (
-    count_embeddings,
-    get_image_summary,
-    iter_embeddings,
-)
-from pipeline.console import make_output_safe, run_cli
-from pipeline.error_logger import log_error
-from pipeline.locking import is_running
-from pipeline.progress import SearchProgress
-from vlm.analyzer import embed_search_text, understand_query
-from vlm.client import NotReady, check_ready, load_model, other_models_running
+try:
+    import numpy as np
+
+    import config
+    from db.connection import init_db
+    from db.operations import (
+        count_embeddings,
+        get_image_summary,
+        iter_embeddings,
+    )
+    from pipeline.console import make_output_safe, run_cli
+    from pipeline.error_logger import log_error
+    from pipeline.locking import is_running
+    from pipeline.progress import SearchProgress
+    from vlm.analyzer import embed_search_text, understand_query
+    from vlm.client import NotReady, check_ready, load_model, other_models_running
+except ModuleNotFoundError as exc:
+    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
+             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +122,7 @@ def start_session() -> tuple | None:
 
         if count_embeddings(conn) == 0:
             progress.fail()
-            progress.say("No indexed images found. Run scan_and_index.py first.")
+            progress.say(f"No indexed images found. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" first.")
             return None
 
         if _another_model_is_running(client, settings, progress):
@@ -209,7 +217,7 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             })
         if missing:
             progress.say(f"Skipped {missing} closer match(es) whose file is missing "
-                         "(is a drive disconnected?). Run scan_and_index.py to bring the index up to date.")
+                         f"(is a drive disconnected?). Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" to bring the index up to date.")
         return results
     finally:
         progress.close()

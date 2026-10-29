@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_DIRS = {".venv", ".git", "benchmark_results", "__pycache__", "sample_images"}
 MODULES = [
-    "config", "vlm.response_format", "install", "scan_and_index", "search", "pipeline.uninstall",
+    "config", "vlm.response_format", "install.install", "scan_and_index.scan_and_index", "search.search", "uninstall.uninstall",
     "db.connection", "db.operations", "pipeline.console", "pipeline.discovery", "pipeline.locking",
     "pipeline.progress", "pipeline.validation", "pipeline.error_logger", "pipeline.serialisation",
     "image_processing.metadata", "image_processing.ocr", "image_processing.preprocess", "image_processing.features",

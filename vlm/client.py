@@ -143,10 +143,10 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
     """
     settings = get_model_settings(conn)
     if settings is None:
-        raise NotReady("Imagent is not set up yet. Run: python3 install.py")
+        raise NotReady(f"Imagent is not set up yet. Run: {config.INSTALL_COMMAND}")
     if not config.OLLAMA_HOST:
         raise NotReady("Imagent's settings file (config.json) is missing or damaged, so it does not know where Ollama is. "
-                       "Run: python3 install.py. It restores the address; your models and index are kept.")
+                       f"Run: {config.INSTALL_COMMAND}. It restores the address; your models and index are kept.")
 
     client = make_client()
     if not is_reachable(client) and is_local(config.OLLAMA_HOST) and shutil.which("ollama"):
@@ -171,7 +171,7 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
         name = settings[f"{role}_model"]
         digest = installed.get(name)
         if digest is None:
-            raise NotReady(f"The {role} model '{name}' is not installed in Ollama. Run: python3 install.py")
+            raise NotReady(f"The {role} model '{name}' is not installed in Ollama. Run: {config.INSTALL_COMMAND}")
         stored = settings[f"{role}_digest"]
         if stored and digest != stored:
             say(f"[imagent] Warning: '{name}' is not the same version it was when you set up Imagent. "

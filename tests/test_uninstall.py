@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import config
-import install
+from install import install
 from db.operations import get_or_add_root
-from pipeline import uninstall
+from uninstall import uninstall
 from tests.support import IsolatedHome, add_indexed
 
 
