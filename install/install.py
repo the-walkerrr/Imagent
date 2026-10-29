@@ -52,6 +52,7 @@ POINTER = INDENT + "»"
 
 ASK_AI = "Not sure? Ask AI. Copy the prompt and give it to your favorite LLM."
 COPIED = "✓ Prompt copied to clipboard. Paste it into your favorite LLM. (Select again to copy once more)"
+PASTE_SET = "Paste the AI's answer: one set of three models (vision, text, embedding)."
 
 questionary = None  # imported in step 2, once the packages are available
 STYLE = None  # prompt colours, built together with the questionary import
@@ -166,47 +167,37 @@ def system_details() -> str:
 # --- AI prompt ----------------------------------------------------------------
 
 def build_ai_prompt() -> str:
-    return f"""I need to choose AI models for a local image search tool that runs on my computer through Ollama. Speed and accuracy matter equally: I may index thousands of images, so a model that is too slow is as wrong a choice as one that describes images or understands queries inaccurately.
+    return f"""I need to choose AI models for a local image search tool that runs on my computer through Ollama. Balance speed and accuracy, but prefer accuracy whenever the speed gain is small.
 
 ## My computer
 {system_details()}
 
-## The models
-- VLM (vision model): looks at each image once and fills in a JSON schema: four detailed paragraphs (scene, objects and where they are, people with their clothing and actions, colors/light/mood), an exact people count, 8 to 10 tags, a category, and optional weather, time of day and lighting. Text in images is read by a separate OCR step, so reading text is not needed. Search quality depends directly on how complete and correct these descriptions are, and a wrong or invented detail makes an image unfindable or wrongly found. Used only while indexing, which may cover thousands of images, so its speed matters as much as its accuracy.
-- Embedding model: turns the stored descriptions (about 500 tokens each) and my search queries into vectors. Queries may be in several languages. Used while indexing and while searching.
-- Text model: fixes typos in my search query and writes a short description of the image I am looking for, which is then matched against the stored descriptions. It never sees images. It must follow detailed instructions exactly. Used only while searching: one request per search.
-
-## What "best" means
-- Rank every group by the best balance of speed and accuracy for the job above, not by size, popularity or release date. Use published benchmarks and the model's own page as evidence (for example MMMU, DocVQA, MMBench or captioning scores and tokens per second for the VLM; MTEB retrieval scores and speed for the embedding model; instruction-following scores and reply time for the text model).
-- Speed targets: a VLM reply of a few seconds per image, and never more than about 30 seconds; a text model reply within about 10 seconds. Do not pick a model that is much slower than another for only a small gain in accuracy, and do not pick one that is much less accurate for only a small gain in speed.
-- Within a memory budget a larger model at 4-bit quantization usually beats a smaller one at 8-bit, and a mixture-of-experts model can be both fast and accurate. Never go below 4-bit.
-- An older model is fine if it balances speed and accuracy better than the newer ones that fit. Only models that are still available and maintained.
+## The three models
+- Vision model: looks at each image once and writes a JSON description (scene, objects, people, colors and mood, tags). A separate OCR step reads text in images. The descriptions must be accurate, and I may index thousands of images, so speed matters too.
+- Text model: fixes typos in my search query and writes a short description of the image I am looking for. It never sees images. One request per search.
+- Embedding model: turns the stored descriptions (about 500 tokens each) and my search queries (possibly in several languages) into vectors. Used when indexing and when searching.
 
 ## Rules
-- Search the web now. Do not rely on your memory.
-- Only models from https://ollama.com/library. Give the exact tag, and only if you confirmed on the model's page that `ollama pull <name>:<tag>` works. Never guess or invent a tag.
-- VLM: needs the "vision" capability, must follow a JSON schema reliably, and must not be a thinking-only (reasoning) model.
-- Embedding model: needs the "embedding" capability, never a chat model, with a context of at least 1024 tokens and strong multilingual retrieval.
-- Text model: needs the "completion" capability (a normal text chat model), must follow a JSON schema reliably and must not be a thinking-only (reasoning) model. It may be the same model as the VLM, but a stronger text-only model is usually better.
-- Memory-mapping is turned off (Ollama option `use_mmap=false`): each model's full weights are loaded into memory at once and nothing is paged in from disk later. A model that only runs because of lazy loading or swapping will not work, so size everything to fit exactly.
-- Indexing and searching never run at the same time, so the VLM and the text model are never needed together. Each of these two groups must fit entirely at the same time in about 85% of my VRAM (or RAM if there is no dedicated GPU; with shared memory, the part the GPU can use):
-  - indexing: the VLM + the embedding model, including the VLM's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens and the VLM's image-encoder working memory for images up to {app_config.IMAGE_MAX_LONG_EDGE} px on the long edge (it is reserved for a worst-case image, so include all of it);
-  - searching: the text model + the embedding model, including the text model's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens.
-- Only recommend options that fit entirely on the GPU, with no CPU offload and no swapping. If an option needs either, leave it out.
-- Work out the memory sums and compare the candidates before you answer, but do not show that work.
+1. Search the web now. Do not rely on your memory.
+2. Only models from https://ollama.com/library, each with an exact tag that you confirmed on its page so that `ollama pull <name>:<tag>` works. Never guess or invent a tag.
+3. Capabilities: the vision model needs "vision", the text model needs "completion", the embedding model needs "embedding" (context of at least 1024 tokens, strong multilingual retrieval). The vision and text models must follow a JSON schema reliably and must not be thinking-only (reasoning) models. The text model may be the same model as the vision model.
+4. Quantization of 4-bit or better, never lower.
+5. Speed: a vision reply within a few seconds per image (never more than about 30 seconds) and a text reply within about 10 seconds. If two models are within about 30% of each other in speed, choose the more accurate one. Choose the faster one only when it is clearly faster (about twice as fast) and only slightly less accurate. Judge by published benchmarks and the model's own page, not by size, popularity or release date; an older maintained model is fine if the balance is better.
+6. Memory: model weights are fully loaded (no memory-mapping). Every set must fit entirely on the GPU, with no CPU offload and no swapping, in about 85% of my VRAM (or RAM if there is no dedicated GPU; with shared memory, the part the GPU can use). Check both cases; the vision and text models are never loaded together:
+   - indexing: vision model + embedding model, including the vision model's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens and its image-encoder working memory for images up to {app_config.IMAGE_MAX_LONG_EDGE} px on the long edge (reserved for a worst-case image);
+   - searching: text model + embedding model, including the text model's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens.
+7. Do the memory sums yourself and do not show the working.
 
-## Answer format
-Reply with exactly these nine lines and nothing else: no table, no explanation, no markdown, no code block.
-The option with the best balance of speed and accuracy that fits comes first in each group. Every value is `<name>:<tag>`. Write NONE for an option that does not exist or that you could not verify.
-VLM_1=
-VLM_2=
-VLM_3=
-EMBEDDING_1=
-EMBEDDING_2=
-EMBEDDING_3=
-TEXT_1=
-TEXT_2=
-TEXT_3=
+## Answer
+Give three sets. A set is one complete choice: a vision model, a text model and an embedding model that work together. Set 1 is the best balance and the one you recommend; set 2 is a faster or lighter alternative; set 3 is a more accurate one that still fits. Only give a set if you verified all three of its models; if there are fewer than three, give fewer and say so.
+
+Reply with exactly these three parts, in this order, and nothing else:
+1. A table with one row per set and the columns: Set, Vision model, Text model, Embedding model, Memory (indexing / searching), Speed, Accuracy (the scores you used).
+2. One or two sentences per set on the trade-offs against the other two sets: what I gain and what I give up.
+3. The heading "Copy one set", then one code block per set (plain, no language name). Each code block holds one line and nothing else: the three model names, in the order vision, text, embedding, separated by commas.
+   - Exact shape: visionname:7b,textname:8b,embeddingname:335m
+   - Forbidden in that line: spaces, labels, numbering, bullets, quotes, brackets, JSON and line breaks.
+   - Before you reply, check that every such line has exactly two commas and three `name:tag` values.
 """
 
 
@@ -482,6 +473,44 @@ def _ask_name(label: str, default: str = "") -> str:
         instruction="(paste it here, leave empty to clear) ")))
 
 
+def parse_model_set(raw: str):
+    """(vlm, embedding, text_model) from one pasted set, or None unless it holds exactly three model names.
+
+    The AI is asked for ``vision-name:tag,text-name:tag,embedding-name:tag`` on one line, in that order. Commas, semicolons,
+    spaces and line breaks all separate the names, and backticks, quotes and brackets around them are ignored."""
+    names = [name for name in re.split(r"[,;|\s]+", re.sub(r"[`'\"*()\[\]]", "", raw)) if name]
+    if len(names) != 3 or any(_validate_model(name) is not True for name in names):
+        return None
+    vlm, text_model, embedding = names
+    return vlm, embedding, text_model
+
+
+def _discard_pending_input() -> None:
+    """Drop the keys the prompt read ahead but did not use, such as the rest of a multi-line paste (a terminal without
+    bracketed paste submits only the first line). prompt_toolkit would otherwise hand them to the next menu."""
+    try:
+        from prompt_toolkit.input import create_input
+        from prompt_toolkit.input.typeahead import clear_typeahead
+        clear_typeahead(create_input())
+    except Exception:  # best effort: if it cannot be cleared the leftovers are simply replayed
+        pass
+
+
+def _paste_set():
+    """Ask for one set from the AI's answer. Returns (vlm, embedding, text_model), or None when it is left empty or unreadable."""
+    pasted = ask(questionary.text(
+        "Paste one set:", qmark=QMARK, style=STYLE, instruction="(leave empty to go back) "))
+    if "\n" not in pasted:
+        _erase_last_line()
+    if not pasted.strip():
+        return None
+    names = parse_model_set(pasted)
+    if names is None:
+        _discard_pending_input()
+        say("✗ Parsing failed. Please try again, or write the model names manually.", RED)
+    return names
+
+
 def _erase_last_line() -> None:
     """Remove the answered prompt line so the next menu redraws in the same place."""
     print("\033[1A\033[2K", end="", flush=True)
@@ -495,14 +524,17 @@ def _field_choice(label: str, value: str, key: str):
 
 
 def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
-    """One menu: open any field, copy the AI prompt, or continue once all names are set.
+    """One menu: open any field, copy the AI prompt (which adds a row on top to paste its answer), or continue once all names are set.
 
     Returns (vlm, embedding, text_model)."""
     say("Fill in all three model names, then choose Continue.\n")
-    copied = False
+    copied = asked = pasted = False
     while True:
         ready = bool(vlm and embedding and text_model)
-        choices = [
+        choices = []
+        if asked and not pasted:  # only once the prompt was copied, and until a set was read
+            choices += [questionary.Choice(f"○ {PASTE_SET}", value="paste"), questionary.Separator()]
+        choices += [
             _field_choice("VLM model:      ", vlm, "vlm"),
             _field_choice("Embedding model:", embedding, "embedding"),
             _field_choice("Text model:     ", text_model, "text"),
@@ -512,7 +544,8 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
             questionary.Choice("○ Continue" if ready else "Continue", value="continue",
                                disabled=None if ready else "enter all three model names first"),
         ]
-        default = "continue" if ready else next(key for key, value in (("vlm", vlm), ("embedding", embedding), ("text", text_model)) if not value)
+        default = "continue" if ready else "paste" if asked and not pasted else next(
+            key for key, value in (("vlm", vlm), ("embedding", embedding), ("text", text_model)) if not value)
         choice = ask(questionary.select(
             "What would you like to do?", choices=choices, default=default,
             qmark=QMARK, pointer=POINTER, style=STYLE))
@@ -521,6 +554,12 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
         _erase_last_line()
         if choice == "ask":
             copied = offer_prompt_copy()
+            asked = True
+        elif choice == "paste":
+            names = _paste_set()
+            if names:
+                vlm, embedding, text_model = names
+                pasted = True
         elif choice == "vlm":
             vlm = _ask_name("VLM model name:", vlm)
             _erase_last_line()
