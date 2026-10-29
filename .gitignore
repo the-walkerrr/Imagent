@@ -1,9 +1,21 @@
-.env
-__pycache__
-.DS_Store
+# Virtual environment
 .venv
-temp.json
+
+# Python
+__pycache__
+*.py[cod]
+
+# OS
+.DS_Store
+
+# Benchmark output
+benchmark_results/
+
+# Local tooling
 .agents
-Response
 .claude/settings.local.json
 .claude/scripts/
+
+# Local benchmarks and their sample images
+benchmarks/
+sample_images/

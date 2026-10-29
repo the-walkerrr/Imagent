@@ -5,7 +5,10 @@ Exits the process immediately with a clear error message if the path is unusable
 so downstream code can assume the root is valid and readable.
 """
 
+from __future__ import annotations
+
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -41,3 +44,25 @@ def validate_folder(raw_path: str) -> Path:
         sys.exit(1)
 
     return path
+
+
+def _comparable(path: str) -> str:
+    """Normalise a path string for comparing two folders on this OS."""
+    # Windows and macOS file systems are case-insensitive by default; Linux's are case-sensitive.
+    if platform.system() in ("Windows", "Darwin"):
+        path = os.path.normcase(path).casefold()
+    return path.rstrip(os.sep)
+
+
+def find_overlapping_root(root: Path, known_roots: list[str]) -> str | None:
+    """Return a known root that contains *root* or lies inside it, or None.
+
+    The same folder is not an overlap (that is a rescan). Nested folders are rejected
+    because one file would then belong to two roots.
+    """
+    new = _comparable(str(root))
+    for known in known_roots:
+        old = _comparable(known)
+        if new != old and (new.startswith(old + os.sep) or old.startswith(new + os.sep)):
+            return known
+    return None

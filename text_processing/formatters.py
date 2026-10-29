@@ -1,6 +1,5 @@
-from VLMResponseFormat import ImagePayload
+from vlm.response_format import ImagePayload
 from text_processing.cleaners import (
-    dedupe_preserve_order,
     normalize_whitespace,
     normalize_terms,
     lead_sentence,
@@ -9,8 +8,6 @@ from text_processing.cleaners import (
 )
 
 def format_objects(payload: ImagePayload, seen: set[str]) -> list[str]:
-    if not payload.objects:
-        return []
     lines: list[str] = []
     for item in payload.objects:
         name = normalize_whitespace(item)
@@ -38,8 +35,6 @@ def format_scene(payload: ImagePayload) -> list[str]:
     if payload.lighting:
         lighting = payload.lighting.replace("_", " ").lower()
         items.append(f"{lighting} light")
-    if not items:
-        return []
     return items
 
 def format_entities(payload: ImagePayload, seen: set[str]) -> list[str]:
@@ -75,11 +70,6 @@ def format_tags(payload: ImagePayload, seen: set[str]) -> list[str]:
         seen.add(canonical)
         lines.append(tag)
     return lines
-
-def build_partial_match_text(payload: ImagePayload) -> str:
-    """Text matched by substring (visible text, landmarks) in the trigram index."""
-    parts = [normalize_whitespace(part) for part in payload.visible_text + payload.landmarks]
-    return "\n".join(dedupe_preserve_order([part for part in parts if part]))
 
 def build_search_text(payload: ImagePayload) -> str:
     seen: set[str] = set()

@@ -4,7 +4,7 @@ Analyze this image for a search index and fill the fields. Only report what is c
 - objects_and_layout: 3 to 5 sentences naming every visible object and where it is (left, right, center, foreground, background).
 - people_details: 2 to 4 sentences: the exact number of people, their clothing, actions and expressions. If none, say so.
 - colors_light_mood: 2 to 3 sentences on the main colors, lighting, weather, time-of-day cues and the mood.
-- primary_category: photo for camera pictures, screenshot for app or website screens, document for pages and receipts, infographic for charts and graphs.
+- primary_category: photo for camera pictures, screenshot for app or website screens, document for pages and receipts, artwork for drawings, paintings and renders, meme for images made to be shared as a joke, infographic for charts and graphs.
 - objects: distinct physical things you can see, no duplicates.
 - people_count: the exact number of people visible, 0 if none.
 - landmarks: only famous named places or monuments, otherwise an empty list.

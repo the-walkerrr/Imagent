@@ -1,58 +1,86 @@
 from __future__ import annotations
 
+import re
+from typing import Callable
+
 import ollama
 import config
-from VLMResponseFormat import ImageAnalysis, ImagePayload, QueryUnderstanding, RelevanceVerdict
+from pydantic import ValidationError
+from vlm.response_format import ImageAnalysis, ImagePayload, QueryUnderstanding
 from image_processing.features import extract_image_features
 from image_processing.ocr import extract_text_blocks
 from image_processing.preprocess import preprocess_image
 from text_processing.cleaners import normalize_terms
 
-# Words in the description that back up a time_of_day value from the model.
+# Words in the description that back up a time_of_day / weather value from the model.
 _TIME_OF_DAY_WORDS = {
     "morning": ("morning", "sunrise", "dawn"),
     "afternoon": ("afternoon", "midday", "noon"),
     "evening": ("evening", "sunset", "dusk"),
-    "night": ("night",),
-    "golden_hour": ("golden hour",),
+    "night": ("night", "nighttime", "midnight"),
+    "golden_hour": ("golden hour", "golden-hour"),
+}
+_WEATHER_WORDS = {
+    "sunny": ("sunny", "sun", "sunlight", "sunshine", "clear sky", "clear skies"),
+    "cloudy": ("cloudy", "cloud", "clouds", "overcast"),
+    "rainy": ("rainy", "rain", "raining", "drizzle", "showers"),
+    "snowy": ("snowy", "snow", "snowing", "snowfall"),
+    "foggy": ("foggy", "fog", "mist", "misty", "haze", "hazy"),
 }
 
-def analyse_image(image_path: str) -> ImagePayload:
-    client = ollama.Client(host=config.OLLAMA_HOST)
+
+def _is_stated(text: str, words: tuple[str, ...]) -> bool:
+    """True if one of ``words`` appears in ``text`` as a whole word (so "night" does not match "nightstand")."""
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
+
+
+def analyse_image(client: ollama.Client, model: str, image_path: str,
+                  on_stage: Callable[[str], None] = lambda stage: None) -> ImagePayload:
+    """Analyse one image; ``on_stage`` is told what is being done, before each step."""
+    on_stage("preparing image")
     image_bytes = preprocess_image(image_path)
-    print(f"[imagent] Sending image to Ollama model: {config.OLLAMA_MODEL} @ {config.OLLAMA_HOST} …")
-    analysis = _request_analysis(client, image_bytes)
+    on_stage("analysing image")
+    analysis = _request_analysis(client, model, image_bytes)
+    on_stage("reading text in image")
     return _build_payload(analysis, extract_text_blocks(image_path), extract_image_features(image_path))
 
-def _request_analysis(client: ollama.Client, image_bytes: bytes) -> ImageAnalysis:
-    """Ask the VLM to analyse the image, with every layer on the GPU first.
+def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes) -> ImageAnalysis:
+    """Ask the model to describe the image; if its reply is not valid for the schema, tell it what was wrong and ask again.
 
-    If that attempt fails (an empty or invalid reply, or Ollama refusing the load, e.g. when the
-    model does not fit in GPU memory), retry once with Ollama's own GPU/CPU split.
+    A reply can be cut off (it hit the output cap) or have the wrong shape. The asks after the first use a
+    higher temperature, because at temperature 0 the same input would give the same bad reply.
     """
-    try:
-        return _chat_for_analysis(client, image_bytes, {"num_gpu": config.OLLAMA_ALL_GPU_LAYERS})
-    except (ValueError, ollama.ResponseError) as exc:
-        print(f"[imagent] Analysis failed with all layers on the GPU ({type(exc).__name__}); retrying with Ollama's default split …")
-        return _chat_for_analysis(client, image_bytes, {})
+    messages = [
+        {"role": "system", "content": config.ANALYSIS_PROMPT},
+        {"role": "user", "content": "Analyze this image.", "images": [image_bytes]},
+    ]
+    for attempt in range(config.ANALYSIS_RETRIES + 1):
+        options = {**config.LLM_OPTIONS, "num_predict": config.OLLAMA_MAX_OUTPUT_TOKENS}
+        if attempt:
+            options.update(temperature=config.ANALYSIS_RETRY_TEMPERATURE, seed=attempt)
+        response = client.chat(model=model, messages=messages, format=ImageAnalysis.model_json_schema(), options=options)
+        try:
+            return ImageAnalysis.model_validate_json(response.message.content)
+        except ValidationError as exc:
+            if attempt == config.ANALYSIS_RETRIES:
+                raise
+            problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'reply'}: {e['msg']}" for e in exc.errors()[:3])
+            messages = messages + [
+                {"role": "assistant", "content": response.message.content},
+                {"role": "user", "content": f"That reply was not valid ({problems[:300]}). Reply again with one complete, "
+                                            "valid JSON object that follows the schema, and keep every text field short."},
+            ]
 
-def _chat_for_analysis(client: ollama.Client, image_bytes: bytes, extra_options: dict) -> ImageAnalysis:
-    response = client.chat(
-        model=config.OLLAMA_MODEL,
-        messages=[{
-            "role": "user",
-            "content": config.ANALYSIS_PROMPT,
-            "images": [image_bytes],
-        }],
-        format=ImageAnalysis.model_json_schema(),
-        options={
-            "num_ctx": config.OLLAMA_NUM_CTX,
-            "use_mmap": config.OLLAMA_USE_MMAP,
-            "num_predict": config.OLLAMA_MAX_OUTPUT_TOKENS,
-            **extra_options,
-        },
-    )
-    return ImageAnalysis.model_validate_json(response.message.content)
+def _cap_text_blocks(text_blocks: list[str]) -> list[str]:
+    """Keep OCR text up to ``config.OCR_MAX_CHARS`` in total, so a text-heavy image cannot overflow the embedding model's context."""
+    kept: list[str] = []
+    remaining = config.OCR_MAX_CHARS
+    for block in text_blocks:
+        if remaining <= 0:
+            break
+        kept.append(block[:remaining])
+        remaining -= len(block)
+    return kept
 
 def _build_payload(analysis: ImageAnalysis, text_blocks: list[str], features: dict) -> ImagePayload:
     """Combine the VLM's answer, the OCR text and the pixel-derived facts into the stored record."""
@@ -62,12 +90,14 @@ def _build_payload(analysis: ImageAnalysis, text_blocks: list[str], features: di
     # Drop values the description never states: the model sometimes guesses them.
     stated = description.lower()
     time_of_day = analysis.time_of_day
-    if time_of_day and not any(word in stated for word in _TIME_OF_DAY_WORDS[time_of_day]):
+    if time_of_day and not _is_stated(stated, _TIME_OF_DAY_WORDS[time_of_day]):
         time_of_day = None
-    weather = analysis.weather if analysis.weather and analysis.weather in stated else None
+    weather = analysis.weather
+    if weather and not _is_stated(stated, _WEATHER_WORDS[weather]):
+        weather = None
 
-    if text_blocks:
-        description += "\n\nText visible in the image: " + ", ".join(text_blocks)
+    # The OCR text is stored in visible_text; the search text lists it once, in its own section.
+    text_blocks = _cap_text_blocks(text_blocks)
 
     return ImagePayload(
         short_description=analysis.short_description.strip(),
@@ -85,41 +115,22 @@ def _build_payload(analysis: ImageAnalysis, text_blocks: list[str], features: di
         dominant_colors=features["dominant_colors"],
     )
 
-def embed_search_text(search_text: str) -> list[float]:
-    client = ollama.Client(host=config.OLLAMA_HOST)
+def embed_search_text(client: ollama.Client, model: str, search_text: str) -> list[float]:
     response = client.embed(
-        model=config.OLLAMA_EMBEDDING_MODEL,
+        model=model,
         input=[search_text],
-        options={"use_mmap": config.OLLAMA_USE_MMAP},
+        options=config.EMBED_OPTIONS,
     )
     return list(response.embeddings[0])
 
-def understand_query(query: str) -> QueryUnderstanding:
-    client = ollama.Client(host=config.OLLAMA_HOST)
+def understand_query(client: ollama.Client, model: str, query: str) -> QueryUnderstanding:
     response = client.chat(
-        model=config.OLLAMA_MODEL,
-        messages=[{
-            "role": "user",
-            "content": f"{config.QUERY_PROMPT}\n\nUser query: {query}",
-        }],
+        model=model,
+        messages=[
+            {"role": "system", "content": config.QUERY_PROMPT},
+            {"role": "user", "content": f"User query: {query}"},
+        ],
         format=QueryUnderstanding.model_json_schema(),
-        options={"num_ctx": config.OLLAMA_NUM_CTX, "use_mmap": config.OLLAMA_USE_MMAP, "temperature": 0},
+        options=config.LLM_OPTIONS,
     )
     return QueryUnderstanding.model_validate_json(response.message.content)
-
-def judge_candidate(query: str, document: str, required_details: list[str] | None = None) -> RelevanceVerdict:
-    checklist = "\n".join(f"- {detail}" for detail in required_details) if required_details else "(none extracted)"
-    content = (
-        f"{config.JUDGE_PROMPT}\n\n"
-        f"User query: {query}\n\n"
-        f"Checklist:\n{checklist}\n\n"
-        f"Candidate record:\n{document}"
-    )
-    client = ollama.Client(host=config.OLLAMA_HOST)
-    response = client.chat(
-        model=config.OLLAMA_MODEL,
-        messages=[{"role": "user", "content": content}],
-        format=RelevanceVerdict.model_json_schema(),
-        options={"num_ctx": config.OLLAMA_NUM_CTX, "use_mmap": config.OLLAMA_USE_MMAP, "temperature": 0},
-    )
-    return RelevanceVerdict.model_validate_json(response.message.content)

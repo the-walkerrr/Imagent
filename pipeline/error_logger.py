@@ -13,13 +13,15 @@ import sqlite3
 import traceback
 from datetime import datetime, timezone
 
+import config
+
 
 def log_error(
     conn: sqlite3.Connection,
     *,
     stage: str,
     exc: Exception,
-    file_id: str | None = None,
+    file_id: int | None = None,
     file_path: str | None = None,
     metadata: dict | None = None,
 ) -> None:
@@ -29,11 +31,10 @@ def log_error(
         conn:     Open database connection.  The insert is committed immediately
                   using its own transaction so it is persisted even if the caller
                   later rolls back a broader transaction.
-        stage:    Processing stage where the error occurred.
-                  Valid values: ``file_scan``, ``metadata_extraction``,
-                  ``embedding_generation``, ``database_write``.
+        stage:    Where the error occurred (e.g. ``pipeline``, ``search``,
+                  ``query_understanding``, ``scan``).
         exc:      The caught exception instance.
-        file_id:  The OS file ID if it was known when the error occurred.
+        file_id:  The image_data file_id, only if the image already has a row (the column is a foreign key).
         file_path: The file path being processed at the time of the error.
         metadata: Optional dict of additional context (model names, timings, etc.).
                   Will be stored as JSON.
@@ -56,6 +57,11 @@ def log_error(
                 json.dumps(metadata) if metadata else None,
                 datetime.now(timezone.utc).isoformat(),
             ),
+        )
+        # Keep only the newest rows so repeated failures cannot grow the table without limit.
+        conn.execute(
+            "DELETE FROM error_logs WHERE id <= (SELECT MAX(id) FROM error_logs) - ?",
+            (config.ERROR_LOG_MAX_ROWS,),
         )
         conn.commit()
     except Exception:
