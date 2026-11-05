@@ -4,7 +4,8 @@ Search your local images in plain English. Imagent describes each image with a l
 (through [Ollama](https://ollama.com)), reads any text in it with OCR, and stores everything in a local
 database. Then a query like "the receipt from the coffee shop" finds the best matching images.
 
-- Runs entirely on your computer; your images never leave it.
+- Runs entirely on your computer; your images never leave it. After setup it needs no internet connection.
+- Works on pictures stored on your computer's own disk. Folders on network drives and external drives are refused.
 - Works on macOS, Linux and Windows.
 - Handles JPG, PNG, WebP, HEIC/HEIF, BMP, TIFF, GIF and AVIF.
 
@@ -32,7 +33,8 @@ git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && call inst
 What happens:
 
 1. `install` asks a few questions and sets Imagent up (once). Answer them and wait for it to finish.
-2. `run` opens a menu: **1** Search, **2** Scan and index, **3** Uninstall.
+2. `run` opens a menu: **1** Search, **2** Scan and index, **3** Try again the images that could not be indexed,
+   **4** Re-embed images, **5** Uninstall.
 3. Choose **2**, give it a folder of images, and let it index them.
 4. Run `run` again, choose **1**, and search.
 
@@ -62,13 +64,45 @@ If something is not set up, `run` tells you to run `sh install.sh` (or `install.
 - lets you pick three models (vision, embedding, text) and downloads them.
 
 The models cannot be changed afterwards, because every embedding model produces different vectors.
-Running install again only shows their status.
+Setup keeps a copy of the embedding model under its own name (`imagent-pin/…`), so updating the original model
+later cannot change what Imagent uses. Running install again only shows their status.
 
 ### Scan and index
 
 Choose **Scan folders and index images**. Give it a folder, and it finds new, moved, changed and deleted
 images, then offers to index them. You can scan several folders; they share one index. Indexing is safe to
 interrupt: run it again and it carries on with what is left.
+
+### When an image cannot be indexed
+
+Every kind of trouble has its own steps, and none of them lowers the quality of the result. Nothing is stored half
+done: an image is either indexed completely or set aside with the reason.
+
+| Trouble | What Imagent does |
+| --- | --- |
+| The model's reply is cut off | Asks again with different sampling, then with a higher output limit, step by step |
+| The reply does not fit the schema | Tells the model what is wrong and asks again |
+| No reply in time, or Ollama stopped | Waits longer; or restarts Ollama or frees memory, and asks again once |
+| The text in the image cannot be read | Reads it in tiles, then again with the engine reloaded |
+| The image is damaged, unsupported or too large for the free memory | Sets it aside at once, with the reason |
+| The file is still being copied | Leaves it for the next run |
+| The embedding text is too long | Splits it and averages the parts; nothing is cut off |
+
+An image that is set aside is queued again by itself when the file changes, or (for the model's replies) when the
+model or the prompt changes. To try it again yourself, choose **Try again the images that could not be indexed**.
+Indexing stops, and says why, when the same trouble keeps happening: Ollama or the machine failing several images
+in a row, files that cannot be read one after another (a drive that went away), or most replies needing a retry
+(which points to the model or the prompt).
+
+How large an image may be is not a fixed number: it depends on the memory free at that moment, and a very large
+image is read more gently (a JPEG is shrunk while it is decoded, its text is read in tiles). To set a hard limit,
+add `"max_megapixels": 100` to `config.json`.
+
+### If the embedding model changed
+
+Imagent refuses to index or search if the installed embedding model is not the version the stored vectors were made
+with, because the vectors could not be compared. Choose **Re-embed images**: it shows how long it will take, makes all
+the vectors again from what is stored (the vision model is not asked again) and saves the model as a copy of its own.
 
 ### Search
 
@@ -100,14 +134,17 @@ details are in `last_error.log` there.
 | `Cannot reach Ollama` | Start the Ollama app (or run `ollama serve`) and try again. |
 | `No indexed images found` | Run `run`, choose **Scan and index**, then search again. |
 | Python not found or too old | Install Python 3.9+ (`brew install python` on macOS, `winget install Python.Python.3.12` on Windows), then open a new terminal. |
-| OCR models fail to download | The first run needs an internet connection once. |
+| `The text-reading (OCR) engine could not be loaded` | Run `sh install.sh` (or `install.bat`); if it keeps failing, delete the `.venv` folder first. |
+| `...is on a network drive` / `...external or removable drive` | Copy the pictures to your computer's own disk and scan that folder. |
+| `The embedding model ... is not the same version` | Run `run` and choose **Re-embed images**. |
+| `The model's reply had to be asked for again for ... images` | The vision model or the prompt does not suit your images. Try another model or revise `prompts/analysis_prompt.txt` (and `analysis_schema.json`). |
 
 ## Project structure
 
 ```
 install.sh, install.bat      Set up Imagent
-run.sh, run.bat              Menu: search, scan and index, uninstall
-install/  search/  scan_and_index/  uninstall/    One folder per command
+run.sh, run.bat              Menu: search, scan and index, try again, re-embed, uninstall
+install/  search/  scan_and_index/  retry_failed/  reembed/  uninstall/    One folder per command
 config/                      Settings
 db/  vlm/  image_processing/  text_processing/  pipeline/  prompts/    Shared code
 tests/                       Automated tests
