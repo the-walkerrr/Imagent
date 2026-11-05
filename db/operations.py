@@ -1,6 +1,6 @@
 """
 db/operations.py — Low-level SQL helpers for model_settings, scan_roots, image_data, backlog,
-text_embeddings and error_logs.
+text_embeddings, error_logs and failure_history.
 
 All functions accept an open ``sqlite3.Connection`` and operate on a single row
 (or, where named so, on a list of rows).
@@ -9,8 +9,12 @@ Transaction management (BEGIN / COMMIT / ROLLBACK) is the caller's responsibilit
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
+
+# The columns of image_data that say what produced a record (see db/schema.sql); a record without them has them empty.
+VERSION_COLUMNS = ("vlm_digest", "prompt_hash", "schema_hash", "search_text_version", "ocr_version", "ollama_version", "app_version")
 
 # Rows deleted per statement. SQLite limits the number of ``?`` in one statement
 # (999 before version 3.32), so long lists are processed in chunks below that.
@@ -113,14 +117,16 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
             width, height, file_size, mime_type,
             created_at, modified_at, indexed_at,
             processing_time_ms, metadata_version, vlm_model,
-            taken_at, camera_make, camera_model, gps_lat, gps_lon
+            taken_at, camera_make, camera_model, gps_lat, gps_lon,
+            vlm_digest, prompt_hash, schema_hash, search_text_version, ocr_version, ollama_version, app_version
         ) VALUES (
             :root_id, :file_path, :hash,
             :short_description, :description, :vlm_metadata_json,
             :width, :height, :file_size, :mime_type,
             :created_at, :modified_at, :indexed_at,
             :processing_time_ms, :metadata_version, :vlm_model,
-            :taken_at, :camera_make, :camera_model, :gps_lat, :gps_lon
+            :taken_at, :camera_make, :camera_model, :gps_lat, :gps_lon,
+            :vlm_digest, :prompt_hash, :schema_hash, :search_text_version, :ocr_version, :ollama_version, :app_version
         )
         ON CONFLICT(file_path) DO UPDATE SET
             root_id             = excluded.root_id,
@@ -142,9 +148,16 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
             camera_make         = excluded.camera_make,
             camera_model        = excluded.camera_model,
             gps_lat             = excluded.gps_lat,
-            gps_lon             = excluded.gps_lon
+            gps_lon             = excluded.gps_lon,
+            vlm_digest          = excluded.vlm_digest,
+            prompt_hash         = excluded.prompt_hash,
+            schema_hash         = excluded.schema_hash,
+            search_text_version = excluded.search_text_version,
+            ocr_version         = excluded.ocr_version,
+            ollama_version      = excluded.ollama_version,
+            app_version         = excluded.app_version
         """,
-        record,
+        {**dict.fromkeys(VERSION_COLUMNS), **record},
     )
     return conn.execute(
         "SELECT file_id FROM image_data WHERE file_path = ?", (record["file_path"],)
@@ -182,7 +195,7 @@ def delete_images(conn: sqlite3.Connection, file_ids: list[int]) -> int:
 # ---------------------------------------------------------------------------
 
 def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modified_at: str) -> None:
-    """Queue a file for indexing. If the file changed since it was last queued, its failed attempts are forgotten."""
+    """Queue a file for indexing. If the file changed since it was last queued, its failures are forgotten (a parked file is queued again)."""
     conn.execute(
         """
         INSERT INTO backlog (file_path, root_id, modified_at, queued_at)
@@ -190,6 +203,9 @@ def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modif
         ON CONFLICT(file_path) DO UPDATE SET
             root_id     = excluded.root_id,
             attempts    = CASE WHEN backlog.modified_at != excluded.modified_at THEN 0 ELSE backlog.attempts END,
+            status      = CASE WHEN backlog.modified_at != excluded.modified_at THEN 'queued' ELSE backlog.status END,
+            park_kind   = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.park_kind END,
+            retry_when  = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.retry_when END,
             last_error  = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.last_error END,
             modified_at = excluded.modified_at
         """,
@@ -198,21 +214,109 @@ def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modif
 
 
 def get_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
-    """Return the pending backlog rows that have failed fewer than ``max_attempts`` times."""
+    """Return the queued backlog rows that have failed fewer than ``max_attempts`` times (parked files are not queued)."""
     rows = conn.execute(
-        "SELECT file_path, root_id FROM backlog WHERE attempts < ? ORDER BY file_path",
+        "SELECT file_path, root_id FROM backlog WHERE status = 'queued' AND attempts < ? ORDER BY file_path",
         (max_attempts,),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
 def get_exhausted_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
-    """Return the backlog rows that were given up on, with their last error."""
+    """Return the backlog rows that were given up on (parked, or failed ``max_attempts`` times), with their last error."""
     rows = conn.execute(
-        "SELECT file_path, last_error FROM backlog WHERE attempts >= ? ORDER BY file_path",
+        "SELECT file_path, last_error FROM backlog WHERE status = 'parked' OR attempts >= ? ORDER BY file_path",
         (max_attempts,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def refund_backlog_attempts(conn: sqlite3.Connection, file_paths: list[str]) -> None:
+    """Give back the attempt each of these files lost, because the failure turned out not to be theirs (a drive that went away)."""
+    for start in range(0, len(file_paths), _CHUNK):
+        chunk = file_paths[start:start + _CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        conn.execute(f"UPDATE backlog SET attempts = MAX(attempts - 1, 0) WHERE file_path IN ({placeholders})", chunk)
+
+
+def park_backlog(conn: sqlite3.Connection, file_path: str, kind: str, message: str, retry_when: str,
+                 versions: dict | None = None) -> None:
+    """Set a file aside because every step for its kind of failure was tried.
+
+    ``retry_when`` says what would make another try worthwhile ('model_changed': a different model or prompt, judged
+    by ``versions``, the versions at the time; 'file_changed'; 'on_request'). The file is queued again when it changes
+    (``upsert_backlog``), when its versions change (``requeue_changed_parked``) or on request (``requeue_parked``).
+    """
+    conn.execute(
+        "UPDATE backlog SET status = 'parked', park_kind = ?, last_error = ?, retry_when = ?, park_versions = ? WHERE file_path = ?",
+        (kind, message, retry_when, json.dumps(versions, sort_keys=True) if versions else None, file_path),
+    )
+
+
+def requeue_changed_parked(conn: sqlite3.Connection, versions: dict) -> int:
+    """Queue again the files parked because of the model's replies, if the versions they were parked with are not ``versions`` any more."""
+    now = json.dumps(versions, sort_keys=True)
+    rows = conn.execute(
+        "SELECT file_path FROM backlog WHERE status = 'parked' AND retry_when = 'model_changed' "
+        "AND COALESCE(park_versions, '') != ?", (now,)).fetchall()
+    return requeue_parked(conn, paths=[row["file_path"] for row in rows])
+
+
+def list_parked(conn: sqlite3.Connection) -> list[dict]:
+    """Every parked file with the kind of failure and the message."""
+    rows = conn.execute(
+        "SELECT file_path, park_kind, last_error, retry_when FROM backlog WHERE status = 'parked' ORDER BY park_kind, file_path"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def requeue_parked(conn: sqlite3.Connection, kind: str | None = None, paths: list[str] | None = None) -> int:
+    """Queue parked files again with a clean slate: all of them, those of one ``kind``, or the given ``paths``. Returns how many."""
+    where, params = "status = 'parked'", []
+    if kind is not None:
+        where += " AND park_kind = ?"
+        params.append(kind)
+    if paths is not None:
+        if not paths:
+            return 0
+        where += f" AND file_path IN ({', '.join('?' for _ in paths)})"
+        params.extend(paths)
+    cursor = conn.execute(
+        f"UPDATE backlog SET status = 'queued', attempts = 0, park_kind = NULL, retry_when = NULL, "
+        f"park_versions = NULL, last_error = NULL WHERE {where}", params)
+    return cursor.rowcount
+
+
+def update_embedding_settings(conn: sqlite3.Connection, model: str, digest: str | None, dim: int) -> None:
+    """Record the embedding model that the stored vectors now come from (only after every vector was made again with it)."""
+    conn.execute("UPDATE model_settings SET embedding_model = ?, embedding_digest = ?, embedding_dim = ? WHERE id = 1",
+                 (model, digest, dim))
+
+
+def list_records_for_embedding(conn: sqlite3.Connection) -> list[dict]:
+    """Every indexed image with what its search text is built from."""
+    return [dict(row) for row in conn.execute("SELECT file_id, file_path, vlm_metadata_json FROM image_data ORDER BY file_id")]
+
+
+def add_failure_history(conn: sqlite3.Connection, file_path: str, attempts: list[dict]) -> None:
+    """Record the requests made for one image, if any of them had a reply that had to be asked for again.
+
+    ``attempts`` is the record kept by ``vlm.analyzer``. A request that worked after others failed is stored as 'resolved'.
+    """
+    if not any(attempt["kind"] for attempt in attempts):
+        return
+    conn.executemany(
+        """
+        INSERT INTO failure_history
+            (file_path, kind, step, options, done_reason, eval_count, prompt_eval_count, detail, raw_reply, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (file_path, attempt["kind"] or "resolved", attempt["step"], json.dumps(attempt["options"]), attempt["done_reason"],
+             attempt["eval_count"], attempt["prompt_eval_count"], attempt["detail"] or None, attempt["raw_reply"], _now())
+            for attempt in attempts
+        ],
+    )
 
 
 def get_backlog_paths_for_root(conn: sqlite3.Connection, root_id: int) -> list[str]:
@@ -244,21 +348,25 @@ def record_backlog_failure(conn: sqlite3.Connection, file_path: str, message: st
 # text_embeddings
 # ---------------------------------------------------------------------------
 
-def upsert_text_embedding(conn: sqlite3.Connection, file_id: int, embedding_bytes: bytes) -> None:
-    """Insert or update the serialised embedding for an image.
+def upsert_text_embedding(conn: sqlite3.Connection, file_id: int, embedding_bytes: bytes,
+                          model: str | None = None, digest: str | None = None, dim: int | None = None) -> None:
+    """Insert or update the serialised embedding for an image, with the model that made it (name, digest) and its size.
 
     ``embedding_bytes`` should be a packed array of little-endian float32
     (see ``pipeline.serialisation.serialize_embedding``).
     """
     conn.execute(
         """
-        INSERT INTO text_embeddings (file_id, embedding, created_at)
-        VALUES (?, ?, ?)
+        INSERT INTO text_embeddings (file_id, embedding, created_at, embedding_model, embedding_digest, embedding_dim)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_id) DO UPDATE SET
-            embedding  = excluded.embedding,
-            created_at = excluded.created_at
+            embedding        = excluded.embedding,
+            created_at       = excluded.created_at,
+            embedding_model  = excluded.embedding_model,
+            embedding_digest = excluded.embedding_digest,
+            embedding_dim    = excluded.embedding_dim
         """,
-        (file_id, embedding_bytes, _now()),
+        (file_id, embedding_bytes, _now(), model, digest, dim),
     )
 
 

@@ -76,6 +76,16 @@ def save_install_record(data: dict) -> None:
     _write_json(_install_record_path(), data)
 
 
+def record_pinned_model(pinned: str, base: str) -> None:
+    """Note that setup copied the model ``base`` under the name ``pinned``: the uninstaller removes the copy, and it can be made again from ``base``."""
+    record = load_install_record()
+    models = [m for m in record.get("ollama_models", []) if isinstance(m, str)]
+    if pinned not in models:
+        models.append(pinned)
+    pins = record["pinned_models"] if isinstance(record.get("pinned_models"), dict) else {}
+    save_install_record({**record, "ollama_models": models, "pinned_models": {**pins, pinned: base}})
+
+
 # User preferences written by install.py.
 OLLAMA_HOST: str = load_config().get("ollama_host", "")
 
@@ -85,8 +95,19 @@ OLLAMA_TIMEOUT: int = 300  # seconds to wait for a reply (a cold model load coun
 OLLAMA_NUM_CTX: int = 8192
 OLLAMA_MAX_OUTPUT_TOKENS: int = 2200  # cap on the image-analysis reply; without it a runaway reply fills the whole context window
 OLLAMA_USE_MMAP: bool = False  # load each model fully into memory instead of paging it in from disk
-ANALYSIS_RETRIES: int = 1  # extra tries when the vision model's reply is not valid JSON for the schema (cut off, wrong shape)
+# What happens when the vision model's reply cannot be used. Each kind of trouble has its own steps (vlm/analyzer.py):
+#  - a reply that ended at the output cap: one retry with different sampling, then the cap is raised step by step;
+#  - a complete reply that does not fit the schema: the problems are sent back to the model and it answers again.
+ANALYSIS_RETRIES: int = 1  # extra tries when a complete reply does not fit the schema
 ANALYSIS_RETRY_TEMPERATURE: float = 0.4  # a retry must differ from the first try: at temperature 0 the same input gives the same reply
+ANALYSIS_RETRY_REPEAT_PENALTY: float = 1.15  # sampling after a cut-off reply, which may be a loop; Ollama's own default is 1.1
+ANALYSIS_CAP_STEP: float = 1.5  # each raise multiplies the output cap by this ...
+ANALYSIS_CAP_RAISES: int = 3  # ... up to this many times, and never beyond what fits in the context window after the prompt
+# Trouble reaching the model, each with its own step (vlm/analyzer.py): no reply in time -> wait longer; the server crashed
+# or ran out of memory -> restart it, or free memory, and ask the same again once.
+OLLAMA_TIMEOUT_STEP: int = 2  # each wait is this many times the one before ...
+OLLAMA_TIMEOUT_RAISES: int = 2  # ... up to this many times
+OLLAMA_RECOVERY_WAIT: int = 5  # seconds to wait after freeing memory before asking again
 
 # Sent with every request to the VLM and to the judge model. num_ctx and use_mmap must be
 # identical across all requests to one model: Ollama reloads it whenever one of them changes.
@@ -95,7 +116,20 @@ EMBED_OPTIONS: dict = {"use_mmap": OLLAMA_USE_MMAP}
 
 # --- Images ------------------------------------------------------------------
 OCR_MIN_CONFIDENCE: float = 0.6  # OCR blocks scoring below this are dropped
-OCR_MAX_CHARS: int = 1500  # total OCR text kept per image; more would push the end of the search text past the embedding model's context
+OCR_TILE_SHARE: float = 0.5  # a tile is this share of the largest image the OCR engine reads without shrinking it: it finds text only above about 2% of the image side, so smaller tiles read smaller text
+OCR_TILE_OVERLAP: float = 0.1  # share of a tile that the next one covers again, so text on a border is read whole in one of them
+IMAGE_MEMORY_SHARE: float = 0.5  # share of the memory free right now that one image may use at its peak (image_processing/memory.py)
+
+
+def _megapixel_limit() -> float:
+    try:
+        return max(float(load_config().get("max_megapixels") or 0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+IMAGE_MAX_MEGAPIXELS: float = _megapixel_limit()  # optional hard limit in megapixels, set as max_megapixels in config.json; 0 = none
+FILE_SETTLE_SECONDS: int = 2  # a file that cannot be read is watched this long: if it changes it is still being written
 IMAGE_MAX_LONG_EDGE: int = 1024
 IMAGE_SIZE_MULTIPLE: int = 1  # resized sides are rounded down to a multiple of this; 1 = no rounding
 IMAGE_JPEG_QUALITY: int = 85
@@ -108,11 +142,16 @@ SCAN_GUARD_MIN_FILES: int = 10  # a scan that finds at least this many indexed i
 SCAN_GUARD_MAX_SHARE: float = 0.5  # ... and more than this share of the folder's indexed images asks before forgetting them
 BACKLOG_MAX_ATTEMPTS: int = 3  # a file that fails this many times is left alone until it changes
 MAX_CONSECUTIVE_SERVICE_FAILURES: int = 3  # indexing stops after this many Ollama failures in a row
+RETRY_RATE_WINDOW: int = 10  # indexing stops when, among this many of the latest analysed images ...
+RETRY_RATE_STOP: float = 0.5  # ... at least this share needed the model's reply retried: the model or the prompt is the problem, not the files
 ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 
 # --- Search ------------------------------------------------------------------
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
+
+# --- Versions ----------------------------------------------------------------
+APP_VERSION: str = "0.1.0"  # stored with every indexed record (pipeline/versions.py)
 
 # --- Launchers ---------------------------------------------------------------
 # What messages tell the user to run, for the OS they are on.
@@ -122,4 +161,8 @@ RUN_COMMAND: str = "run.bat" if platform.system() == "Windows" else "sh run.sh"
 # --- Prompts -----------------------------------------------------------------
 PROMPTS_DIR: Path = Path(__file__).parent.parent / "prompts"
 ANALYSIS_PROMPT: str = (PROMPTS_DIR / "analysis_prompt.txt").read_text(encoding="utf-8")
+# The shape of the vision model's reply: a JSON schema sent to Ollama and used to check the reply. The fields live in this
+# file and in the prompt only; no code names them, except the one below.
+ANALYSIS_SCHEMA: dict = json.loads((PROMPTS_DIR / "analysis_schema.json").read_text(encoding="utf-8"))
+SUMMARY_FIELD: str = "short_description"  # the field of the reply stored as the image's one-line summary, shown in search results
 QUERY_PROMPT: str = (PROMPTS_DIR / "query_prompt.txt").read_text(encoding="utf-8")
