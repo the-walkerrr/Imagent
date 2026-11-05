@@ -12,6 +12,8 @@ import platform
 import sys
 from pathlib import Path
 
+from pipeline.storage import storage_problem
+
 
 def validate_folder(raw_path: str) -> Path:
     """Validate *raw_path* and return a resolved ``Path``.
@@ -21,6 +23,7 @@ def validate_folder(raw_path: str) -> Path:
       2. The path exists on disk.
       3. The path is a directory (not a file or symlink to a file).
       4. The current process has read permission on the directory.
+      5. The directory is on this computer's own disk (see pipeline/storage.py).
 
     On any failure, prints a human-readable error to stdout and calls
     ``sys.exit(1)``.  On success, returns the resolved ``Path``.
@@ -41,6 +44,11 @@ def validate_folder(raw_path: str) -> Path:
 
     if not os.access(path, os.R_OK):
         print(f"[imagent] Error: Directory is not readable (permission denied): {path}")
+        sys.exit(1)
+
+    problem = storage_problem(path)
+    if problem:
+        print(f"[imagent] Error: {problem}")
         sys.exit(1)
 
     return path
