@@ -31,13 +31,13 @@ class NotReady(Exception):
     """Setup is incomplete or Ollama cannot serve the locked models; the message tells the user what to do."""
 
 
-def make_client(host: str | None = None) -> ollama.Client:
+def make_client(host: str | None = None, timeout: float | None = None) -> ollama.Client:
     """Return an Ollama client that can never wait forever.
 
-    ``host`` defaults to the one saved by setup. The read timeout also applies between the
-    progress updates of a download, so a stalled download ends too.
+    ``host`` defaults to the one saved by setup, ``timeout`` (seconds to wait for a reply) to ``config.OLLAMA_TIMEOUT``.
+    The read timeout also applies between the progress updates of a download, so a stalled download ends too.
     """
-    timeout = httpx.Timeout(config.OLLAMA_TIMEOUT, connect=config.OLLAMA_CONNECT_TIMEOUT)
+    timeout = httpx.Timeout(timeout or config.OLLAMA_TIMEOUT, connect=config.OLLAMA_CONNECT_TIMEOUT)
     return ollama.Client(host=host or config.OLLAMA_HOST, timeout=timeout)
 
 
@@ -123,6 +123,22 @@ def stop_server(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         process.kill()
+
+
+def restart_server(client: ollama.Client) -> bool:
+    """Make sure the Ollama server answers, starting it again if it went down (only possible when it is on this computer).
+
+    The server this starts is stopped when the program ends. True if the server answers.
+    """
+    if is_reachable(client):
+        return True
+    if not (is_local(config.OLLAMA_HOST) and shutil.which("ollama")):
+        return False
+    process = start_server(client, config.OLLAMA_HOST)
+    if process is None:
+        return False
+    atexit.register(_stop_started_server, process)
+    return True
 
 
 def _stop_started_server(process: subprocess.Popen) -> None:

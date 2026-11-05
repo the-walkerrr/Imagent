@@ -22,7 +22,7 @@ import os
 import sqlite3
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -37,6 +37,7 @@ try:
     import config
     from db.connection import describe_db_error, init_db
     from db.operations import (
+        add_failure_history,
         delete_backlog,
         delete_backlog_paths,
         delete_images,
@@ -48,7 +49,9 @@ try:
         list_roots,
         lookup_by_path,
         mark_root_scanned,
+        park_backlog,
         record_backlog_failure,
+        refund_backlog_attempts,
         update_image_location,
         update_image_modified_at,
         upsert_backlog,
@@ -61,11 +64,12 @@ try:
     from pipeline.console import make_output_safe, run_cli
     from pipeline.discovery import discover
     from pipeline.error_logger import log_error
+    from pipeline.failure import IndexingFailure, RunStopped
     from pipeline.locking import AlreadyRunning, single_instance
     from pipeline.progress import Progress
     from pipeline.serialisation import serialize_embedding
     from pipeline.validation import find_overlapping_root, validate_folder
-    from text_processing.formatters import build_search_text
+    from text_processing.formatters import build_description, build_search_text
     from vlm.analyzer import analyse_image, embed_search_text
     from vlm.client import NotReady, check_ready, unload_model
 except ModuleNotFoundError as exc:
@@ -98,16 +102,10 @@ METADATA_VERSION = 1
 # Helpers
 # ---------------------------------------------------------------------------
 
-def build_vlm_metadata_json(payload) -> str:
-    """Serialise all VLM payload fields except ``short_description`` and ``description``.
-
-    Those two fields are stored in dedicated columns on ``image_data``, so they
-    are excluded here to avoid duplication.
-    """
-    data = payload.model_dump()
-    data.pop("short_description", None)
-    data.pop("description", None)
-    return json.dumps(data)
+def build_vlm_metadata_json(analysis) -> str:
+    """Serialise everything learned about the image: the model's reply exactly as it wrote it, the text read in the image
+    and the facts read from the pixels. The summary and the description are also kept in their own columns on ``image_data``."""
+    return json.dumps({"vlm": analysis.reply, "ocr_text": analysis.ocr_text, "features": analysis.features})
 
 
 def is_unchanged(existing: dict | None, file_hash: str, modified_at: str) -> bool:
@@ -143,7 +141,8 @@ def classify_failure(exc: Exception) -> tuple[bool, bool]:
 # ---------------------------------------------------------------------------
 
 def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image_path: Path,
-                on_stage: Callable[[str], None] = lambda stage: None) -> tuple[str, str]:
+                on_stage: Callable[[str], None] = lambda stage: None,
+                on_retry: Callable[[str], None] = lambda kind: None) -> tuple[str, str]:
     """Run the complete indexing pipeline for a single image.
 
     Stages (in order):
@@ -152,7 +151,10 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
       3. embedding_generation — build search doc + embed
       4. database_write      — atomic upsert of image_data + text_embeddings
 
-    ``on_stage`` is told what is being done, before each step.
+    ``on_stage`` is told what is being done, before each step; ``on_retry`` is told when the model's reply
+    has to be asked for again, and why.
+
+    Raises ``AnalysisFailed`` when the model's reply could not be put right.
 
     Returns ``(result, short_description)``, where the description is empty for a skipped file and
     ``result`` is one of:
@@ -181,23 +183,24 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # Stage 2: metadata_extraction — VLM analysis
     # ------------------------------------------------------------------
     pipeline_start = time.perf_counter()
-    payload = analyse_image(client, settings["vlm_model"], path_str, on_stage)
+    analysis = analyse_image(client, settings["vlm_model"], path_str, on_stage, on_retry)
 
     # ------------------------------------------------------------------
     # Stage 3: embedding_generation — search document + embedding vector
     # ------------------------------------------------------------------
     on_stage("embedding description")
-    search_text = build_search_text(payload)
+    search_text = build_search_text(analysis.reply, analysis.ocr_text, config.SUMMARY_FIELD)
     embedding = embed_search_text(client, settings["embedding_model"], search_text)
     if len(embedding) != settings["embedding_dim"]:
-        raise ValueError(
+        raise RunStopped(
             f"The embedding model returned {len(embedding)} values, but {settings['embedding_dim']} "
-            "were measured at setup. The model has changed."
+            "were measured at setup. The model has changed, so no image can be indexed with it."
         )
     embedding_bytes = serialize_embedding(embedding)
     elapsed_ms = int((time.perf_counter() - pipeline_start) * 1000)
 
-    vlm_metadata_json = build_vlm_metadata_json(payload)
+    vlm_metadata_json = build_vlm_metadata_json(analysis)
+    short_description = str(analysis.reply[config.SUMMARY_FIELD]).strip()
 
     # ------------------------------------------------------------------
     # Stage 4: database_write — atomic transaction
@@ -206,8 +209,8 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         "root_id": root_id,
         "file_path": path_str,
         "hash": file_hash,
-        "short_description": payload.short_description,
-        "description": payload.description,
+        "short_description": short_description,
+        "description": build_description(analysis.reply, config.SUMMARY_FIELD),
         "vlm_metadata_json": vlm_metadata_json,
         **file_meta,
         "indexed_at": datetime.now(timezone.utc).isoformat(),
@@ -221,9 +224,10 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     with conn:
         file_id = upsert_image_data(conn, record)
         upsert_text_embedding(conn, file_id, embedding_bytes)
+        add_failure_history(conn, path_str, analysis.attempts)
     # ↑ Commit point — image is now considered fully indexed in the database.
 
-    return ("updated" if is_update else "indexed"), payload.short_description
+    return ("updated" if is_update else "indexed"), short_description
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +288,11 @@ def _index_backlog() -> None:
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
-    in_a_row = 0  # consecutive images that failed because of Ollama
+    in_a_row = 0  # consecutive images that failed for a reason that is not theirs (Ollama, the machine)
     last_service_error = ""
+    io_failures: list[str] = []  # files that failed one after another with an error of the file system: a drive that went away, perhaps
     stopped = ""
+    recent_retries: deque[bool] = deque(maxlen=config.RETRY_RATE_WINDOW)  # for the latest analysed images: did the model's reply need asking for again?
     progress = Progress(total)
 
     try:
@@ -294,14 +300,19 @@ def _index_backlog() -> None:
             image_path = Path(row["file_path"])
             progress.start(i, image_path)
 
+            retried: list[str] = []
             try:
                 try:
-                    result, short_description = index_image(conn, client, settings, row["root_id"], image_path, progress.stage)
+                    result, short_description = index_image(conn, client, settings, row["root_id"], image_path, progress.stage,
+                                                            on_retry=retried.append)
                     with conn:
                         delete_backlog(conn, row["file_path"])
                     counts[result] += 1
                     progress.done(result, short_description)
                     in_a_row = 0
+                    io_failures.clear()
+                    if result != "skipped":
+                        recent_retries.append(bool(retried))
                 except FileNotFoundError:
                     # Deleted since the scan: nothing to index. The next scan removes any stale record.
                     with conn:
@@ -309,6 +320,33 @@ def _index_backlog() -> None:
                     progress.done("gone")
                 except sqlite3.Error:
                     raise  # the database is the problem, not this image: handled below
+                except IndexingFailure as exc:
+                    # Every step for this kind of trouble was tried, so trying again would only repeat them. The file is set
+                    # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
+                    # fault is not the file's, left queued with its attempts untouched.
+                    counts["failed"] += 1
+                    log_error(conn, stage="pipeline", exc=exc, file_path=str(image_path),
+                              metadata={"root_id": row["root_id"], "kind": exc.kind})
+                    with conn:
+                        add_failure_history(conn, row["file_path"], exc.attempts)
+                        if exc.park:
+                            park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when)
+                        else:
+                            record_backlog_failure(conn, row["file_path"], str(exc), count_attempt=False)
+                    progress.done("FAILED", str(exc))
+                    io_failures.clear()
+                    if exc.service:
+                        in_a_row += 1
+                        last_service_error = str(exc)
+                    else:
+                        in_a_row = 0
+                    if exc.model_trouble:
+                        recent_retries.append(True)
+                except RunStopped as exc:
+                    counts["failed"] += 1
+                    progress.done("FAILED", str(exc))
+                    stopped = f"Indexing stopped. {exc} Nothing was held against the files; the rest stays queued."
+                    break
                 except Exception as exc:
                     counts["failed"] += 1
                     counts_as_attempt, ollama_problem = classify_failure(exc)
@@ -327,10 +365,27 @@ def _index_backlog() -> None:
                         last_service_error = f"{type(exc).__name__}: {exc}"
                     else:
                         in_a_row = 0
-                    if in_a_row >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
-                        stopped = (f"Ollama failed {in_a_row} times in a row, so indexing stopped (last error: {last_service_error}). "
-                                   "Check that Ollama is running and has enough memory, then run it again; the rest stays queued.")
+                    if isinstance(exc, OSError) and not ollama_problem:
+                        io_failures.append(row["file_path"])
+                    else:
+                        io_failures.clear()
+                    if len(io_failures) >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
+                        with conn:
+                            refund_backlog_attempts(conn, io_failures)  # a drive that went away is not these files' fault
+                        stopped = (f"Reading the images failed {len(io_failures)} times in a row (last error: {type(exc).__name__}: {exc}), "
+                                   "so indexing stopped. Is the drive still connected and readable? "
+                                   "The files keep all their attempts; the rest stays queued.")
                         break
+                if in_a_row >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
+                    stopped = (f"{in_a_row} images in a row failed for a reason that is not theirs, so indexing stopped "
+                               f"(last error: {last_service_error}). Check that Ollama is running and has enough memory "
+                               "and that the text-reading models are intact, then run it again; the rest stays queued.")
+                    break
+                if len(recent_retries) == recent_retries.maxlen and sum(recent_retries) / len(recent_retries) >= config.RETRY_RATE_STOP:
+                    stopped = (f"The model's reply had to be asked for again for {sum(recent_retries)} of the last {len(recent_retries)} images, "
+                               "so indexing stopped: this points at the model or the prompt, not at the images. "
+                               "Try another vision model or revise the prompt, then run it again; the rest stays queued.")
+                    break
             except sqlite3.Error as exc:
                 counts["failed"] += 1
                 message = describe_db_error(exc, db_path)
@@ -378,8 +433,7 @@ def _print_given_up(conn) -> None:
     given_up = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     if not given_up:
         return
-    print(f"\n[imagent] {len(given_up)} file(s) failed {config.BACKLOG_MAX_ATTEMPTS} times and are skipped "
-          "until they change:")
+    print(f"\n[imagent] {len(given_up)} file(s) could not be indexed and are set aside until they change:")
     for item in given_up[:10]:
         print(f"  {item['file_path']}  ({item['last_error']})")
     if len(given_up) > 10:

@@ -1,127 +1,269 @@
 from __future__ import annotations
 
-import re
-from typing import Callable
+import time
+from typing import Callable, NamedTuple
 
+import httpx
 import ollama
 import config
-from pydantic import ValidationError
-from vlm.response_format import ImageAnalysis, ImagePayload, QueryUnderstanding
+from vlm.client import make_client, other_models_running, restart_server, unload_model
+from vlm.reply_validation import check_reply
+from vlm.response_format import QueryUnderstanding
 from image_processing.features import extract_image_features
+from image_processing.memory import GENTLE, plan_image
 from image_processing.ocr import extract_text_blocks
 from image_processing.preprocess import preprocess_image
-from text_processing.cleaners import normalize_terms
+from image_processing.problems import ImageProblem, explain
+from pipeline.failure import IndexingFailure, attempt_record
 
-# Words in the description that back up a time_of_day / weather value from the model.
-_TIME_OF_DAY_WORDS = {
-    "morning": ("morning", "sunrise", "dawn"),
-    "afternoon": ("afternoon", "midday", "noon"),
-    "evening": ("evening", "sunset", "dusk"),
-    "night": ("night", "nighttime", "midnight"),
-    "golden_hour": ("golden hour", "golden-hour"),
+# What went wrong; each has its own way of being put right.
+CUT_OFF = "cut_off"  # the reply ended at the output cap
+INVALID_REPLY = "invalid_reply"  # the reply is complete but does not fit the schema
+TIMEOUT = "timeout"  # no reply within the time limit
+SERVER_CRASH = "server_crash"  # the connection to Ollama broke, or its model runner stopped
+OUT_OF_MEMORY = "out_of_memory"  # Ollama has not enough memory for the model
+
+# What the indexing loop does with a file for each kind (see pipeline/failure.py).
+_HANDLING = {
+    CUT_OFF: {"retry_when": "model_changed", "model_trouble": True},
+    INVALID_REPLY: {"retry_when": "model_changed", "model_trouble": True},
+    TIMEOUT: {"service": True},
+    SERVER_CRASH: {"service": True},
+    OUT_OF_MEMORY: {"park": False, "service": True},  # the machine is short of memory, not the file at fault
 }
-_WEATHER_WORDS = {
-    "sunny": ("sunny", "sun", "sunlight", "sunshine", "clear sky", "clear skies"),
-    "cloudy": ("cloudy", "cloud", "clouds", "overcast"),
-    "rainy": ("rainy", "rain", "raining", "drizzle", "showers"),
-    "snowy": ("snowy", "snow", "snowing", "snowfall"),
-    "foggy": ("foggy", "fog", "mist", "misty", "haze", "hazy"),
-}
 
 
-def _is_stated(text: str, words: tuple[str, ...]) -> bool:
-    """True if one of ``words`` appears in ``text`` as a whole word (so "night" does not match "nightstand")."""
-    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
+class AnalysisFailed(IndexingFailure):
+    """The model could not be made to give a usable reply by any of the steps for its kind of trouble.
+
+    ``kind`` is the last kind of trouble and ``attempts`` records every request made (see ``_request_analysis``).
+    """
+
+    def __init__(self, kind: str, message: str, attempts: list[dict]):
+        super().__init__(kind, message, attempts, **_HANDLING[kind])
+
+
+class ServiceTrouble(Exception):
+    """Reaching the model failed in a way the steps in ``_send`` could not put right."""
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+
+
+class Analysis(NamedTuple):
+    """Everything learned about one image."""
+    reply: dict  # the vision model's reply, exactly as it wrote it
+    ocr_text: list[str]  # the pieces of text read in the image
+    features: dict  # facts read from the pixels
+    attempts: list[dict]  # one entry per request to the model; ``kind`` says what was wrong with the reply, if anything
 
 
 def analyse_image(client: ollama.Client, model: str, image_path: str,
-                  on_stage: Callable[[str], None] = lambda stage: None) -> ImagePayload:
-    """Analyse one image; ``on_stage`` is told what is being done, before each step."""
-    on_stage("preparing image")
-    image_bytes = preprocess_image(image_path)
-    on_stage("analysing image")
-    analysis = _request_analysis(client, model, image_bytes)
-    on_stage("reading text in image")
-    return _build_payload(analysis, extract_text_blocks(image_path), extract_image_features(image_path))
+                  on_stage: Callable[[str], None] = lambda stage: None,
+                  on_retry: Callable[[str], None] = lambda kind: None) -> Analysis:
+    """Analyse one image; ``on_stage`` is told what is being done, before each step.
 
-def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes) -> ImageAnalysis:
-    """Ask the model to describe the image; if its reply is not valid for the schema, tell it what was wrong and ask again.
-
-    A reply can be cut off (it hit the output cap) or have the wrong shape. The asks after the first use a
-    higher temperature, because at temperature 0 the same input would give the same bad reply.
+    ``on_retry`` is told the kind of trouble each time the model's reply has to be asked for again.
     """
-    messages = [
+    on_stage("checking image")
+    gentle = plan_image(image_path) == GENTLE  # raises ImageProblem if the image cannot be opened or is too large
+    # The steps that are quick and need no model come first: when one of them fails, no reply was asked for in vain.
+    try:
+        on_stage("preparing image")
+        image_bytes = preprocess_image(image_path, gentle)
+        features = extract_image_features(image_path, gentle)
+        on_stage("reading text in image")
+        ocr_text = extract_text_blocks(image_path, tiled=gentle)
+    except ImageProblem:
+        raise
+    except Exception as exc:
+        raise (explain(exc, image_path) or exc) from exc
+    on_stage("analysing image")
+    reply, attempts = _request_analysis(client, model, image_bytes, on_stage, on_retry)
+    return Analysis(reply, ocr_text, features, attempts)
+
+
+def _send(client: ollama.Client, model: str, request: dict, note: Callable[[str, str], None],
+          on_stage: Callable[[str], None]) -> tuple:
+    """Send a chat request, putting right trouble in reaching the model, each kind in its own way.
+
+    No reply in time: ask again and wait longer. The connection broke or the model runner stopped: make sure Ollama is
+    running (starting it if it is on this computer) and ask again. Not enough memory: unload the other models, wait, ask again.
+    Each of these is done once for the connection troubles and up to ``config.OLLAMA_TIMEOUT_RAISES`` times for the wait.
+    Returns the reply and the client that got it (a new one if the wait was lengthened); raises ``ServiceTrouble`` when it runs out.
+    """
+    timeout, raises, recovered = config.OLLAMA_TIMEOUT, 0, False
+    while True:
+        try:
+            return client.chat(**request), client
+        except httpx.ReadTimeout as exc:
+            note(TIMEOUT, f"no reply within {timeout:g} seconds")
+            if raises >= config.OLLAMA_TIMEOUT_RAISES:
+                raise ServiceTrouble(TIMEOUT, f"The model did not reply, even after waiting up to {timeout:g} seconds.") from exc
+            raises += 1
+            timeout *= config.OLLAMA_TIMEOUT_STEP
+            client = make_client(timeout=timeout)
+            on_stage(f"retrying: no reply in time; waiting up to {timeout:g} s")
+        except (httpx.RemoteProtocolError, httpx.ReadError, ConnectionError, ollama.ResponseError) as exc:
+            if isinstance(exc, ollama.ResponseError) and exc.status_code != 500:
+                raise  # not a stopped runner (a missing model, a bad request): another kind of problem
+            out_of_memory = isinstance(exc, ollama.ResponseError) and "memory" in str(exc).lower()
+            kind = OUT_OF_MEMORY if out_of_memory else SERVER_CRASH
+            note(kind, f"{type(exc).__name__}: {exc}")
+            if recovered:
+                raise ServiceTrouble(kind, f"The model failed again after {'memory was freed' if out_of_memory else 'Ollama was restarted'}: "
+                                           f"{type(exc).__name__}: {exc}") from exc
+            recovered = True
+            if out_of_memory:
+                for name in other_models_running(client, [model]):
+                    unload_model(client, name)
+                time.sleep(config.OLLAMA_RECOVERY_WAIT)
+                on_stage("retrying: memory was freed")
+            elif restart_server(client):
+                on_stage("retrying: Ollama was restarted")
+            else:
+                raise
+
+
+def _was_cut_off(response, num_predict: int) -> bool:
+    """True if the model stopped because it reached the output cap, not because it was finished."""
+    if getattr(response, "done_reason", None) == "length":
+        return True
+    used = getattr(response, "eval_count", None)
+    return isinstance(used, int) and used >= num_predict
+
+
+def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
+                      on_stage: Callable[[str], None] = lambda stage: None,
+                      on_retry: Callable[[str], None] = lambda kind: None) -> tuple[dict, list[dict]]:
+    """Ask the model to describe the image and put right what is wrong with its reply, each kind of trouble in its own way.
+
+    A reply that ended at the output cap is either a loop or an answer that is simply long, and these are told apart by
+    what works. First one retry with different sampling at the same cap: it ends a loop, and costs a long answer only
+    one more try. If it is cut off again, the cap is raised step by step, up to what the context window has room for after
+    the prompt, with the normal sampling (a long answer is then the same answer, only finished). Nothing is asked to be shorter.
+
+    A complete reply that does not fit the schema is sent back with the problems found, and the model answers again.
+
+    Returns the reply and the record of every request; raises ``AnalysisFailed`` when the steps for its trouble run out.
+    """
+    first_messages = [
         {"role": "system", "content": config.ANALYSIS_PROMPT},
         {"role": "user", "content": "Analyze this image.", "images": [image_bytes]},
     ]
-    for attempt in range(config.ANALYSIS_RETRIES + 1):
-        options = {**config.LLM_OPTIONS, "num_predict": config.OLLAMA_MAX_OUTPUT_TOKENS}
-        if attempt:
-            options.update(temperature=config.ANALYSIS_RETRY_TEMPERATURE, seed=attempt)
-        response = client.chat(model=model, messages=messages, format=ImageAnalysis.model_json_schema(), options=options)
+    messages = first_messages
+    cap = config.OLLAMA_MAX_OUTPUT_TOKENS
+    changed_sampling = False
+    step = "first try"
+    sampling_tried = False
+    raises = 0
+    feedback_tries = 0
+    retries = 0  # also the seed of a retry with changed sampling, so that no two retries repeat each other
+    attempts: list[dict] = []
+
+    def note(kind: str, detail: str) -> None:
+        """Record trouble that was put right on the way (a wait that ran out, a restart) as an attempt of its own."""
+        attempts.append(attempt_record(step, kind, detail, options=options))
+        on_retry(kind)
+
+    while True:
+        options = {**config.LLM_OPTIONS, "num_predict": cap}
+        if changed_sampling:
+            options.update(temperature=config.ANALYSIS_RETRY_TEMPERATURE, seed=retries,
+                           repeat_penalty=config.ANALYSIS_RETRY_REPEAT_PENALTY)
         try:
-            return ImageAnalysis.model_validate_json(response.message.content)
-        except ValidationError as exc:
-            if attempt == config.ANALYSIS_RETRIES:
-                raise
-            problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'reply'}: {e['msg']}" for e in exc.errors()[:3])
-            messages = messages + [
-                {"role": "assistant", "content": response.message.content},
-                {"role": "user", "content": f"That reply was not valid ({problems[:300]}). Reply again with one complete, "
-                                            "valid JSON object that follows the schema, and keep every text field short."},
+            response, client = _send(client, model, {"model": model, "messages": messages, "format": config.ANALYSIS_SCHEMA,
+                                                     "options": options}, note, on_stage)
+        except ServiceTrouble as trouble:
+            raise AnalysisFailed(trouble.kind, str(trouble), attempts) from trouble
+        content = response.message.content or ""
+        reply, problems = check_reply(content, config.ANALYSIS_SCHEMA)
+        prompt_tokens = getattr(response, "prompt_eval_count", None)
+        attempt = {
+            "step": step, "kind": None, "options": options, "detail": "", "raw_reply": None,
+            "done_reason": getattr(response, "done_reason", None),
+            "eval_count": getattr(response, "eval_count", None), "prompt_eval_count": prompt_tokens,
+        }
+        attempts.append(attempt)
+        if reply is not None:
+            return reply, attempts
+
+        kind = CUT_OFF if _was_cut_off(response, cap) else INVALID_REPLY
+        attempt.update(kind=kind, detail="; ".join(problems)[:500], raw_reply=content)
+
+        if kind == CUT_OFF:
+            if not sampling_tried:
+                sampling_tried, changed_sampling, step = True, True, "changed sampling"
+                retries += 1
+                messages = first_messages
+                note = "the reply was cut off; asking again with different sampling"
+            else:
+                room = config.OLLAMA_NUM_CTX - (prompt_tokens or 0)  # the context window holds the prompt and the reply
+                larger = min(int(cap * config.ANALYSIS_CAP_STEP), room)
+                if raises >= config.ANALYSIS_CAP_RAISES or larger <= cap:
+                    raise AnalysisFailed(
+                        kind, f"The model's reply was cut off at {cap} tokens, even after a retry with different sampling "
+                              f"and after raising the limit {raises} time(s) (the context window has room for {room}).", attempts)
+                cap, changed_sampling, step = larger, False, "raised cap"
+                raises += 1
+                messages = first_messages
+                note = f"the reply was cut off; asking again with room for {cap} tokens"
+        else:
+            if feedback_tries >= config.ANALYSIS_RETRIES:
+                raise AnalysisFailed(
+                    kind, f"The model's reply did not fit the schema, even after being told what was wrong "
+                          f"{feedback_tries} time(s): {'; '.join(problems[:3])}", attempts)
+            feedback_tries += 1
+            retries += 1
+            changed_sampling, step = True, "problems sent back"
+            messages = first_messages + [
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": f"That reply was not valid ({'; '.join(problems[:3])[:300]}). "
+                                            "Reply again with one complete, valid JSON object that follows the schema."},
             ]
+            note = "the reply did not fit the schema; asking again"
+        on_retry(kind)
+        on_stage(f"retrying: {note}")
 
-def _cap_text_blocks(text_blocks: list[str]) -> list[str]:
-    """Keep OCR text up to ``config.OCR_MAX_CHARS`` in total, so a text-heavy image cannot overflow the embedding model's context."""
-    kept: list[str] = []
-    remaining = config.OCR_MAX_CHARS
-    for block in text_blocks:
-        if remaining <= 0:
-            break
-        kept.append(block[:remaining])
-        remaining -= len(block)
-    return kept
 
-def _build_payload(analysis: ImageAnalysis, text_blocks: list[str], features: dict) -> ImagePayload:
-    """Combine the VLM's answer, the OCR text and the pixel-derived facts into the stored record."""
-    sections = [analysis.scene, analysis.objects_and_layout, analysis.people_details, analysis.colors_light_mood]
-    description = "\n\n".join(section.strip() for section in sections if section.strip())
+def _too_long(exc: ollama.ResponseError) -> bool:
+    """True if Ollama refused an input because it does not fit the embedding model's context."""
+    message = str(exc).lower()
+    return exc.status_code == 400 and any(word in message for word in ("context", "too long", "exceed"))
 
-    # Drop values the description never states: the model sometimes guesses them.
-    stated = description.lower()
-    time_of_day = analysis.time_of_day
-    if time_of_day and not _is_stated(stated, _TIME_OF_DAY_WORDS[time_of_day]):
-        time_of_day = None
-    weather = analysis.weather
-    if weather and not _is_stated(stated, _WEATHER_WORDS[weather]):
-        weather = None
 
-    # The OCR text is stored in visible_text; the search text lists it once, in its own section.
-    text_blocks = _cap_text_blocks(text_blocks)
+def _split(text: str) -> tuple[str, str]:
+    """Cut a text in two, at a line break near the middle, or else at a space."""
+    lines = text.splitlines()
+    if len(lines) > 1:
+        running = 0
+        for index, line in enumerate(lines):
+            running += len(line) + 1
+            if running >= len(text) / 2:
+                break
+        cut = min(max(index + 1, 1), len(lines) - 1)
+        return "\n".join(lines[:cut]), "\n".join(lines[cut:])
+    middle = len(text) // 2
+    space = text.rfind(" ", 0, middle)
+    cut = space if space > 0 else middle
+    return text[:cut], text[cut:]
 
-    return ImagePayload(
-        short_description=analysis.short_description.strip(),
-        description=description,
-        primary_category=analysis.primary_category,
-        objects=normalize_terms(analysis.objects),
-        people_count=analysis.people_count,
-        landmarks=normalize_terms(analysis.landmarks),
-        weather=weather,
-        time_of_day=time_of_day,
-        lighting=analysis.lighting,
-        tags=normalize_terms(analysis.tags),
-        visible_text=text_blocks,
-        orientation=features["orientation"],
-        dominant_colors=features["dominant_colors"],
-    )
 
 def embed_search_text(client: ollama.Client, model: str, search_text: str) -> list[float]:
-    response = client.embed(
-        model=model,
-        input=[search_text],
-        options=config.EMBED_OPTIONS,
-    )
-    return list(response.embeddings[0])
+    """The embedding of a text. Nothing is cut off: a text too long for the model's context is split in two, again and
+    again until the parts fit, and its vector is the average of the parts', each weighted by its length."""
+    try:
+        response = client.embed(model=model, input=[search_text], truncate=False, options=config.EMBED_OPTIONS)
+        return list(response.embeddings[0])
+    except ollama.ResponseError as exc:
+        if not _too_long(exc) or len(search_text) < 2:
+            raise
+    first, second = _split(search_text)
+    vectors = embed_search_text(client, model, first), embed_search_text(client, model, second)
+    weights = len(first), len(second)
+    return [(a * weights[0] + b * weights[1]) / sum(weights) for a, b in zip(*vectors)]
+
 
 def understand_query(client: ollama.Client, model: str, query: str) -> QueryUnderstanding:
     response = client.chat(
