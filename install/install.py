@@ -370,15 +370,14 @@ def ensure_packages() -> None:
 
 
 def prepare_ocr() -> None:
-    """Download the OCR models now, while someone is watching, so that indexing can run offline later."""
-    say("Preparing the text-reading (OCR) models; the first time this downloads them…")
+    """Load the OCR engine now. Its models come with the package, so nothing is downloaded, and Imagent never needs the internet once set up."""
+    say("Loading the text-reading (OCR) engine…")
     try:
         from image_processing.ocr import check_available
         check_available()
     except Exception as exc:
-        say(f"⚠ Could not prepare them ({type(exc).__name__}: {exc}).", "fg:ansimagenta")
-        say("Indexing tries again, and needs an internet connection the first time.", "fg:ansimagenta")
-        return
+        fail(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
+             f"Run {app_config.INSTALL_COMMAND} again; if it keeps failing, delete the .venv folder first so the packages are installed afresh.")
     say("✓ Text reading is ready.", "fg:green")
 
 
@@ -810,12 +809,24 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
             print()
             say(f"✗ Download failed: {exc}", RED)
             return None, set()
+        from vlm.client import pin_model
+        original = _normalize(embedding)
+        try:
+            embedding, _ = pin_model(client, original)
+            app_config.record_pinned_model(embedding, original)
+            say(f"✓ Saved a copy of {original} that stays exactly as it is now, even if the model is updated later.", "fg:ansigreen")
+        except Exception as exc:
+            embedding = original
+            say(f"⚠ Could not save a fixed copy of {original} ({type(exc).__name__}: {exc}). Imagent will use it as it is "
+                "and stop if it ever changes.", "fg:ansimagenta")
         say("Checking that the models work…")
         try:
             settings, problems = verify_models(client, vlm, embedding, text_model)
         except Exception as exc:
             say(f"✗ Could not check the models: {exc}", RED)
             return None, set()
+        if embedding in problems and embedding != original:
+            problems[original] = problems.pop(embedding)
     for name, reason in problems.items():
         say(f"✗ '{name}' {reason}", RED)
     return settings, set(problems)
@@ -858,7 +869,26 @@ def _installed(client) -> dict:
 
 
 def _reinstall(client, name: str) -> None:
-    """Pull a locked model that was removed from Ollama, after a disk-space check."""
+    """Pull a locked model that was removed from Ollama, after a disk-space check.
+
+    A pinned copy (see vlm.client.pin_model) is not on ollama.com: it is made again from the model it was copied from,
+    if that is still the same version."""
+    from vlm.client import is_pinned, pinned_name
+    if is_pinned(name):
+        base = (app_config.load_install_record().get("pinned_models") or {}).get(name, "")
+        try:
+            digest = {m.model: m.digest for m in client.list().models}.get(base)
+            if digest and pinned_name(base, digest) == name:
+                client.copy(base, name)
+                say(f"✓ {name} was made again from {base}.", "fg:ansigreen")
+                return
+        except Exception as exc:
+            say(f"✗ Could not make {name} again ({type(exc).__name__}: {exc}).", RED)
+            return
+        say(f"✗ {name} was removed from Ollama, and {base or 'the model it was copied from'} is not the same version any more, "
+            f"so the original cannot be restored. Run {app_config.RUN_COMMAND} and choose \"Re-embed images\" to rebuild the index "
+            "with the model that is installed.", RED)
+        return
     try:
         needed = fetch_model_specs(name)["bytes"]
         if needed * 1.1 > shutil.disk_usage(Path.home()).free:
@@ -962,6 +992,12 @@ def main() -> None:
     finally:
         conn.close()
     host = app_config.load_config().get("ollama_host", "")
+    from vlm.client import is_local
+    if host and not is_local(host):
+        say(f"⚠ config.json points to an Ollama on another computer ({host}). Imagent only works with an Ollama on this "
+            f"computer, so the address is set back to {DEFAULT_HOST}.", "fg:ansimagenta")
+        host = DEFAULT_HOST
+        app_config.save_config({**app_config.load_config(), "ollama_host": host})
 
     if settings is not None:
         step("Installed models")

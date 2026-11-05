@@ -51,6 +51,7 @@ class RunTests(IsolatedHome):
         for target, replacement in (
             ("check_ready", mock.Mock(return_value=(object(), settings))),
             ("unload_model", mock.Mock()),
+            ("collect_versions", mock.Mock(return_value={})),
             ("Progress", mock.MagicMock()),
         ):
             patcher = mock.patch.object(scan_and_index, target, replacement)

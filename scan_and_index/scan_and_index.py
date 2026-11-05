@@ -37,6 +37,7 @@ try:
     import config
     from db.connection import describe_db_error, init_db
     from db.operations import (
+        VERSION_COLUMNS,
         add_failure_history,
         delete_backlog,
         delete_backlog_paths,
@@ -52,6 +53,7 @@ try:
         park_backlog,
         record_backlog_failure,
         refund_backlog_attempts,
+        requeue_changed_parked,
         update_image_location,
         update_image_modified_at,
         upsert_backlog,
@@ -68,6 +70,7 @@ try:
     from pipeline.locking import AlreadyRunning, single_instance
     from pipeline.progress import Progress
     from pipeline.serialisation import serialize_embedding
+    from pipeline.versions import collect_versions, model_versions
     from pipeline.validation import find_overlapping_root, validate_folder
     from text_processing.formatters import build_description, build_search_text
     from vlm.analyzer import analyse_image, embed_search_text
@@ -163,6 +166,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         ``'indexed'``  — new image, not previously seen.
     """
     path_str = str(image_path)
+    versions = settings.get("versions", {})
     on_stage("checking file")
 
     # ------------------------------------------------------------------
@@ -213,6 +217,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         "description": build_description(analysis.reply, config.SUMMARY_FIELD),
         "vlm_metadata_json": vlm_metadata_json,
         **file_meta,
+        **{column: versions.get(column) for column in VERSION_COLUMNS},
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "processing_time_ms": elapsed_ms,
         "metadata_version": METADATA_VERSION,
@@ -223,7 +228,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # ``with conn`` starts a transaction; commits on success, rolls back on error.
     with conn:
         file_id = upsert_image_data(conn, record)
-        upsert_text_embedding(conn, file_id, embedding_bytes)
+        upsert_text_embedding(conn, file_id, embedding_bytes, settings["embedding_model"], versions.get("embedding_digest"), len(embedding))
         add_failure_history(conn, path_str, analysis.attempts)
     # ↑ Commit point — image is now considered fully indexed in the database.
 
@@ -265,6 +270,14 @@ def _index_backlog() -> None:
         conn.close()
         sys.exit(f"[imagent] {exc}")
 
+    settings = {**settings, "versions": collect_versions(client, settings)}
+    parked_versions = model_versions(settings["versions"])
+    if parked_versions:
+        with conn:
+            queued_again = requeue_changed_parked(conn, parked_versions)
+        if queued_again:
+            print(f"[imagent] {queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
+
     backlog_rows = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     total = len(backlog_rows)
     print(f"[imagent] Backlog  : {total} file(s) pending\n")
@@ -277,14 +290,13 @@ def _index_backlog() -> None:
 
     # Text in images is read by OCR. Without its models an image would be stored without its text and never
     # read again, so this is settled before the first image, not found out image by image.
-    print("[imagent] Loading the text-reading (OCR) models; the first time this downloads them…")
+    print("[imagent] Loading the text-reading (OCR) engine…")
     try:
         ocr.check_available()
     except Exception as exc:
         conn.close()
-        sys.exit(f"[imagent] The text-reading (OCR) models could not be loaded ({type(exc).__name__}: {exc}). "
-                 "Connect to the internet once so they can download, then run this again. "
-                 "Nothing was indexed; the backlog is kept.")
+        sys.exit(f"[imagent] The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
+                 f"Run: {config.INSTALL_COMMAND}. Nothing was indexed; the backlog is kept.")
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
@@ -330,7 +342,7 @@ def _index_backlog() -> None:
                     with conn:
                         add_failure_history(conn, row["file_path"], exc.attempts)
                         if exc.park:
-                            park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when)
+                            park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when, parked_versions)
                         else:
                             record_backlog_failure(conn, row["file_path"], str(exc), count_attempt=False)
                     progress.done("FAILED", str(exc))
