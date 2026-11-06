@@ -22,7 +22,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MIN_SQLITE_VERSION = (3, 24, 0)
 
 # The version of the schema in schema.sql. Raise it, and add the steps to _MIGRATIONS, with every schema change.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Version 1 is the schema of databases made before versions were recorded (user_version 0 with tables).
 # _MIGRATIONS[n] holds the statements that turn version n - 1 into version n.
@@ -32,6 +32,20 @@ _MIGRATIONS: dict[int, list[str]] = {
         "DROP TRIGGER IF EXISTS trg_image_data_delete_fts",
         "DROP TABLE IF EXISTS image_search_fts",
         "DROP TABLE IF EXISTS image_text_fts",
+    ],
+    # 3: what setup measured about the computer.
+    3: [
+        """CREATE TABLE IF NOT EXISTS device_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            num_ctx INTEGER NOT NULL,
+            use_mmap INTEGER NOT NULL CHECK (use_mmap IN (0, 1)),
+            image_long_edge INTEGER NOT NULL,
+            timeout_seconds INTEGER NOT NULL,
+            vlm_digest TEXT,
+            measurements TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            calibrated_at DATETIME NOT NULL
+        )""",
     ],
 }
 

@@ -61,7 +61,13 @@ If something is not set up, `run` tells you to run `sh install.sh` (or `install.
 
 - creates a private `.venv` and installs the required packages into it (your own Python is not changed);
 - checks Ollama and offers to install or update it;
-- lets you pick three models (vision, embedding, text) and downloads them.
+- lets you pick three models (vision, embedding, text) and downloads them;
+- measures your computer with the vision model, by itself and with no questions: it tries pictures from large to small
+  until one works, and stores the largest picture size, the memory window, whether the model is paged in from disk and
+  how long to wait for a reply, all as measured here, not guessed. Running install again measures again if the vision
+  model changed;
+- unpacks a set of test pictures (real photos of many kinds and sizes, and files made on the spot: huge, damaged and odd
+  ones, up to about 120 MB) and checks that this computer reads them, again by itself.
 
 The models cannot be changed afterwards, because every embedding model produces different vectors.
 Setup keeps a copy of the embedding model under its own name (`imagent-pin/…`), so updating the original model
@@ -123,8 +129,8 @@ Imagent's data (index, settings, logs) and `.venv`. It never touches your images
 | Windows | `%LOCALAPPDATA%\Imagent` |
 | Linux | `~/.local/share/imagent` |
 
-It holds the index (`imagent.db`), your settings (`config.json`) and the logs. If something goes wrong, the
-details are in `last_error.log` there.
+It holds the index (`imagent.db`), your settings (`config.json`), the logs and the test pictures (`test_pictures`). If
+something goes wrong, the details are in `last_error.log` there.
 
 ## Troubleshooting
 
@@ -156,4 +162,5 @@ tests/                       Automated tests
 python -m unittest      # run from the project folder, with the Python from .venv
 ```
 
-The tests use a temporary folder and never touch your real index or call Ollama.
+The tests use a temporary folder and never touch your real index or call Ollama. The real photos they use are in
+`tests/fixtures/images.zip`, with where each came from and its licence (all public domain or CC0) in its `manifest.json`.

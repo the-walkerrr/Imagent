@@ -14,10 +14,23 @@ from image_processing.hashing import compute_hash
 from image_processing.metadata import iso_utc
 
 
+# What setup measured about a computer (db/operations.set_device_settings).
+DEVICE = {"num_ctx": 8192, "use_mmap": False, "image_long_edge": 1024, "timeout_seconds": 300, "measurements": {}}
+
+
 class IsolatedHome(unittest.TestCase):
     """A test case whose database, config.json and lock files live in a temporary folder."""
 
     def setUp(self):
+        # A run puts the measured settings in place of config's starting values (config.apply_device_settings); undo that afterwards.
+        for name in ("OLLAMA_TIMEOUT", "OLLAMA_NUM_CTX", "OLLAMA_USE_MMAP", "IMAGE_MAX_LONG_EDGE"):
+            patcher = mock.patch.object(config, name, getattr(config, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for options in (config.LLM_OPTIONS, config.EMBED_OPTIONS):
+            patcher = mock.patch.dict(options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name) / "imagent-home"

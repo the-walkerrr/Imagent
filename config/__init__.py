@@ -91,10 +91,12 @@ OLLAMA_HOST: str = load_config().get("ollama_host", "")
 
 # --- Ollama ------------------------------------------------------------------
 OLLAMA_CONNECT_TIMEOUT: int = 10  # seconds to reach the server
+# These four depend on the computer. The values here are only where setup starts measuring: setup stores what it measured
+# (vlm/calibration.py) and apply_device_settings puts it in their place before every run.
 OLLAMA_TIMEOUT: int = 300  # seconds to wait for a reply (a cold model load counts) or between download updates
 OLLAMA_NUM_CTX: int = 8192
-OLLAMA_MAX_OUTPUT_TOKENS: int = 2200  # cap on the image-analysis reply; without it a runaway reply fills the whole context window
 OLLAMA_USE_MMAP: bool = False  # load each model fully into memory instead of paging it in from disk
+OLLAMA_MAX_OUTPUT_TOKENS: int = 2200  # cap on the image-analysis reply; without it a runaway reply fills the whole context window
 # What happens when the vision model's reply cannot be used. Each kind of trouble has its own steps (vlm/analyzer.py):
 #  - a reply that ended at the output cap: one retry with different sampling, then the cap is raised step by step;
 #  - a complete reply that does not fit the schema: the problems are sent back to the model and it answers again.
@@ -130,11 +132,30 @@ def _megapixel_limit() -> float:
 
 IMAGE_MAX_MEGAPIXELS: float = _megapixel_limit()  # optional hard limit in megapixels, set as max_megapixels in config.json; 0 = none
 FILE_SETTLE_SECONDS: int = 2  # a file that cannot be read is watched this long: if it changes it is still being written
-IMAGE_MAX_LONG_EDGE: int = 1024
-IMAGE_SIZE_MULTIPLE: int = 1  # resized sides are rounded down to a multiple of this; 1 = no rounding
+IMAGE_EDGE_CEILING: int = 1024  # the largest long side setup tries for the image sent to the vision model: beyond it the extra detail is not worth the time
+IMAGE_MAX_LONG_EDGE: int = IMAGE_EDGE_CEILING  # the long side actually used: the largest the computer managed, never above the ceiling
 IMAGE_JPEG_QUALITY: int = 85
 
-SAMPLE_IMAGES_DIR: Path = Path(__file__).parent.parent / "sample_images"  # folder used by benchmarks/all_sample_images.py
+# --- Measuring the computer at setup (vlm/calibration.py) ---------------------
+CALIBRATION_EDGE_STEP: float = 0.75  # each smaller image tried is this share of the one before
+CALIBRATION_MIN_EDGE: int = 336  # below this long side the vision model gets too little detail to describe a picture usefully
+CALIBRATION_MEMORY_HEADROOM: float = 0.25  # share of the free memory that must stay free after a model is loaded into it; else it is paged in from disk
+CALIBRATION_TIMEOUT_MARGIN: float = 2.0  # the wait is the measured time for the largest first reply times this
+CALIBRATION_TRIAL_TOKENS: int = 48  # tokens a trial reply is asked for: enough to time the model, not to finish a description
+
+
+def apply_device_settings(device: dict) -> None:
+    """Put what setup measured about this computer in place of the starting values, for this run.
+
+    The two option dicts are changed in place: code that took them earlier sees the new values."""
+    global OLLAMA_TIMEOUT, OLLAMA_NUM_CTX, OLLAMA_USE_MMAP, IMAGE_MAX_LONG_EDGE
+    OLLAMA_TIMEOUT = device["timeout_seconds"]
+    OLLAMA_NUM_CTX = device["num_ctx"]
+    OLLAMA_USE_MMAP = device["use_mmap"]
+    IMAGE_MAX_LONG_EDGE = device["image_long_edge"]
+    LLM_OPTIONS.update(num_ctx=OLLAMA_NUM_CTX, use_mmap=OLLAMA_USE_MMAP)
+    EMBED_OPTIONS.update(use_mmap=OLLAMA_USE_MMAP)
+
 
 # --- Database and indexing ---------------------------------------------------
 SQLITE_BUSY_TIMEOUT_S: int = 30  # how long a connection waits for another process's write lock

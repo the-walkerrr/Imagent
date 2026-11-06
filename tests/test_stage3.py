@@ -12,14 +12,14 @@ from unittest import mock
 import config
 from db.operations import (
     add_failure_history, get_backlog, get_model_settings, get_or_add_root, list_parked, park_backlog, requeue_changed_parked,
-    requeue_parked, set_model_settings, update_embedding_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
+    requeue_parked, set_device_settings, set_model_settings, update_embedding_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
 )
 from install import install
 from pipeline import versions as versions_module
 from pipeline.serialisation import serialize_embedding
 from reembed import reembed
 from retry_failed import retry_failed
-from tests.support import IsolatedHome
+from tests.support import DEVICE, IsolatedHome
 from vlm import client as vlm_client
 from vlm.client import NotReady, check_ready, pin_model, pinned_name
 
@@ -53,6 +53,7 @@ class ReadinessTests(IsolatedHome):
         conn = self.connect()
         with conn:
             set_model_settings(conn, settings)
+            set_device_settings(conn, DEVICE, "vd")
         said = []
         with mock.patch.object(config, "OLLAMA_HOST", host), mock.patch.object(vlm_client, "make_client", return_value=client), \
                 mock.patch.object(vlm_client, "server_version", return_value=(0, 9, 0)):
@@ -172,6 +173,28 @@ class DatabaseTests(IsolatedHome):
         self.assertEqual(tuple(row), ("queued", 0, None, None))
         with self.conn:
             self.assertEqual(requeue_parked(self.conn), 1)  # the rest
+
+    def test_any_number_of_parked_files_can_be_queued_again_by_path(self):
+        paths = [f"/many/{n}.png" for n in range(1200)]
+
+        class Counting:
+            """Wraps the connection and notes the most ? that any one statement was given."""
+            most = 0
+
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, sql, params=()):
+                Counting.most = max(Counting.most, len(params))
+                return self.conn.execute(sql, params)
+
+        with self.conn:
+            for path in paths:
+                upsert_backlog(self.conn, path, self.root, "t")
+                park_backlog(self.conn, path, "cut_off", "cut", "model_changed")
+            self.assertEqual(requeue_parked(Counting(self.conn), paths=paths), 1200)
+        self.assertLessEqual(Counting.most, 999)  # the limit of the oldest SQLite Imagent supports
+        self.assertEqual(list_parked(self.conn), [])
 
     def test_a_record_and_its_vector_say_what_made_them(self):
         record = {"root_id": self.root, "file_path": "/a.png", "hash": "h", "short_description": "s", "description": "d",
@@ -382,13 +405,14 @@ class SetupPinTests(IsolatedHome):
 
         def verify(c, vlm, embedding, text_model):
             captured["embedding"] = embedding
-            return {"embedding_model": embedding}, {}
+            return {"vlm_model": "v:latest", "embedding_model": embedding}, {}
 
         @contextlib.contextmanager
         def fake_ollama(host):
             yield client
         with mock.patch.object(install, "ollama_client", fake_ollama), mock.patch.object(install, "_pull_models"), \
-                mock.patch.object(install, "verify_models", verify), mock.patch.object(install, "say"):
+                mock.patch.object(install, "verify_models", verify), mock.patch.object(install, "say"), \
+                mock.patch.object(install, "measure_computer", return_value=(DEVICE, None)):
             settings, rejected = install.download_and_verify("http://localhost:11434", "v", "e", "j")
         self.assertEqual(captured["embedding"], "imagent-pin/e:abc123abc123")
         self.assertEqual(settings["embedding_model"], "imagent-pin/e:abc123abc123")

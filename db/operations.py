@@ -13,6 +13,8 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+import config
+
 # The columns of image_data that say what produced a record (see db/schema.sql); a record without them has them empty.
 VERSION_COLUMNS = ("vlm_digest", "prompt_hash", "schema_hash", "search_text_version", "ocr_version", "ollama_version", "app_version")
 
@@ -52,6 +54,30 @@ def set_model_settings(conn: sqlite3.Connection, settings: dict) -> None:
                 :vlm_digest, :embedding_digest, :judge_digest, :embedding_dim, :locked_at)
         """,
         {**settings, "locked_at": _now()},
+    )
+
+
+def get_device_settings(conn: sqlite3.Connection) -> dict | None:
+    """Return what setup measured about this computer (see ``vlm.calibration``), or None when it has not been measured."""
+    row = conn.execute(
+        "SELECT num_ctx, use_mmap, image_long_edge, timeout_seconds, vlm_digest, measurements FROM device_settings WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return None
+    return {**dict(row), "use_mmap": bool(row["use_mmap"]), "measurements": json.loads(row["measurements"])}
+
+
+def set_device_settings(conn: sqlite3.Connection, device: dict, vlm_digest: str | None) -> None:
+    """Store what was measured, replacing the earlier measurement (the computer or the vision model may have changed)."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO device_settings
+            (id, num_ctx, use_mmap, image_long_edge, timeout_seconds, vlm_digest, measurements, app_version, calibrated_at)
+        VALUES (1, :num_ctx, :use_mmap, :image_long_edge, :timeout_seconds, :vlm_digest, :measurements, :app_version, :calibrated_at)
+        """,
+        {**device, "use_mmap": int(device["use_mmap"]), "vlm_digest": vlm_digest,
+         "measurements": json.dumps(device["measurements"], sort_keys=True), "app_version": config.APP_VERSION,
+         "calibrated_at": _now()},
     )
 
 
@@ -276,15 +302,16 @@ def requeue_parked(conn: sqlite3.Connection, kind: str | None = None, paths: lis
     if kind is not None:
         where += " AND park_kind = ?"
         params.append(kind)
-    if paths is not None:
-        if not paths:
-            return 0
-        where += f" AND file_path IN ({', '.join('?' for _ in paths)})"
-        params.extend(paths)
-    cursor = conn.execute(
-        f"UPDATE backlog SET status = 'queued', attempts = 0, park_kind = NULL, retry_when = NULL, "
-        f"park_versions = NULL, last_error = NULL WHERE {where}", params)
-    return cursor.rowcount
+    sql = ("UPDATE backlog SET status = 'queued', attempts = 0, park_kind = NULL, retry_when = NULL, "
+           "park_versions = NULL, last_error = NULL WHERE ")
+    if paths is None:
+        return conn.execute(sql + where, params).rowcount
+    requeued = 0
+    for start in range(0, len(paths), _CHUNK):  # SQLite allows only so many ? in one statement
+        chunk = paths[start:start + _CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        requeued += conn.execute(f"{sql}{where} AND file_path IN ({placeholders})", [*params, *chunk]).rowcount
+    return requeued
 
 
 def update_embedding_settings(conn: sqlite3.Connection, model: str, digest: str | None, dim: int) -> None:

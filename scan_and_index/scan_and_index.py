@@ -306,6 +306,7 @@ def _index_backlog() -> None:
     stopped = ""
     recent_retries: deque[bool] = deque(maxlen=config.RETRY_RATE_WINDOW)  # for the latest analysed images: did the model's reply need asking for again?
     progress = Progress(total)
+    root_paths = {root["root_id"]: root["path"] for root in list_roots(conn)}
 
     try:
         for i, row in enumerate(backlog_rows, start=1):
@@ -325,11 +326,6 @@ def _index_backlog() -> None:
                     io_failures.clear()
                     if result != "skipped":
                         recent_retries.append(bool(retried))
-                except FileNotFoundError:
-                    # Deleted since the scan: nothing to index. The next scan removes any stale record.
-                    with conn:
-                        delete_backlog(conn, row["file_path"])
-                    progress.done("gone")
                 except sqlite3.Error:
                     raise  # the database is the problem, not this image: handled below
                 except IndexingFailure as exc:
@@ -360,6 +356,12 @@ def _index_backlog() -> None:
                     stopped = f"Indexing stopped. {exc} Nothing was held against the files; the rest stays queued."
                     break
                 except Exception as exc:
+                    if isinstance(exc, FileNotFoundError) and _is_gone(image_path, root_paths.get(row["root_id"])):
+                        # Deleted since the scan, while its folder is still there: nothing to index. The next scan removes any stale record.
+                        with conn:
+                            delete_backlog(conn, row["file_path"])
+                        progress.done("gone")
+                        continue
                     counts["failed"] += 1
                     counts_as_attempt, ollama_problem = classify_failure(exc)
                     log_error(
@@ -438,6 +440,14 @@ def _index_backlog() -> None:
     conn.close()
     if stopped:
         sys.exit(1)
+
+
+def _is_gone(image_path: Path, root_path: str | None) -> bool:
+    """True if the file was deleted while the folder it was found in is still there.
+
+    A missing file whose folder is missing too points at a drive that went away, or at a missing program file, and is
+    not the file's doing: it is handled as a failure to read, which stops the run after a few in a row."""
+    return root_path is not None and Path(root_path).is_dir() and not image_path.exists()
 
 
 def _print_given_up(conn) -> None:

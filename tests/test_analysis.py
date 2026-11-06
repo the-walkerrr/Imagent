@@ -281,6 +281,21 @@ class TroubleReachingTheModelTests(unittest.TestCase):
         (reply, _), _, _ = self.ask(FlakyClient(httpx.ReadTimeout("slow", request=REQUEST)), make_client=make_client)
         self.assertEqual(make_client.call_count, 1)
 
+    def test_a_timeout_after_a_reply_that_had_to_be_asked_for_again_is_still_put_right(self):
+        longer = FlakyClient(GOOD)
+        make_client = mock.Mock(return_value=longer)
+        client = FlakyClient(CUT[0], httpx.ReadTimeout("slow", request=REQUEST))
+        (reply, attempts), _, _ = self.ask(client, make_client=make_client)
+        self.assertEqual(reply, GOOD_REPLY)
+        self.assertEqual([a["kind"] for a in attempts], ["invalid_reply", "timeout", None])
+
+    def test_a_crash_after_a_reply_that_had_to_be_asked_for_again_is_still_put_right(self):
+        client = FlakyClient(CUT[0], httpx.RemoteProtocolError("server disconnected", request=REQUEST), GOOD)
+        (reply, attempts), _, patched = self.ask(client)
+        self.assertEqual(reply, GOOD_REPLY)
+        patched["restart_server"].assert_called_once()
+        self.assertEqual([a["kind"] for a in attempts], ["invalid_reply", "server_crash", None])
+
 
 class EmbeddingTests(unittest.TestCase):
     class Embedder:

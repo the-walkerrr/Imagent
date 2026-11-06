@@ -36,6 +36,37 @@ CREATE TABLE IF NOT EXISTS model_settings (
 
 
 -- ============================================================================
+-- TABLE: device_settings
+--
+-- What: What setup measured about this computer with the locked models (a single row).
+-- Why:  How long to wait for a reply, how large a context and an image the models can take, and whether to
+--       page models in from disk depend on the machine, so they are measured (vlm/calibration.py), not guessed.
+-- When: Written with model_settings at the end of setup, and again (settings.vlm_digest differs) when the
+--       vision model changes. Read by config.apply_device_settings before every run.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS device_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+
+    -- The values every request to the models is sent with (see config.py: they must not change between requests).
+    num_ctx INTEGER NOT NULL,
+    use_mmap INTEGER NOT NULL CHECK (use_mmap IN (0, 1)),
+
+    -- Longest side, in pixels, of the image sent to the vision model.
+    image_long_edge INTEGER NOT NULL,
+
+    -- Seconds to wait for the first reply of a request; each wait that runs out is doubled (vlm/analyzer.py).
+    timeout_seconds INTEGER NOT NULL,
+
+    -- The vision model these were measured with (its digest) and the numbers they came from, as JSON.
+    vlm_digest TEXT,
+    measurements TEXT NOT NULL,
+
+    app_version TEXT NOT NULL,
+    calibrated_at DATETIME NOT NULL
+);
+
+
+-- ============================================================================
 -- TABLE: scan_roots
 --
 -- What: The folders the user has pointed Imagent at.

@@ -20,7 +20,7 @@ import httpx
 import ollama
 
 import config
-from db.operations import get_model_settings
+from db.operations import get_device_settings, get_model_settings
 
 
 # Structured output (the JSON schema sent with each request) arrived in Ollama 0.5.0.
@@ -160,6 +160,10 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
     settings = get_model_settings(conn)
     if settings is None:
         raise NotReady(f"Imagent is not set up yet. Run: {config.INSTALL_COMMAND}")
+    device = get_device_settings(conn)
+    if device is None:
+        raise NotReady(f"Imagent has not measured this computer yet. Run: {config.INSTALL_COMMAND}; it does that by itself.")
+    config.apply_device_settings(device)
     if not config.OLLAMA_HOST:
         raise NotReady("Imagent's settings file (config.json) is missing or damaged, so it does not know where Ollama is. "
                        f"Run: {config.INSTALL_COMMAND}. It restores the address; your models and index are kept.")

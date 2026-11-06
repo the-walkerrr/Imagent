@@ -44,7 +44,7 @@ class AnalysisFailed(IndexingFailure):
 
 
 class ServiceTrouble(Exception):
-    """Reaching the model failed in a way the steps in ``_send`` could not put right."""
+    """Reaching the model failed in a way the steps in ``send_request`` could not put right."""
 
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -84,7 +84,7 @@ def analyse_image(client: ollama.Client, model: str, image_path: str,
     return Analysis(reply, ocr_text, features, attempts)
 
 
-def _send(client: ollama.Client, model: str, request: dict, note: Callable[[str, str], None],
+def send_request(client: ollama.Client, model: str, request: dict, note: Callable[[str, str], None],
           on_stage: Callable[[str], None]) -> tuple:
     """Send a chat request, putting right trouble in reaching the model, each kind in its own way.
 
@@ -173,7 +173,7 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
             options.update(temperature=config.ANALYSIS_RETRY_TEMPERATURE, seed=retries,
                            repeat_penalty=config.ANALYSIS_RETRY_REPEAT_PENALTY)
         try:
-            response, client = _send(client, model, {"model": model, "messages": messages, "format": config.ANALYSIS_SCHEMA,
+            response, client = send_request(client, model, {"model": model, "messages": messages, "format": config.ANALYSIS_SCHEMA,
                                                      "options": options}, note, on_stage)
         except ServiceTrouble as trouble:
             raise AnalysisFailed(trouble.kind, str(trouble), attempts) from trouble
@@ -197,7 +197,7 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
                 sampling_tried, changed_sampling, step = True, True, "changed sampling"
                 retries += 1
                 messages = first_messages
-                note = "the reply was cut off; asking again with different sampling"
+                reason = "the reply was cut off; asking again with different sampling"
             else:
                 room = config.OLLAMA_NUM_CTX - (prompt_tokens or 0)  # the context window holds the prompt and the reply
                 larger = min(int(cap * config.ANALYSIS_CAP_STEP), room)
@@ -208,7 +208,7 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
                 cap, changed_sampling, step = larger, False, "raised cap"
                 raises += 1
                 messages = first_messages
-                note = f"the reply was cut off; asking again with room for {cap} tokens"
+                reason = f"the reply was cut off; asking again with room for {cap} tokens"
         else:
             if feedback_tries >= config.ANALYSIS_RETRIES:
                 raise AnalysisFailed(
@@ -222,9 +222,9 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
                 {"role": "user", "content": f"That reply was not valid ({'; '.join(problems[:3])[:300]}). "
                                             "Reply again with one complete, valid JSON object that follows the schema."},
             ]
-            note = "the reply did not fit the schema; asking again"
+            reason = "the reply did not fit the schema; asking again"
         on_retry(kind)
-        on_stage(f"retrying: {note}")
+        on_stage(f"retrying: {reason}")
 
 
 def _too_long(exc: ollama.ResponseError) -> bool:

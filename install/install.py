@@ -32,13 +32,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config as app_config
 from db.connection import init_db
-from db.operations import get_model_settings, set_model_settings
+from db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
 from pipeline.console import make_output_safe, run_cli
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_DIR / ".venv"
 REQUIREMENTS = PROJECT_DIR / "requirements.txt"
-CONFIG_PATH = app_config.CONFIG_PATH
 DEFAULT_HOST = "http://localhost:11434"
 RELAUNCH_FLAG = "--relaunched"  # passed to the copy of this script that runs inside .venv
 INSTALL_TIMEOUT = 1800  # seconds allowed for pip and for installing Ollama
@@ -798,6 +797,23 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
     }, {}
 
 
+def measure_computer(client, vlm_model: str):
+    """Measure this computer with the vision model (vlm/calibration.py), with no questions asked.
+
+    Returns (device settings, None), or (None, what is wrong with the model) when it does not run on this computer."""
+    from vlm.calibration import NotPossible, calibrate
+    say("Measuring this computer with the vision model. This runs by itself and can take a few minutes…")
+    try:
+        device = calibrate(client, vlm_model, lambda message: say(f"  {message}"))
+    except NotPossible as exc:
+        return None, str(exc)
+    except Exception as exc:
+        return None, f"could not be measured ({type(exc).__name__}: {exc})."
+    say(f"✓ Pictures up to {device['image_long_edge']} pixels, a memory window of {device['num_ctx']}, "
+        f"waiting up to {device['timeout_seconds']} seconds for a reply.", "fg:ansigreen")
+    return device, None
+
+
 def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
     """Download all models and verify them. Returns (settings, names_to_clear); settings is None on failure."""
     with ollama_client(host) as client:
@@ -827,6 +843,10 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
             return None, set()
         if embedding in problems and embedding != original:
             problems[original] = problems.pop(embedding)
+        if settings is not None:
+            settings["device"], reason = measure_computer(client, settings["vlm_model"])
+            if reason:
+                settings, problems = None, {vlm: reason}
     for name, reason in problems.items():
         say(f"✗ '{name}' {reason}", RED)
     return settings, set(problems)
@@ -958,10 +978,57 @@ def manage_models(settings: dict, host: str) -> None:
             _erase_last_line()
 
             if action == "done":
-                say("✓ Setup complete.", "fg:green")
                 return
             _reinstall(client, name)
             say("")
+
+
+def check_test_pictures() -> None:
+    """Unpack the test pictures into Imagent's data folder and run the steps of indexing that need no model over them.
+
+    Nothing is asked. A problem here is reported but does not stop setup: it is a check, and Imagent works without it."""
+    from image_processing import sample_pictures
+    folder = app_config.IMAGENT_HOME / "test_pictures"
+    say("Preparing the test pictures and checking that this computer can read them…")
+    findings: list[str] = []
+    try:
+        sample_pictures.unpack(folder)
+        expected = sample_pictures.make_extremes(folder, say=lambda message: say(f"  {message}", "fg:ansimagenta"))
+        outcomes = sample_pictures.check_pictures(folder, expected, say=findings.append)
+    except Exception as exc:
+        say(f"⚠ The test pictures could not be prepared ({type(exc).__name__}: {exc}). Imagent works without them.", "fg:ansimagenta")
+        return
+    summary = ", ".join(f"{count} {outcome}" for outcome, count in sorted(outcomes.items()))
+    say(f"✓ Checked {sum(outcomes.values())} test pictures: {summary}.", "fg:ansigreen")
+    for finding in findings:
+        say(f"⚠ {finding}", "fg:ansimagenta")
+
+
+def measure_again_if_needed(settings: dict, host: str) -> None:
+    """Setup was run before: measure this computer if it never was, or if the vision model is not the one it was measured with."""
+    conn = init_db(str(app_config.DB_PATH))
+    try:
+        device = get_device_settings(conn)
+    finally:
+        conn.close()
+    with ollama_client(host) as client:
+        if client is None:
+            sys.exit(1)
+        try:
+            digest = {m.model: m.digest for m in client.list().models}.get(settings["vlm_model"])
+        except Exception as exc:
+            fail(f"Could not read the model list from Ollama: {exc}")
+        if digest is None or (device is not None and device["vlm_digest"] == digest):
+            return  # a missing model was offered for reinstall above; a measured one is still right
+        device, reason = measure_computer(client, settings["vlm_model"])
+    if reason:
+        fail(f"'{settings['vlm_model']}' {reason}")
+    conn = init_db(str(app_config.DB_PATH))
+    try:
+        with conn:
+            set_device_settings(conn, device, digest)
+    finally:
+        conn.close()
 
 
 # --- Main ---------------------------------------------------------------------
@@ -1005,18 +1072,24 @@ def main() -> None:
             host = DEFAULT_HOST
             app_config.save_config({"ollama_host": host})
         manage_models(settings, host)
+        measure_again_if_needed(settings, host)
+        check_test_pictures()
+        say("✓ Setup complete.", "fg:green")
         return
 
     settings, host = choose_models(host)
+    device = settings.pop("device")
     app_config.save_config({"ollama_host": host})
     conn = init_db(str(app_config.DB_PATH))
     try:
         with conn:
+            set_device_settings(conn, device, settings["vlm_digest"])
             set_model_settings(conn, settings)  # last step: this row marks setup as complete
     except sqlite3.IntegrityError:
         fail("Imagent was already set up by another run of setup.")
     finally:
         conn.close()
+    check_test_pictures()
     say(f"\n✓ Setup complete. Your models are locked in {app_config.DB_PATH}", "fg:green")
 
 

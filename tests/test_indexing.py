@@ -1,5 +1,6 @@
 import contextlib
 import io
+import shutil
 import sqlite3
 import unittest
 from pathlib import Path
@@ -93,6 +94,25 @@ class RunTests(IsolatedHome):
         with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
             scan_and_index._index_backlog()
         self.assertEqual(self._attempts(), {"b.png": (1, "ValueError: cannot be decoded")})
+
+    def test_a_file_deleted_since_the_scan_is_dropped_from_the_queue_and_the_run_goes_on(self):
+        def index_image(conn, client, settings, root_id, path, on_stage, on_retry):
+            if path.name == "b.png":
+                raise FileNotFoundError(str(path))  # the folder is still there, the file is not
+            return "indexed", "ok"
+        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
+            scan_and_index._index_backlog()
+        self.assertEqual(self._attempts(), {})  # b.png is no longer queued, and nothing was held against it
+
+    def test_files_missing_together_with_their_folder_stop_the_run_and_keep_their_attempts(self):
+        shutil.rmtree(self.work)  # the drive went away
+        with mock.patch.object(scan_and_index, "index_image", side_effect=FileNotFoundError("gone")):
+            with self.assertRaises(SystemExit) as stop:
+                scan_and_index._index_backlog()
+        self.assertEqual(stop.exception.code, 1)
+        attempts = self._attempts()
+        self.assertEqual(len(attempts), 4)  # none was dropped from the queue
+        self.assertTrue(all(count == 0 for count, _ in attempts.values()))  # the attempts were given back
 
     def test_a_reply_that_cannot_be_put_right_parks_the_file_and_the_run_goes_on(self):
         attempt = {"step": "first try", "kind": "cut_off", "options": {"num_predict": 5}, "detail": "cut", "raw_reply": "{",
