@@ -11,20 +11,30 @@ import colorsys
 
 from PIL import Image, ImageOps
 
+from image_processing.preprocess import shrink_on_load
+
 _COLOR_SAMPLE_SIZE = (160, 160)
+_EXIF_ORIENTATION = 0x0112
+_SIDEWAYS = (5, 6, 7, 8)  # the orientations that turn the picture a quarter
 _PALETTE_SIZE = 6
 _MIN_COLOR_SHARE = 0.05  # a color must cover at least this fraction of the image to be listed
 _MAX_COLORS = 5
 
 
-def extract_image_features(image_path: str) -> dict:
+def extract_image_features(image_path: str, gentle: bool = False) -> dict:
     """Return ``orientation`` ('landscape', 'portrait' or 'square') and ``dominant_colors``.
 
     EXIF orientation is applied first, so a phone photo stored sideways is judged as displayed.
+    ``gentle``: for an image that is big for the memory free, a JPEG is shrunk while it is decoded, since only
+    a small sample is used for the colors (see image_processing/memory.py).
     """
     with Image.open(image_path) as img:
-        img = ImageOps.exif_transpose(img).convert("RGB")
         width, height = img.size
+        if img.getexif().get(_EXIF_ORIENTATION, 1) in _SIDEWAYS:
+            width, height = height, width
+        if gentle:
+            shrink_on_load(img, _COLOR_SAMPLE_SIZE)
+        img = ImageOps.exif_transpose(img).convert("RGB")
         if abs(width - height) / max(width, height) < 0.05:
             orientation = "square"
         else:

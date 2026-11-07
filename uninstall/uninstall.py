@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import secrets
 import shutil
 import sqlite3
 import stat
+import string
 import subprocess
 import sys
 import time
@@ -37,7 +39,7 @@ from pipeline.locking import AlreadyRunning, single_instance
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_DIR / ".venv"
 DEFAULT_HOST = "http://localhost:11434"
-FINAL_PHRASE = "uninstall imagent"
+FINAL_CODE_LENGTH = 10
 CANCELLED = "Uninstall cancelled. Nothing was deleted."
 
 
@@ -251,6 +253,12 @@ def show_plan(stats: dict, plan: dict) -> None:
 
 # --- Three confirmations ------------------------------------------------------------
 
+def make_final_code() -> str:
+    """A new random string of letters and digits, typed in the last confirmation so it cannot be answered from habit."""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(FINAL_CODE_LENGTH))
+
+
 def confirm_three_times(stats: dict) -> bool:
     """Ask three different questions; any wrong answer cancels everything."""
     if input("\n  Confirmation 1 of 3. Do you want to uninstall Imagent and delete everything above? Type yes: "
@@ -260,7 +268,8 @@ def confirm_three_times(stats: dict) -> bool:
     if input("  Confirmation 2 of 3. How many indexed images will be lost? (see the list above): ").strip() != expected:
         print("  That is not the number in the list.")
         return False
-    if input(f"  Confirmation 3 of 3. This is the last chance. Type exactly \"{FINAL_PHRASE}\": ").strip() != FINAL_PHRASE:
+    code = make_final_code()
+    if input(f"  Confirmation 3 of 3. This is the last chance. Type exactly \"{code}\": ").strip() != code:
         return False
     return True
 
@@ -311,9 +320,9 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        sys.exit("[imagent] Uninstalling needs an interactive terminal. Run: sh uninstall/uninstall.sh (or uninstall/uninstall.bat on Windows)")
+        sys.exit("Uninstalling needs an interactive terminal. Run: sh uninstall/uninstall.sh (or uninstall/uninstall.bat on Windows)")
     if VENV_DIR.exists() and Path(sys.prefix).resolve() == VENV_DIR.resolve():
-        sys.exit("[imagent] This is running inside Imagent's own .venv, which it needs to delete. "
+        sys.exit("This is running inside Imagent's own .venv, which it needs to delete. "
                  "Run `deactivate` (or open a new terminal) and start the uninstaller again.")
 
     stats = read_stats()
@@ -326,13 +335,13 @@ def main() -> None:
             return
         show_plan(stats, plan)
         if not confirm_three_times(stats):
-            sys.exit(f"\n[imagent] {CANCELLED}")
+            sys.exit(f"\n{CANCELLED}")
         if config.IMAGENT_HOME.exists():
             try:
                 with single_instance("indexing", "Indexing"):  # deleting under a running index would make it fail on every image
                     pass
             except AlreadyRunning as exc:
-                sys.exit(f"\n[imagent] {exc} Nothing was deleted.")
+                sys.exit(f"\n{exc} Nothing was deleted.")
         print()
         problems = delete_everything(plan, base)
 

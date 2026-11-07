@@ -25,11 +25,12 @@ class MigrationTests(IsolatedHome):
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
 
     def _old_database(self):
-        """A database as made before schema versions were recorded: user_version 0, with the full-text tables."""
+        """A database as made before schema versions were recorded: user_version 0, with the full-text tables and no device settings."""
         self.home.mkdir(parents=True)
         conn = sqlite3.connect(config.DB_PATH)
         conn.executescript(connection._SCHEMA_PATH.read_text(encoding="utf-8"))
         conn.executescript("""
+            DROP TABLE device_settings;  -- databases of that time had not measured the computer yet
             CREATE VIRTUAL TABLE image_search_fts USING fts5(file_id UNINDEXED, search_text);
             CREATE VIRTUAL TABLE image_text_fts USING fts5(file_id UNINDEXED, partial_text, tokenize = 'trigram');
             CREATE TRIGGER trg_image_data_delete_fts AFTER DELETE ON image_data

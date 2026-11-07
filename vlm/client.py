@@ -6,6 +6,7 @@ indexing or search session.
 from __future__ import annotations
 
 import atexit
+import io
 import os
 import platform
 import shutil
@@ -18,9 +19,10 @@ from urllib.parse import urlparse
 
 import httpx
 import ollama
+from PIL import Image
 
 import config
-from db.operations import get_model_settings
+from db.operations import get_device_settings, get_model_settings
 
 
 # Structured output (the JSON schema sent with each request) arrived in Ollama 0.5.0.
@@ -31,13 +33,27 @@ class NotReady(Exception):
     """Setup is incomplete or Ollama cannot serve the locked models; the message tells the user what to do."""
 
 
-def make_client(host: str | None = None) -> ollama.Client:
+def check_pictures_readable() -> None:
+    """Confirm Pillow can write and read back a picture, so a broken install stops a run before it starts and does not fail on every image.
+
+    Done in memory: nothing is written to disk. Raises NotReady otherwise."""
+    try:
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2)).save(buffer, "PNG")
+        buffer.seek(0)
+        Image.open(buffer).load()
+    except Exception as exc:
+        raise NotReady(f"Pillow, the library Imagent reads pictures with, does not work on this computer ({type(exc).__name__}: {exc}). "
+                       f"Run: {config.INSTALL_COMMAND}. It installs the packages Imagent needs again.") from exc
+
+
+def make_client(host: str | None = None, timeout: float | None = None) -> ollama.Client:
     """Return an Ollama client that can never wait forever.
 
-    ``host`` defaults to the one saved by setup. The read timeout also applies between the
-    progress updates of a download, so a stalled download ends too.
+    ``host`` defaults to the one saved by setup, ``timeout`` (seconds to wait for a reply) to ``config.OLLAMA_TIMEOUT``.
+    The read timeout also applies between the progress updates of a download, so a stalled download ends too.
     """
-    timeout = httpx.Timeout(config.OLLAMA_TIMEOUT, connect=config.OLLAMA_CONNECT_TIMEOUT)
+    timeout = httpx.Timeout(timeout or config.OLLAMA_TIMEOUT, connect=config.OLLAMA_CONNECT_TIMEOUT)
     return ollama.Client(host=host or config.OLLAMA_HOST, timeout=timeout)
 
 
@@ -125,9 +141,25 @@ def stop_server(process: subprocess.Popen) -> None:
         process.kill()
 
 
+def restart_server(client: ollama.Client) -> bool:
+    """Make sure the Ollama server answers, starting it again if it went down (only possible when it is on this computer).
+
+    The server this starts is stopped when the program ends. True if the server answers.
+    """
+    if is_reachable(client):
+        return True
+    if not (is_local(config.OLLAMA_HOST) and shutil.which("ollama")):
+        return False
+    process = start_server(client, config.OLLAMA_HOST)
+    if process is None:
+        return False
+    atexit.register(_stop_started_server, process)
+    return True
+
+
 def _stop_started_server(process: subprocess.Popen) -> None:
     stop_server(process)
-    print("[imagent] Stopped the Ollama server this run started.")
+    print("Stopped the Ollama server this run started.")
 
 
 def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print) -> tuple[ollama.Client, dict]:
@@ -141,12 +173,20 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
     again when the program exits. Its notices go through ``say``, so a caller with a live
     progress line can print them without breaking it.
     """
+    check_pictures_readable()
     settings = get_model_settings(conn)
     if settings is None:
         raise NotReady(f"Imagent is not set up yet. Run: {config.INSTALL_COMMAND}")
+    device = get_device_settings(conn)
+    if device is None:
+        raise NotReady(f"Imagent has not measured this computer yet. Run: {config.INSTALL_COMMAND}; it does that by itself.")
+    config.apply_device_settings(device)
     if not config.OLLAMA_HOST:
         raise NotReady("Imagent's settings file (config.json) is missing or damaged, so it does not know where Ollama is. "
                        f"Run: {config.INSTALL_COMMAND}. It restores the address; your models and index are kept.")
+    if not is_local(config.OLLAMA_HOST):
+        raise NotReady(f"Imagent only works with an Ollama that runs on this computer, but config.json points to {config.OLLAMA_HOST}. "
+                       f"Run: {config.INSTALL_COMMAND}. It restores the local address; your models and index are kept.")
 
     client = make_client()
     if not is_reachable(client) and is_local(config.OLLAMA_HOST) and shutil.which("ollama"):
@@ -173,11 +213,47 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
         if digest is None:
             raise NotReady(f"The {role} model '{name}' is not installed in Ollama. Run: {config.INSTALL_COMMAND}")
         stored = settings[f"{role}_digest"]
+        if stored and digest != stored and role == "embedding":
+            raise NotReady(
+                f"The embedding model '{name}' is not the same version it was when you set up Imagent. Vectors made by another "
+                "version cannot be compared with the ones already stored, so searches would miss images and new images "
+                f"would be indexed wrongly. Run: {config.RUN_COMMAND} and choose \"Re-embed images\" to rebuild the stored vectors "
+                "with the installed model (it shows how long that takes first), or put the original version of the model back.")
         if stored and digest != stored:
-            say(f"[imagent] Warning: '{name}' is not the same version it was when you set up Imagent. "
-                "Results may be less accurate" +
-                (" and searches may miss images." if role == "embedding" else "."))
+            say(f"Warning: '{name}' is not the same version it was when you set up Imagent. Results may be less accurate.")
+        if role == "vlm":
+            try:
+                abilities = client.show(name).capabilities
+            except Exception:
+                abilities = None  # an Ollama that cannot say: setup already checked this model
+            if isinstance(abilities, list) and "vision" not in abilities:
+                raise NotReady(f"The vision model '{name}' cannot look at images (Ollama lists its abilities as: "
+                               f"{', '.join(abilities) or 'none'}). Imagent cannot index with it.")
     return client, settings
+
+
+# A model that setup copies under a name of its own, so that pulling a newer version of the original cannot change what
+# Imagent uses: Ollama keeps the old files for as long as the copy exists.
+PIN_PREFIX = "imagent-pin/"
+
+
+def is_pinned(name: str) -> bool:
+    return name.startswith(PIN_PREFIX)
+
+
+def pinned_name(model: str, digest: str) -> str:
+    """The name of the copy of ``model`` (as it is now, by its digest), e.g. ``imagent-pin/bge-m3:3a1f9c2d7e11``."""
+    return f"{PIN_PREFIX}{model.split(':')[0].split('/')[-1]}:{digest.split(':')[-1][:12]}"
+
+
+def pin_model(client: ollama.Client, model: str) -> tuple[str, str]:
+    """Copy ``model`` under its pinned name unless that copy exists. Returns the pinned name and the digest of its weights."""
+    digests = {installed.model: installed.digest for installed in client.list().models}
+    digest = digests[model]
+    target = pinned_name(model, digest)
+    if target not in digests:
+        client.copy(model, target)
+    return target, digest
 
 
 def other_models_running(client: ollama.Client, keep: list[str]) -> list[str]:

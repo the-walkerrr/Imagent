@@ -46,14 +46,14 @@ def run_cli(main: Callable[[], None], cancelled: str = "Cancelled.") -> None:
     except KeyboardInterrupt:
         sys.exit(f"\n{cancelled}")
     except EOFError:
-        sys.exit("\n[imagent] An answer is needed here but there is no terminal to type it in. "
+        sys.exit("\nAn answer is needed here but there is no terminal to type it in. "
                  "Run this from a terminal, or give the value on the command line.")
     except DatabaseProblem as exc:
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
     except sqlite3.Error as exc:
-        sys.exit(f"[imagent] {describe_db_error(exc)}")
+        sys.exit(f"{describe_db_error(exc)}")
     except Exception as exc:
         saved = _save_traceback()
         where = f"Details were saved to {saved}." if saved else "The details could not be saved."
-        sys.exit(f"[imagent] Something unexpected went wrong ({type(exc).__name__}: {exc}). {where} "
+        sys.exit(f"Something unexpected went wrong ({type(exc).__name__}: {exc}). {where} "
                  "Running it again may work; if it keeps happening, please report it with that file.")

@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import textwrap
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -37,6 +39,8 @@ try:
     import config
     from db.connection import describe_db_error, init_db
     from db.operations import (
+        VERSION_COLUMNS,
+        add_failure_history,
         delete_backlog,
         delete_backlog_paths,
         delete_images,
@@ -48,7 +52,10 @@ try:
         list_roots,
         lookup_by_path,
         mark_root_scanned,
+        park_backlog,
         record_backlog_failure,
+        refund_backlog_attempts,
+        requeue_changed_parked,
         update_image_location,
         update_image_modified_at,
         upsert_backlog,
@@ -61,11 +68,13 @@ try:
     from pipeline.console import make_output_safe, run_cli
     from pipeline.discovery import discover
     from pipeline.error_logger import log_error
+    from pipeline.failure import IndexingFailure, RunStopped
     from pipeline.locking import AlreadyRunning, single_instance
     from pipeline.progress import Progress
     from pipeline.serialisation import serialize_embedding
+    from pipeline.versions import collect_versions, model_versions
     from pipeline.validation import find_overlapping_root, validate_folder
-    from text_processing.formatters import build_search_text
+    from text_processing.formatters import build_description, build_search_text
     from vlm.analyzer import analyse_image, embed_search_text
     from vlm.client import NotReady, check_ready, unload_model
 except ModuleNotFoundError as exc:
@@ -98,16 +107,10 @@ METADATA_VERSION = 1
 # Helpers
 # ---------------------------------------------------------------------------
 
-def build_vlm_metadata_json(payload) -> str:
-    """Serialise all VLM payload fields except ``short_description`` and ``description``.
-
-    Those two fields are stored in dedicated columns on ``image_data``, so they
-    are excluded here to avoid duplication.
-    """
-    data = payload.model_dump()
-    data.pop("short_description", None)
-    data.pop("description", None)
-    return json.dumps(data)
+def build_vlm_metadata_json(analysis) -> str:
+    """Serialise everything learned about the image: the model's reply exactly as it wrote it, the text read in the image
+    and the facts read from the pixels. The summary and the description are also kept in their own columns on ``image_data``."""
+    return json.dumps({"vlm": analysis.reply, "ocr_text": analysis.ocr_text, "features": analysis.features})
 
 
 def is_unchanged(existing: dict | None, file_hash: str, modified_at: str) -> bool:
@@ -143,7 +146,8 @@ def classify_failure(exc: Exception) -> tuple[bool, bool]:
 # ---------------------------------------------------------------------------
 
 def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image_path: Path,
-                on_stage: Callable[[str], None] = lambda stage: None) -> tuple[str, str]:
+                on_stage: Callable[[str], None] = lambda stage: None,
+                on_retry: Callable[[str], None] = lambda kind: None) -> tuple[str, str]:
     """Run the complete indexing pipeline for a single image.
 
     Stages (in order):
@@ -152,7 +156,10 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
       3. embedding_generation — build search doc + embed
       4. database_write      — atomic upsert of image_data + text_embeddings
 
-    ``on_stage`` is told what is being done, before each step.
+    ``on_stage`` is told what is being done, before each step; ``on_retry`` is told when the model's reply
+    has to be asked for again, and why.
+
+    Raises ``AnalysisFailed`` when the model's reply could not be put right.
 
     Returns ``(result, short_description)``, where the description is empty for a skipped file and
     ``result`` is one of:
@@ -161,6 +168,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         ``'indexed'``  — new image, not previously seen.
     """
     path_str = str(image_path)
+    versions = settings.get("versions", {})
     on_stage("checking file")
 
     # ------------------------------------------------------------------
@@ -181,23 +189,30 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # Stage 2: metadata_extraction — VLM analysis
     # ------------------------------------------------------------------
     pipeline_start = time.perf_counter()
-    payload = analyse_image(client, settings["vlm_model"], path_str, on_stage)
+    analysis = analyse_image(client, settings["vlm_model"], path_str, on_stage, on_retry)
 
     # ------------------------------------------------------------------
     # Stage 3: embedding_generation — search document + embedding vector
     # ------------------------------------------------------------------
     on_stage("embedding description")
-    search_text = build_search_text(payload)
-    embedding = embed_search_text(client, settings["embedding_model"], search_text)
+    search_text = build_search_text(analysis.reply, analysis.ocr_text, config.SUMMARY_FIELD)
+    if config.ONE_MODEL_AT_A_TIME:  # setup found the two models do not fit in memory together: the vision model goes before the embedding model comes
+        unload_model(client, settings["vlm_model"])
+    try:
+        embedding = embed_search_text(client, settings["embedding_model"], search_text)
+    finally:
+        if config.ONE_MODEL_AT_A_TIME:  # ... and the embedding model goes before the next image's vision model comes
+            unload_model(client, settings["embedding_model"])
     if len(embedding) != settings["embedding_dim"]:
-        raise ValueError(
+        raise RunStopped(
             f"The embedding model returned {len(embedding)} values, but {settings['embedding_dim']} "
-            "were measured at setup. The model has changed."
+            "were measured at setup. The model has changed, so no image can be indexed with it."
         )
     embedding_bytes = serialize_embedding(embedding)
     elapsed_ms = int((time.perf_counter() - pipeline_start) * 1000)
 
-    vlm_metadata_json = build_vlm_metadata_json(payload)
+    vlm_metadata_json = build_vlm_metadata_json(analysis)
+    short_description = str(analysis.reply[config.SUMMARY_FIELD]).strip()
 
     # ------------------------------------------------------------------
     # Stage 4: database_write — atomic transaction
@@ -206,10 +221,11 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         "root_id": root_id,
         "file_path": path_str,
         "hash": file_hash,
-        "short_description": payload.short_description,
-        "description": payload.description,
+        "short_description": short_description,
+        "description": build_description(analysis.reply, config.SUMMARY_FIELD),
         "vlm_metadata_json": vlm_metadata_json,
         **file_meta,
+        **{column: versions.get(column) for column in VERSION_COLUMNS},
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "processing_time_ms": elapsed_ms,
         "metadata_version": METADATA_VERSION,
@@ -220,10 +236,31 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # ``with conn`` starts a transaction; commits on success, rolls back on error.
     with conn:
         file_id = upsert_image_data(conn, record)
-        upsert_text_embedding(conn, file_id, embedding_bytes)
+        upsert_text_embedding(conn, file_id, embedding_bytes, settings["embedding_model"], versions.get("embedding_digest"), len(embedding))
+        add_failure_history(conn, path_str, analysis.attempts)
     # ↑ Commit point — image is now considered fully indexed in the database.
 
-    return ("updated" if is_update else "indexed"), payload.short_description
+    return ("updated" if is_update else "indexed"), short_description
+
+
+def _index_with_tries(conn, client: ollama.Client, settings: dict, root_id: int, image_path: Path,
+                      on_stage: Callable[[str], None], on_retry: Callable[[str], None]) -> tuple[str, str]:
+    """``index_image``, tried again right away when the failure is Ollama's or the machine's, up to ``config.SERVICE_TRIES`` times.
+
+    Each try runs the steps for its kind of trouble (waiting longer, starting Ollama again, freeing memory). What a failed
+    try was is shown while the next one runs, and kept in the record of what was tried. The last failure is raised."""
+    prefix = ""
+    for attempt in range(1, config.SERVICE_TRIES + 1):
+        try:
+            return index_image(conn, client, settings, root_id, image_path, lambda stage: on_stage(prefix + stage), on_retry)
+        except IndexingFailure as failure:
+            if not failure.service or attempt == config.SERVICE_TRIES:
+                raise
+            with conn:
+                add_failure_history(conn, str(image_path), failure.attempts)
+            prefix = f"{failure.kind.replace('_', ' ')}: trying again, {attempt + 1} of {config.SERVICE_TRIES} · "
+            on_stage(prefix + "starting")
+    raise AssertionError("unreachable")  # config.SERVICE_TRIES is at least 1
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +274,7 @@ def run() -> None:
         with single_instance("indexing", "Indexing"):
             _index_backlog()
     except AlreadyRunning as exc:
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
 
 
 def _index_backlog() -> None:
@@ -253,63 +290,111 @@ def _index_backlog() -> None:
     db_path = str(config.DB_PATH)
     conn = init_db(db_path)
 
-    print(f"\n[imagent] Database : {db_path}")
+    print(f"\nDatabase : {db_path}")
 
     try:
         client, settings = check_ready(conn, ("vlm", "embedding"))
     except NotReady as exc:
         conn.close()
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
+
+    settings = {**settings, "versions": collect_versions(client, settings)}
+    parked_versions = model_versions(settings["versions"])
+    if parked_versions:
+        with conn:
+            queued_again = requeue_changed_parked(conn, parked_versions)
+        if queued_again:
+            print(f"{queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
 
     backlog_rows = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     total = len(backlog_rows)
-    print(f"[imagent] Backlog  : {total} file(s) pending\n")
+    print(f"Backlog  : {total} file(s) pending\n")
 
     if total == 0:
-        print("[imagent] Nothing to index.")
-        _print_given_up(conn)
+        print("Nothing to index.")
+        print_failed(conn)
         conn.close()
         return
 
     # Text in images is read by OCR. Without its models an image would be stored without its text and never
     # read again, so this is settled before the first image, not found out image by image.
-    print("[imagent] Loading the text-reading (OCR) models; the first time this downloads them…")
+    print("Loading the text-reading (OCR) engine…")
     try:
         ocr.check_available()
     except Exception as exc:
         conn.close()
-        sys.exit(f"[imagent] The text-reading (OCR) models could not be loaded ({type(exc).__name__}: {exc}). "
-                 "Connect to the internet once so they can download, then run this again. "
-                 "Nothing was indexed; the backlog is kept.")
+        sys.exit(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
+                 f"Run: {config.INSTALL_COMMAND}. Nothing was indexed; the backlog is kept.")
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
-    in_a_row = 0  # consecutive images that failed because of Ollama
+    in_a_row = 0  # consecutive images that failed for a reason that is not theirs (Ollama, the machine)
     last_service_error = ""
+    io_failures: list[str] = []  # files that failed one after another with an error of the file system: a drive that went away, perhaps
     stopped = ""
+    recent_retries: deque[bool] = deque(maxlen=config.RETRY_RATE_WINDOW)  # for the latest analysed images: did the model's reply need asking for again?
     progress = Progress(total)
+    root_paths = {root["root_id"]: root["path"] for root in list_roots(conn)}
 
     try:
         for i, row in enumerate(backlog_rows, start=1):
             image_path = Path(row["file_path"])
             progress.start(i, image_path)
 
+            retried: list[str] = []
             try:
                 try:
-                    result, short_description = index_image(conn, client, settings, row["root_id"], image_path, progress.stage)
+                    result, short_description = _index_with_tries(conn, client, settings, row["root_id"], image_path, progress.stage,
+                                                                  retried.append)
                     with conn:
                         delete_backlog(conn, row["file_path"])
                     counts[result] += 1
                     progress.done(result, short_description)
                     in_a_row = 0
-                except FileNotFoundError:
-                    # Deleted since the scan: nothing to index. The next scan removes any stale record.
-                    with conn:
-                        delete_backlog(conn, row["file_path"])
-                    progress.done("gone")
+                    io_failures.clear()
+                    if result != "skipped":
+                        recent_retries.append(bool(retried))
                 except sqlite3.Error:
                     raise  # the database is the problem, not this image: handled below
+                except IndexingFailure as exc:
+                    # Every step for this kind of trouble was tried, so trying again would only repeat them. The file is set
+                    # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
+                    # fault is not the file's, left queued with its attempts untouched.
+                    counts["failed"] += 1
+                    message = str(exc)
+                    if exc.service:  # the machine's trouble: it was tried several times, and the user is told what to do about it
+                        message += (f" Imagent tried {config.SERVICE_TRIES} times without success. "
+                                    "Close other apps that use a lot of memory, then scan again.")
+                    log_error(conn, stage="pipeline", exc=exc, file_path=str(image_path),
+                              metadata={"root_id": row["root_id"], "kind": exc.kind})
+                    with conn:
+                        add_failure_history(conn, row["file_path"], exc.attempts)
+                        if exc.park:
+                            park_backlog(conn, row["file_path"], exc.kind, message, exc.retry_when, parked_versions)
+                        else:
+                            record_backlog_failure(conn, row["file_path"], message, count_attempt=False,
+                                                   kind=exc.kind if exc.report else None)
+                    progress.done("FAILED", message)
+                    io_failures.clear()
+                    if exc.service:
+                        in_a_row += 1
+                        last_service_error = str(exc)
+                    else:
+                        in_a_row = 0
+                    if exc.model_trouble:
+                        recent_retries.append(True)
+                except RunStopped as exc:
+                    counts["failed"] += 1
+                    progress.done("FAILED", str(exc))
+                    stopped = f"Indexing stopped. {exc} Nothing was held against the files; the rest stays queued."
+                    break
                 except Exception as exc:
+                    if isinstance(exc, FileNotFoundError) and _is_gone(image_path, root_paths.get(row["root_id"])):
+                        # Deleted since the scan, while its folder is still there: nothing to index. The next scan removes any stale record.
+                        with conn:
+                            delete_backlog(conn, row["file_path"])
+                        progress.done("gone")
+                        continue
                     counts["failed"] += 1
                     counts_as_attempt, ollama_problem = classify_failure(exc)
                     log_error(
@@ -327,10 +412,28 @@ def _index_backlog() -> None:
                         last_service_error = f"{type(exc).__name__}: {exc}"
                     else:
                         in_a_row = 0
-                    if in_a_row >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
-                        stopped = (f"Ollama failed {in_a_row} times in a row, so indexing stopped (last error: {last_service_error}). "
-                                   "Check that Ollama is running and has enough memory, then run it again; the rest stays queued.")
+                    if isinstance(exc, OSError) and not ollama_problem:
+                        io_failures.append(row["file_path"])
+                    else:
+                        io_failures.clear()
+                    if len(io_failures) >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
+                        with conn:
+                            refund_backlog_attempts(conn, io_failures)  # a drive that went away is not these files' fault
+                        stopped = (f"Reading the images failed {len(io_failures)} times in a row (last error: {type(exc).__name__}: {exc}), "
+                                   "so indexing stopped. Is the drive still connected and readable? "
+                                   "The files keep all their attempts; the rest stays queued.")
                         break
+                if in_a_row >= config.MAX_CONSECUTIVE_SERVICE_FAILURES:
+                    stopped = (f"{in_a_row} images in a row failed for a reason that is not theirs, so indexing stopped "
+                               f"(last error: {last_service_error}). Check that Ollama is running and has enough memory "
+                               "and that the text-reading models are intact, then run it again; the rest stays queued.")
+                    break
+                if len(recent_retries) == recent_retries.maxlen and sum(recent_retries) / len(recent_retries) >= config.RETRY_RATE_STOP:
+                    stopped = (f"The model's reply had to be asked for again for {sum(recent_retries)} of the last {len(recent_retries)} images, "
+                               "so indexing stopped: this points at the model or the prompt, not at the images. "
+                               "Nothing was held against the images. Close other apps that use a lot of memory, then scan again; "
+                               "the rest stays queued.")
+                    break
             except sqlite3.Error as exc:
                 counts["failed"] += 1
                 message = describe_db_error(exc, db_path)
@@ -361,9 +464,9 @@ def _index_backlog() -> None:
         print(f"  Average per image : {elapsed / processed:.2f}s")
     print(f"{'─' * 52}")
     if stopped:
-        print(f"\n[imagent] {stopped}")
+        print(f"\n{stopped}")
     try:
-        _print_given_up(conn)
+        print_failed(conn)
     except sqlite3.Error:
         pass  # the database is what stopped the run; its message is above
     print()
@@ -373,17 +476,30 @@ def _index_backlog() -> None:
         sys.exit(1)
 
 
-def _print_given_up(conn) -> None:
-    """List the files that failed ``config.BACKLOG_MAX_ATTEMPTS`` times and are now left alone."""
-    given_up = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
-    if not given_up:
-        return
-    print(f"\n[imagent] {len(given_up)} file(s) failed {config.BACKLOG_MAX_ATTEMPTS} times and are skipped "
-          "until they change:")
-    for item in given_up[:10]:
-        print(f"  {item['file_path']}  ({item['last_error']})")
-    if len(given_up) > 10:
-        print(f"  … and {len(given_up) - 10} more (see the backlog table)")
+def _is_gone(image_path: Path, root_path: str | None) -> bool:
+    """True if the file was deleted while the folder it was found in is still there.
+
+    A missing file whose folder is missing too points at a drive that went away, or at a missing program file, and is
+    not the file's doing: it is handled as a failure to read, which stops the run after a few in a row."""
+    return root_path is not None and Path(root_path).is_dir() and not image_path.exists()
+
+
+def print_failed(conn, limit: int | None = 10) -> int:
+    """Tell the user which images could not be indexed, each with the reason and what can be done about it. Returns how many there are.
+
+    Only images whose every try is over are listed; one that is indexed later (or whose file is gone) drops out of the list by itself.
+    ``limit`` is how many to show; None shows them all."""
+    failed = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+    if not failed:
+        return 0
+    print(f"\n{len(failed)} image(s) could not be indexed:")
+    width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
+    for item in failed[:limit]:
+        print(f"\n  {item['file_path']}")
+        print(textwrap.fill(item["last_error"] or "No reason was recorded.", width, initial_indent="    ", subsequent_indent="    "))
+    if limit is not None and len(failed) > limit:
+        print(f"\n  … and {len(failed) - limit} more. Choose \"Show the images that could not be indexed\" in the menu to see them all.")
+    return len(failed)
 
 
 # ---------------------------------------------------------------------------
@@ -402,11 +518,11 @@ def _warn_about(items: list, problem: str, consequence: str, shown: int = 3) -> 
     """Tell the user about folders or files the scan had trouble with: the first few by name, then how many more."""
     if not items:
         return
-    print(f"[imagent] {len(items)} {problem}; {consequence}")
+    print(f"{len(items)} {problem}; {consequence}")
     for item in items[:shown]:
-        print(f"[imagent]   {item}")
+        print(f"  {item}")
     if len(items) > shown:
-        print(f"[imagent]   … and {len(items) - shown} more")
+        print(f"  … and {len(items) - shown} more")
 
 
 def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
@@ -594,7 +710,7 @@ def _prompt_folder() -> str | None:
         return selected
 
     # Fallback for non-interactive / non-TTY environments
-    print("\n[imagent] Select a folder to scan:")
+    print("\nSelect a folder to scan:")
     print("  1. All folders")
     print("  2. Enter folder path...")
     for i, folder in enumerate(saved, 3):
@@ -641,7 +757,7 @@ def _ask_scope(root: Path, scanned_before: int) -> str:
         return choice
 
     # Fallback for non-interactive / non-TTY environments
-    print("\n[imagent] How do you want to scan?")
+    print("\nHow do you want to scan?")
     print(f"  1. {one}")
     print(f"  2. {everything}")
     print("  3. Back\n")
@@ -662,7 +778,7 @@ def _scannable(saved: list[str]) -> list[Path]:
         if folder.is_dir() and os.access(folder, os.R_OK):
             folders.append(folder)
         else:
-            print(f"[imagent] Skipping {path}: the folder is missing or cannot be read. Its indexed images are kept.")
+            print(f"Skipping {path}: the folder is missing or cannot be read. Its indexed images are kept.")
     return folders
 
 
@@ -684,7 +800,7 @@ def _choose_roots() -> list[Path]:
         if raw is None:
             roots = _scannable(saved)
             if not roots:
-                sys.exit("[imagent] Error: none of the folders scanned before can be read.")
+                sys.exit("Error: none of the folders scanned before can be read.")
             return roots
 
         root = validate_folder(raw)
@@ -709,29 +825,29 @@ def _scan_and_report(root: Path) -> None:
     try:
         counts = scan(root)
     except RootOverlapError as exc:
-        sys.exit(f"[imagent] Error: {exc}")
+        sys.exit(f"Error: {exc}")
 
     if counts["delete_blocked"] and _ask_yes_no(
-        f"[imagent] {counts['delete_blocked']} indexed image(s) from this folder cannot be found any more, "
+        f"{counts['delete_blocked']} indexed image(s) from this folder cannot be found any more, "
         "which is all or most of them (is a drive disconnected or a folder unmounted?). "
         "Remove them from the index? [y/N]: "
     ):
         counts = scan(root, allow_mass_delete=True)
 
-    print(f"\n[imagent] Root     : {root}")
-    print(f"[imagent] Database : {config.DB_PATH}")
-    print(f"[imagent] Scanned  : {counts['scanned']}")
-    print(f"[imagent] New      : {counts['queued_new']}")
-    print(f"[imagent] Modified : {counts['queued_modified']}")
-    print(f"[imagent] Moved    : {counts['moved']}")
-    print(f"[imagent] Unchanged: {counts['unchanged']}")
-    print(f"[imagent] Deleted  : {counts['deleted']}")
+    print(f"\nRoot     : {root}")
+    print(f"Database : {config.DB_PATH}")
+    print(f"Scanned  : {counts['scanned']}")
+    print(f"New      : {counts['queued_new']}")
+    print(f"Modified : {counts['queued_modified']}")
+    print(f"Moved    : {counts['moved']}")
+    print(f"Unchanged: {counts['unchanged']}")
+    print(f"Deleted  : {counts['deleted']}")
     if counts["delete_blocked"]:
-        print(f"[imagent] Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
+        print(f"Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
     if counts["empty"]:
-        print(f"[imagent] Skipped  : {counts['empty']} empty file(s)")
+        print(f"Skipped  : {counts['empty']} empty file(s)")
     if counts["unreadable"]:
-        print(f"[imagent] Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
+        print(f"Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
     print()
 
 
@@ -747,7 +863,7 @@ def main() -> None:
         try:
             roots = _choose_roots()
         except RootOverlapError as exc:
-            sys.exit(f"[imagent] Error: {exc}")
+            sys.exit(f"Error: {exc}")
     for root in roots:
         _scan_and_report(root)
 
@@ -761,12 +877,12 @@ def main() -> None:
         return
 
     if _ask_yes_no(
-        f"[imagent] {backlog_size} file(s) in the backlog are pending indexing. "
+        f"{backlog_size} file(s) in the backlog are pending indexing. "
         "Run indexing now? [y/N]: "
     ):
         run()
     else:
-        print(f"[imagent] Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
+        print(f"Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,9 @@ MODULES = [
     "db.connection", "db.operations", "pipeline.console", "pipeline.discovery", "pipeline.locking",
     "pipeline.progress", "pipeline.validation", "pipeline.error_logger", "pipeline.serialisation",
     "image_processing.metadata", "image_processing.ocr", "image_processing.preprocess", "image_processing.features",
-    "text_processing.formatters", "vlm.analyzer", "vlm.client",
+    "text_processing.formatters", "vlm.analyzer", "vlm.client", "vlm.reply_validation",
+    "image_processing.memory", "image_processing.problems", "pipeline.failure", "pipeline.storage", "pipeline.versions",
+    "reembed.reembed", "menu.menu", "show_failed.show_failed", "image_processing.convert",
 ]
 
 

@@ -5,8 +5,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 import config
-from db.operations import set_model_settings
-from tests.support import IsolatedHome
+from db.operations import set_device_settings, set_model_settings
+from tests.support import DEVICE, IsolatedHome
 from vlm import client as vlm_client
 from vlm.client import NotReady, _base_url, check_ready, load_model, other_models_running, server_version, start_server
 
@@ -106,10 +106,46 @@ class ReadinessTests(IsolatedHome):
         with self.assertRaisesRegex(NotReady, "not set up"):
             check_ready(self.connect(), ("vlm",))
 
+    def test_a_pillow_that_cannot_handle_pictures_stops_the_run_before_anything_else(self):
+        conn = self.connect()
+        with conn:
+            set_model_settings(conn, self.SETTINGS)
+            set_device_settings(conn, DEVICE, None)
+        with mock.patch.object(vlm_client.Image, "new", side_effect=OSError("encoder jpeg not available")), \
+                mock.patch.object(vlm_client, "make_client") as make_client:
+            with self.assertRaisesRegex(NotReady, "Pillow.*encoder jpeg not available.*install"):
+                check_ready(conn, ("vlm",))
+        make_client.assert_not_called()
+
+    def test_a_computer_that_was_never_measured_is_sent_to_setup(self):
+        conn = self.connect()
+        with conn:
+            set_model_settings(conn, self.SETTINGS)
+        with self.assertRaisesRegex(NotReady, "not measured this computer"):
+            check_ready(conn, ("vlm",))
+
+    def test_what_setup_measured_replaces_the_starting_values(self):
+        conn = self.connect()
+        device = {**DEVICE, "num_ctx": 4096, "use_mmap": True, "image_long_edge": 640, "timeout_seconds": 777}
+        with conn:
+            set_model_settings(conn, self.SETTINGS)
+            set_device_settings(conn, device, None)
+        listing = mock.Mock(models=[mock.Mock(model="v:latest", digest="d"), mock.Mock(model="e:latest", digest="d")])
+        fake = mock.Mock(list=mock.Mock(return_value=listing))
+        with mock.patch.object(config, "OLLAMA_HOST", "http://localhost:11434"), \
+                mock.patch.object(vlm_client, "make_client", return_value=fake), \
+                mock.patch.object(vlm_client, "server_version", return_value=(0, 9, 0)):
+            check_ready(conn, ("vlm",))
+        self.assertEqual((config.OLLAMA_TIMEOUT, config.OLLAMA_NUM_CTX, config.OLLAMA_USE_MMAP, config.IMAGE_MAX_LONG_EDGE),
+                         (777, 4096, True, 640))
+        self.assertEqual((config.LLM_OPTIONS["num_ctx"], config.LLM_OPTIONS["use_mmap"], config.EMBED_OPTIONS["use_mmap"]),
+                         (4096, True, True))
+
     def test_models_known_but_config_json_lost(self):
         conn = self.connect()
         with conn:
             set_model_settings(conn, self.SETTINGS)
+            set_device_settings(conn, DEVICE, None)
         with mock.patch.object(config, "OLLAMA_HOST", ""):
             with self.assertRaisesRegex(NotReady, "config.json"):
                 check_ready(conn, ("vlm",))
@@ -118,6 +154,7 @@ class ReadinessTests(IsolatedHome):
         conn = self.connect()
         with conn:
             set_model_settings(conn, self.SETTINGS)
+            set_device_settings(conn, DEVICE, None)
         listing = mock.Mock(models=[mock.Mock(model="v:latest", digest="d")])
         fake = mock.Mock(list=mock.Mock(return_value=listing))
         with mock.patch.object(config, "OLLAMA_HOST", "http://localhost:11434"), \

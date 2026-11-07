@@ -1,4 +1,5 @@
-from vlm.response_format import ImagePayload
+import json
+
 from text_processing.cleaners import (
     normalize_whitespace,
     normalize_terms,
@@ -7,118 +8,72 @@ from text_processing.cleaners import (
     split_sections,
 )
 
-def format_objects(payload: ImagePayload, seen: set[str]) -> list[str]:
-    lines: list[str] = []
-    for item in payload.objects:
-        name = normalize_whitespace(item)
-        if not name:
-            continue
-        canonical = name.casefold()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        lines.append(name)
-    return lines
 
-def format_people(payload: ImagePayload) -> list[str]:
-    if payload.people_count <= 0:
-        return []
-    noun = "person" if payload.people_count == 1 else "people"
-    return [f"{payload.people_count} {noun} visible"]
+SEARCH_TEXT_VERSION = 1  # raise it whenever build_search_text changes what it makes: stored with each record, it shows which are out of date
 
-def format_scene(payload: ImagePayload) -> list[str]:
-    items: list[str] = []
-    if payload.weather:
-        items.append(payload.weather.title())
-    if payload.time_of_day:
-        items.append(payload.time_of_day.replace("_", " ").title())
-    if payload.lighting:
-        lighting = payload.lighting.replace("_", " ").lower()
-        items.append(f"{lighting} light")
-    return items
 
-def format_entities(payload: ImagePayload, seen: set[str]) -> list[str]:
-    entities = normalize_terms(payload.landmarks)
-    lines: list[str] = []
-    for entity in entities:
-        canonical = entity.casefold()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        lines.append(entity)
-    return lines
+def _heading(key: str) -> str:
+    return key.replace("_", " ").strip().capitalize()
 
-def format_ocr(payload: ImagePayload, seen: set[str]) -> list[str]:
-    text_lines: list[str] = []
-    for block in payload.visible_text:
-        content = normalize_whitespace(block)
-        if not content:
-            continue
-        canonical = content.casefold()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        text_lines.append(content)
-    return text_lines
 
-def format_tags(payload: ImagePayload, seen: set[str]) -> list[str]:
-    lines: list[str] = []
-    for tag in normalize_terms(payload.tags):
-        canonical = tag.casefold()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        lines.append(tag)
-    return lines
+def _text(value) -> str:
+    """A scalar or nested value as one line of text; empty if there is nothing to say."""
+    if value is None or value == "" or value == [] or value == {}:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return normalize_whitespace(str(value))
 
-def build_search_text(payload: ImagePayload) -> str:
+
+def build_description(reply: dict, summary_field: str) -> str:
+    """The prose of the model's reply: its text fields in the order the model wrote them, without the one-line summary."""
+    texts = [value.strip() for key, value in reply.items() if key != summary_field and isinstance(value, str)]
+    return "\n\n".join(text for text in texts if text)
+
+
+def _unique(items: list, seen: set[str]) -> list[str]:
+    """The items as text, each once; what is in ``seen`` is left out and what is kept is added to it."""
+    kept: list[str] = []
+    for item in normalize_terms([_text(item) for item in items]):
+        canonical = item.casefold()
+        if canonical not in seen:
+            seen.add(canonical)
+            kept.append(item)
+    return kept
+
+
+def build_search_text(reply: dict, ocr_text: list[str], summary_field: str) -> str:
+    """The text that is embedded for one image, built from whatever fields the model's reply has.
+
+    Text fields make up the description; the summary follows if it adds anything; each list field gets its own
+    section named after it, any other field is one line of its own; the text read in the image comes last.
+    """
     seen: set[str] = set()
     sections: list[str] = []
 
-    description = normalize_whitespace(payload.description)
+    description = normalize_whitespace(build_description(reply, summary_field))
     if description:
         sections.append(description)
         seen.add(description.casefold())
 
-    short_description = lead_sentence(payload.short_description)
-    if short_description and short_description.casefold() != description.casefold():
-        sections.append(short_description)
-        seen.add(short_description.casefold())
+    summary = reply.get(summary_field)
+    lead = lead_sentence(summary) if isinstance(summary, str) else ""
+    if lead and lead.casefold() != description.casefold():
+        sections.append(lead)
+        seen.add(lead.casefold())
 
-    objects = format_objects(payload, seen)
-    if objects:
-        sections.append("")
-        sections.append("Objects:")
-        sections.extend(join_bullets(objects))
+    for key, value in reply.items():
+        if key == summary_field or isinstance(value, str):
+            continue
+        if isinstance(value, list):
+            items = _unique(value, seen)
+            if items:
+                sections.extend(["", f"{_heading(key)}:", *join_bullets(items)])
+        elif _text(value):
+            sections.extend(["", f"{_heading(key)}: {_text(value)}"])
 
-    people = format_people(payload)
-    if people:
-        sections.append("")
-        sections.append("People:")
-        sections.extend(join_bullets(people))
-
-    ocr = format_ocr(payload, seen)
+    ocr = _unique(ocr_text, seen)
     if ocr:
-        sections.append("")
-        sections.append("Visible text:")
-        sections.extend(ocr)
-
-    tags = format_tags(payload, seen)
-    if tags:
-        sections.append("")
-        sections.append("Tags:")
-        sections.extend(join_bullets(tags))
-
-    scene = format_scene(payload)
-    if scene:
-        sections.append("")
-        sections.append("Scene:")
-        sections.extend(join_bullets(scene))
-
-    entities = format_entities(payload, seen)
-    if entities:
-        sections.append("")
-        sections.append("Landmarks:")
-        sections.extend(join_bullets(entities))
+        sections.extend(["", "Visible text:", *ocr])
 
     return split_sections(sections)

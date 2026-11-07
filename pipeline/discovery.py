@@ -69,8 +69,3 @@ def discover(root: Path) -> Discovery:
             if path.is_file():  # not a broken link or a folder with an image-like name
                 images.append(path)
     return Discovery(sorted(images), sorted(unreadable), sorted(bad_names))
-
-
-def discover_images(root: Path) -> list[Path]:
-    """Return a sorted list of image paths found recursively under *root* (see ``discover`` for what else a walk learns)."""
-    return discover(root).images

@@ -36,6 +36,41 @@ CREATE TABLE IF NOT EXISTS model_settings (
 
 
 -- ============================================================================
+-- TABLE: device_settings
+--
+-- What: What setup measured about this computer with the locked models (a single row).
+-- Why:  How long to wait for a reply, how large a context and an image the models can take, and whether to
+--       page models in from disk depend on the machine, so they are measured (vlm/calibration.py), not guessed.
+-- When: Written with model_settings at the end of setup, and again (settings.vlm_digest differs) when the
+--       vision model changes. Read by config.apply_device_settings before every run.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS device_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+
+    -- The values every request to the models is sent with (see config.py: they must not change between requests).
+    num_ctx INTEGER NOT NULL,
+    use_mmap INTEGER NOT NULL CHECK (use_mmap IN (0, 1)),
+
+    -- Longest side, in pixels, of the image sent to the vision model.
+    image_long_edge INTEGER NOT NULL,
+
+    -- Seconds to wait for the first reply of a request; each wait that runs out is doubled (vlm/analyzer.py).
+    timeout_seconds INTEGER NOT NULL,
+
+    -- 1 when the vision and embedding models did not fit in memory together, so indexing loads one at a time; 0 when
+    -- they did; NULL when that was not tried (setup measures it again then).
+    one_model_at_a_time INTEGER CHECK (one_model_at_a_time IN (0, 1)),
+
+    -- The vision model these were measured with (its digest) and the numbers they came from, as JSON.
+    vlm_digest TEXT,
+    measurements TEXT NOT NULL,
+
+    app_version TEXT NOT NULL,
+    calibrated_at DATETIME NOT NULL
+);
+
+
+-- ============================================================================
 -- TABLE: scan_roots
 --
 -- What: The folders the user has pointed Imagent at.
@@ -144,7 +179,18 @@ CREATE TABLE IF NOT EXISTS image_data (
     -- GPS position from EXIF in signed decimal degrees (south and west are negative).
     -- Used for location search; NULL when the image has no GPS data.
     gps_lat REAL,
-    gps_lon REAL
+    gps_lon REAL,
+
+    -- What produced this record, so that records made with something older can be told apart and redone:
+    -- the vision model's digest (its exact weights), fingerprints of the prompt and of the reply schema,
+    -- the version of the way the search text is built, and the versions of the OCR library, Ollama and Imagent.
+    vlm_digest TEXT,
+    prompt_hash TEXT,
+    schema_hash TEXT,
+    search_text_version INTEGER,
+    ocr_version TEXT,
+    ollama_version TEXT,
+    app_version TEXT
 );
 
 -- Index on root_id: a scan loads every stored image of one root.
@@ -178,11 +224,59 @@ CREATE TABLE IF NOT EXISTS backlog (
     -- is skipped until it changes. Failures caused by Ollama being unreachable do not count.
     attempts INTEGER NOT NULL DEFAULT 0,
 
+    -- 'queued': indexed on the next run. 'parked': set aside because every step for its kind of
+    -- failure was tried; it is queued again when the file changes (see upsert_backlog).
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'parked')),
+
+    -- Why a file was parked (e.g. 'cut_off', 'invalid_reply') and what would make it worth another try.
+    park_kind TEXT,
+    retry_when TEXT,
+
     -- Message of the most recent failure, shown in the indexing summary.
     last_error TEXT,
 
+    -- The model and prompt versions (JSON) at the time the file was parked: when they change, a file parked for
+    -- its model's replies (retry_when = 'model_changed') is queued again.
+    park_versions TEXT,
+
     queued_at DATETIME NOT NULL
 );
+
+
+-- ============================================================================
+-- TABLE: failure_history
+--
+-- What: Every request whose reply had to be asked for again, with the exact reason and the
+--       settings used, and (as kind 'resolved') the request that finally worked.
+-- Why:  Shows which steps put right which kind of failure, and what a parked file already went through.
+--       Unlike error_logs it is never trimmed.
+-- When: Written when an image's reply needed more than one request, whether or not it was finally indexed.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS failure_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT NOT NULL,
+
+    -- What was wrong with the reply: 'cut_off', 'invalid_reply', or 'resolved' for the request that worked.
+    kind TEXT NOT NULL,
+
+    -- Which step of the ladder for that kind made the request ('first try', 'changed sampling', ...).
+    step TEXT NOT NULL,
+
+    -- The options sent to Ollama (JSON), and what Ollama reported back.
+    options TEXT,
+    done_reason TEXT,
+    eval_count INTEGER,
+    prompt_eval_count INTEGER,
+
+    -- The problems found in the reply, and the reply itself (NULL for 'resolved').
+    detail TEXT,
+    raw_reply TEXT,
+
+    created_at DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_history_file_path ON failure_history(file_path);
+CREATE INDEX IF NOT EXISTS idx_failure_history_kind ON failure_history(kind);
 
 
 -- ============================================================================
@@ -204,6 +298,11 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
     -- Timestamp indicating when the embedding was generated.
     -- Used for auditing and assessing cache/data freshness.
     created_at DATETIME,
+
+    -- The model that made the vector (name, digest of its exact weights) and the vector's size.
+    embedding_model TEXT,
+    embedding_digest TEXT,
+    embedding_dim INTEGER,
 
     -- Maintain database integrity by cascading deletions when an image is deleted.
     FOREIGN KEY (file_id) REFERENCES image_data(file_id) ON DELETE CASCADE

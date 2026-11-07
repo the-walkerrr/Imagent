@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "short_description": {"type": "string"},
+    "scene": {"type": "string"},
+    "objects_and_layout": {"type": "string"},
+    "people_details": {"type": "string"},
+    "colors_light_mood": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["short_description", "scene", "objects_and_layout", "people_details", "colors_light_mood", "tags"]
+}
