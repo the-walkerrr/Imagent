@@ -320,9 +320,9 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        sys.exit("[imagent] Uninstalling needs an interactive terminal. Run: sh uninstall/uninstall.sh (or uninstall/uninstall.bat on Windows)")
+        sys.exit("Uninstalling needs an interactive terminal. Run: sh uninstall/uninstall.sh (or uninstall/uninstall.bat on Windows)")
     if VENV_DIR.exists() and Path(sys.prefix).resolve() == VENV_DIR.resolve():
-        sys.exit("[imagent] This is running inside Imagent's own .venv, which it needs to delete. "
+        sys.exit("This is running inside Imagent's own .venv, which it needs to delete. "
                  "Run `deactivate` (or open a new terminal) and start the uninstaller again.")
 
     stats = read_stats()
@@ -335,13 +335,13 @@ def main() -> None:
             return
         show_plan(stats, plan)
         if not confirm_three_times(stats):
-            sys.exit(f"\n[imagent] {CANCELLED}")
+            sys.exit(f"\n{CANCELLED}")
         if config.IMAGENT_HOME.exists():
             try:
                 with single_instance("indexing", "Indexing"):  # deleting under a running index would make it fail on every image
                     pass
             except AlreadyRunning as exc:
-                sys.exit(f"\n[imagent] {exc} Nothing was deleted.")
+                sys.exit(f"\n{exc} Nothing was deleted.")
         print()
         problems = delete_everything(plan, base)
 

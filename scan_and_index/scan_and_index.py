@@ -274,7 +274,7 @@ def run() -> None:
         with single_instance("indexing", "Indexing"):
             _index_backlog()
     except AlreadyRunning as exc:
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
 
 
 def _index_backlog() -> None:
@@ -290,13 +290,13 @@ def _index_backlog() -> None:
     db_path = str(config.DB_PATH)
     conn = init_db(db_path)
 
-    print(f"\n[imagent] Database : {db_path}")
+    print(f"\nDatabase : {db_path}")
 
     try:
         client, settings = check_ready(conn, ("vlm", "embedding"))
     except NotReady as exc:
         conn.close()
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
 
     settings = {**settings, "versions": collect_versions(client, settings)}
     parked_versions = model_versions(settings["versions"])
@@ -304,26 +304,26 @@ def _index_backlog() -> None:
         with conn:
             queued_again = requeue_changed_parked(conn, parked_versions)
         if queued_again:
-            print(f"[imagent] {queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
+            print(f"{queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
 
     backlog_rows = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     total = len(backlog_rows)
-    print(f"[imagent] Backlog  : {total} file(s) pending\n")
+    print(f"Backlog  : {total} file(s) pending\n")
 
     if total == 0:
-        print("[imagent] Nothing to index.")
+        print("Nothing to index.")
         print_failed(conn)
         conn.close()
         return
 
     # Text in images is read by OCR. Without its models an image would be stored without its text and never
     # read again, so this is settled before the first image, not found out image by image.
-    print("[imagent] Loading the text-reading (OCR) engine…")
+    print("Loading the text-reading (OCR) engine…")
     try:
         ocr.check_available()
     except Exception as exc:
         conn.close()
-        sys.exit(f"[imagent] The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
+        sys.exit(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
                  f"Run: {config.INSTALL_COMMAND}. Nothing was indexed; the backlog is kept.")
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
@@ -464,7 +464,7 @@ def _index_backlog() -> None:
         print(f"  Average per image : {elapsed / processed:.2f}s")
     print(f"{'─' * 52}")
     if stopped:
-        print(f"\n[imagent] {stopped}")
+        print(f"\n{stopped}")
     try:
         print_failed(conn)
     except sqlite3.Error:
@@ -492,7 +492,7 @@ def print_failed(conn, limit: int | None = 10) -> int:
     failed = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     if not failed:
         return 0
-    print(f"\n[imagent] {len(failed)} image(s) could not be indexed:")
+    print(f"\n{len(failed)} image(s) could not be indexed:")
     width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
     for item in failed[:limit]:
         print(f"\n  {item['file_path']}")
@@ -518,11 +518,11 @@ def _warn_about(items: list, problem: str, consequence: str, shown: int = 3) -> 
     """Tell the user about folders or files the scan had trouble with: the first few by name, then how many more."""
     if not items:
         return
-    print(f"[imagent] {len(items)} {problem}; {consequence}")
+    print(f"{len(items)} {problem}; {consequence}")
     for item in items[:shown]:
-        print(f"[imagent]   {item}")
+        print(f"  {item}")
     if len(items) > shown:
-        print(f"[imagent]   … and {len(items) - shown} more")
+        print(f"  … and {len(items) - shown} more")
 
 
 def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
@@ -710,7 +710,7 @@ def _prompt_folder() -> str | None:
         return selected
 
     # Fallback for non-interactive / non-TTY environments
-    print("\n[imagent] Select a folder to scan:")
+    print("\nSelect a folder to scan:")
     print("  1. All folders")
     print("  2. Enter folder path...")
     for i, folder in enumerate(saved, 3):
@@ -757,7 +757,7 @@ def _ask_scope(root: Path, scanned_before: int) -> str:
         return choice
 
     # Fallback for non-interactive / non-TTY environments
-    print("\n[imagent] How do you want to scan?")
+    print("\nHow do you want to scan?")
     print(f"  1. {one}")
     print(f"  2. {everything}")
     print("  3. Back\n")
@@ -778,7 +778,7 @@ def _scannable(saved: list[str]) -> list[Path]:
         if folder.is_dir() and os.access(folder, os.R_OK):
             folders.append(folder)
         else:
-            print(f"[imagent] Skipping {path}: the folder is missing or cannot be read. Its indexed images are kept.")
+            print(f"Skipping {path}: the folder is missing or cannot be read. Its indexed images are kept.")
     return folders
 
 
@@ -800,7 +800,7 @@ def _choose_roots() -> list[Path]:
         if raw is None:
             roots = _scannable(saved)
             if not roots:
-                sys.exit("[imagent] Error: none of the folders scanned before can be read.")
+                sys.exit("Error: none of the folders scanned before can be read.")
             return roots
 
         root = validate_folder(raw)
@@ -825,29 +825,29 @@ def _scan_and_report(root: Path) -> None:
     try:
         counts = scan(root)
     except RootOverlapError as exc:
-        sys.exit(f"[imagent] Error: {exc}")
+        sys.exit(f"Error: {exc}")
 
     if counts["delete_blocked"] and _ask_yes_no(
-        f"[imagent] {counts['delete_blocked']} indexed image(s) from this folder cannot be found any more, "
+        f"{counts['delete_blocked']} indexed image(s) from this folder cannot be found any more, "
         "which is all or most of them (is a drive disconnected or a folder unmounted?). "
         "Remove them from the index? [y/N]: "
     ):
         counts = scan(root, allow_mass_delete=True)
 
-    print(f"\n[imagent] Root     : {root}")
-    print(f"[imagent] Database : {config.DB_PATH}")
-    print(f"[imagent] Scanned  : {counts['scanned']}")
-    print(f"[imagent] New      : {counts['queued_new']}")
-    print(f"[imagent] Modified : {counts['queued_modified']}")
-    print(f"[imagent] Moved    : {counts['moved']}")
-    print(f"[imagent] Unchanged: {counts['unchanged']}")
-    print(f"[imagent] Deleted  : {counts['deleted']}")
+    print(f"\nRoot     : {root}")
+    print(f"Database : {config.DB_PATH}")
+    print(f"Scanned  : {counts['scanned']}")
+    print(f"New      : {counts['queued_new']}")
+    print(f"Modified : {counts['queued_modified']}")
+    print(f"Moved    : {counts['moved']}")
+    print(f"Unchanged: {counts['unchanged']}")
+    print(f"Deleted  : {counts['deleted']}")
     if counts["delete_blocked"]:
-        print(f"[imagent] Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
+        print(f"Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
     if counts["empty"]:
-        print(f"[imagent] Skipped  : {counts['empty']} empty file(s)")
+        print(f"Skipped  : {counts['empty']} empty file(s)")
     if counts["unreadable"]:
-        print(f"[imagent] Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
+        print(f"Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
     print()
 
 
@@ -863,7 +863,7 @@ def main() -> None:
         try:
             roots = _choose_roots()
         except RootOverlapError as exc:
-            sys.exit(f"[imagent] Error: {exc}")
+            sys.exit(f"Error: {exc}")
     for root in roots:
         _scan_and_report(root)
 
@@ -877,12 +877,12 @@ def main() -> None:
         return
 
     if _ask_yes_no(
-        f"[imagent] {backlog_size} file(s) in the backlog are pending indexing. "
+        f"{backlog_size} file(s) in the backlog are pending indexing. "
         "Run indexing now? [y/N]: "
     ):
         run()
     else:
-        print(f"[imagent] Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
+        print(f"Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
 
 
 if __name__ == "__main__":

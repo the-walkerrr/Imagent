@@ -28,7 +28,7 @@ def main() -> None:
     conn = init_db(str(config.DB_PATH))
     try:
         if not print_failed(conn, limit=None):
-            print("[imagent] No image has failed to index.")
+            print("No image has failed to index.")
     finally:
         conn.close()
 

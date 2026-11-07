@@ -16,7 +16,11 @@ else
 fi
 
 echo "pre-commit: running the unit tests…"
-if ! "$PYTHON" -m unittest; then
+OUTPUT=$("$PYTHON" -m unittest 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+    echo "$OUTPUT" >&2
     echo "pre-commit: the tests failed, so the commit was stopped." >&2
     exit 1
 fi
+echo "$OUTPUT" | tail -n 3

@@ -159,7 +159,7 @@ def restart_server(client: ollama.Client) -> bool:
 
 def _stop_started_server(process: subprocess.Popen) -> None:
     stop_server(process)
-    print("[imagent] Stopped the Ollama server this run started.")
+    print("Stopped the Ollama server this run started.")
 
 
 def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print) -> tuple[ollama.Client, dict]:
@@ -220,7 +220,7 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
                 f"would be indexed wrongly. Run: {config.RUN_COMMAND} and choose \"Re-embed images\" to rebuild the stored vectors "
                 "with the installed model (it shows how long that takes first), or put the original version of the model back.")
         if stored and digest != stored:
-            say(f"[imagent] Warning: '{name}' is not the same version it was when you set up Imagent. Results may be less accurate.")
+            say(f"Warning: '{name}' is not the same version it was when you set up Imagent. Results may be less accurate.")
         if role == "vlm":
             try:
                 abilities = client.show(name).capabilities

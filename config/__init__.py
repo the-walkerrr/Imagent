@@ -16,7 +16,7 @@ def _data_dir() -> Path:
     try:
         home = Path.home()
     except (RuntimeError, KeyError):  # no HOME / user profile, as in some containers and services
-        raise SystemExit("[imagent] Error: cannot find your home folder, where Imagent keeps its data.")
+        raise SystemExit("Error: cannot find your home folder, where Imagent keeps its data.")
     system = platform.system()
     if system == "Darwin":
         return home / "Library" / "Application Support" / "Imagent"

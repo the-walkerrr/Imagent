@@ -114,7 +114,7 @@ def start_session() -> tuple | None:
     try:
         try:
             client, settings = check_ready(conn, ("judge", "embedding"),
-                                           say=lambda message: progress.say(message.removeprefix("[imagent] ")))
+                                           say=progress.say)
         except NotReady as exc:
             progress.fail()
             progress.say(str(exc))

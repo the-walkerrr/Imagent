@@ -72,7 +72,7 @@ def _model_to_use(client, settings: dict) -> tuple[str, dict]:
     base = (config.load_install_record().get("pinned_models") or {}).get(name)
     if base in installed:
         return base, installed
-    sys.exit(f"[imagent] The embedding model '{name}' is not installed in Ollama. Run: {config.INSTALL_COMMAND} to put it back, then run this again.")
+    sys.exit(f"The embedding model '{name}' is not installed in Ollama. Run: {config.INSTALL_COMMAND} to put it back, then run this again.")
 
 
 def reembed(assume_yes: bool = False) -> None:
@@ -82,13 +82,13 @@ def reembed(assume_yes: bool = False) -> None:
         try:
             client, settings = check_ready(conn, ())
         except NotReady as exc:
-            sys.exit(f"[imagent] {exc}")
+            sys.exit(f"{exc}")
         model, installed = _model_to_use(client, settings)
         texts, without = search_texts(list_records_for_embedding(conn))
         if without:
-            print(f"[imagent] {without} image(s) have no stored reply to build their text from; their vectors are left as they are.")
+            print(f"{without} image(s) have no stored reply to build their text from; their vectors are left as they are.")
         if not texts:
-            print("[imagent] Nothing to re-embed.")
+            print("Nothing to re-embed.")
             return
 
         sample = texts[:SAMPLE_SIZE]
@@ -97,17 +97,17 @@ def reembed(assume_yes: bool = False) -> None:
             for _, text in sample:
                 embed_search_text(client, model, text)
         except Exception as exc:
-            sys.exit(f"[imagent] The embedding model did not answer ({type(exc).__name__}: {exc}). Nothing was changed.")
+            sys.exit(f"The embedding model did not answer ({type(exc).__name__}: {exc}). Nothing was changed.")
         per_image = (time.perf_counter() - start) / len(sample)
-        print(f"[imagent] {len(texts)} image(s) to embed again with {model}; one took about {per_image:.2f} s, "
+        print(f"{len(texts)} image(s) to embed again with {model}; one took about {per_image:.2f} s, "
               f"so this takes about {_duration(per_image * len(texts))}.")
         if not assume_yes:
             try:
-                if input("[imagent] Continue? [y/N]: ").strip().lower() not in ("y", "yes"):
-                    print("[imagent] Nothing was changed.")
+                if input("Continue? [y/N]: ").strip().lower() not in ("y", "yes"):
+                    print("Nothing was changed.")
                     return
             except EOFError:
-                print("[imagent] Nothing was changed.")
+                print("Nothing was changed.")
                 return
 
         vectors = []
@@ -115,13 +115,13 @@ def reembed(assume_yes: bool = False) -> None:
             try:
                 vectors.append(embed_search_text(client, model, text))
             except Exception as exc:
-                sys.exit(f"[imagent] Embedding stopped after {done - 1} of {len(texts)} ({type(exc).__name__}: {exc}). "
+                sys.exit(f"Embedding stopped after {done - 1} of {len(texts)} ({type(exc).__name__}: {exc}). "
                          "Nothing was changed; run it again when Ollama is working.")
             if done % 25 == 0 or done == len(texts):
-                print(f"[imagent] {done} of {len(texts)} embedded…", flush=True)
+                print(f"{done} of {len(texts)} embedded…", flush=True)
         dimension = len(vectors[0])
         if any(len(vector) != dimension for vector in vectors):
-            sys.exit("[imagent] The model gave vectors of different sizes, so nothing was changed.")
+            sys.exit("The model gave vectors of different sizes, so nothing was changed.")
 
         try:
             pinned, digest = (model, installed[model]) if is_pinned(model) else pin_model(client, model)
@@ -129,14 +129,14 @@ def reembed(assume_yes: bool = False) -> None:
                 config.record_pinned_model(pinned, model)
         except Exception as exc:
             pinned, digest = model, installed[model]
-            print(f"[imagent] Could not save a fixed copy of {model} ({type(exc).__name__}: {exc}); it is used as it is.")
+            print(f"Could not save a fixed copy of {model} ({type(exc).__name__}: {exc}); it is used as it is.")
 
         with conn:  # all or nothing
             for (file_id, _), vector in zip(texts, vectors):
                 upsert_text_embedding(conn, file_id, serialize_embedding(vector), pinned, digest, dimension)
                 conn.execute("UPDATE image_data SET search_text_version = ? WHERE file_id = ?", (SEARCH_TEXT_VERSION, file_id))
             update_embedding_settings(conn, pinned, digest, dimension)
-        print(f"[imagent] Done: {len(texts)} vector(s) made again with {pinned}.")
+        print(f"Done: {len(texts)} vector(s) made again with {pinned}.")
     finally:
         conn.close()
 
@@ -147,7 +147,7 @@ def main() -> None:
         with single_instance("indexing", "Indexing or re-embedding"):
             reembed(assume_yes="--yes" in sys.argv)
     except AlreadyRunning as exc:
-        sys.exit(f"[imagent] {exc}")
+        sys.exit(f"{exc}")
 
 
 if __name__ == "__main__":
