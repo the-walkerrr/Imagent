@@ -169,5 +169,8 @@ tests/                       Automated tests
 python -m unittest      # run from the project folder, with the Python from .venv
 ```
 
+A pre-commit hook in `.githooks/` runs them before every commit and stops the commit if one fails. Turn it on once
+per clone with `git config core.hooksPath .githooks` (it needs `.venv`, so install first).
+
 The tests use a temporary folder and never touch your real index or call Ollama. The real photos they use are in
 `tests/fixtures/images.zip`, with where each came from and its licence (all public domain or CC0) in its `manifest.json`.

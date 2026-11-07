@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs the unit tests before every commit and stops the commit if one fails.
+# Enable it once per clone: git config core.hooksPath .githooks
+# Skip it for one commit (not recommended): git commit --no-verify
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+cd "$ROOT" || exit 1
+
+if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+elif [ -x ".venv/Scripts/python.exe" ]; then
+    PYTHON=".venv/Scripts/python.exe"
+else
+    echo "pre-commit: .venv was not found, so the tests cannot run. Run the installer first (sh install.sh)." >&2
+    exit 1
+fi
+
+echo "pre-commit: running the unit tests…"
+if ! "$PYTHON" -m unittest; then
+    echo "pre-commit: the tests failed, so the commit was stopped." >&2
+    exit 1
+fi
