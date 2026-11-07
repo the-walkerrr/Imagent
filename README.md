@@ -33,10 +33,11 @@ git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && call inst
 What happens:
 
 1. `install` asks a few questions and sets Imagent up (once). Answer them and wait for it to finish.
-2. `run` opens a menu: **1** Search, **2** Scan and index, **3** Try again the images that could not be indexed,
-   **4** Re-embed images, **5** Uninstall.
-3. Choose **2**, give it a folder of images, and let it index them.
-4. Run `run` again, choose **1**, and search.
+2. `run` opens a menu you move through with the arrow keys and Enter: Search, Scan and index, Uninstall.
+   **Re-embed images** appears only when the embedding model was changed or deleted in Ollama, and **Show the images
+   that could not be indexed** only when there are some.
+3. Choose **Scan folders and index images**, give it a folder of images, and let it index them.
+4. Run `run` again, choose **Search your images**, and search.
 
 ## Usage
 
@@ -51,7 +52,7 @@ sh run.sh
 run.bat          
 ```
 
-If something is not set up, `run` tells you to run `sh install.sh` (or `install.bat`) first.
+If Imagent is not installed yet, `run` asks whether to run the installer now (`sh install.sh` or `install.bat`).
 
 ## How it works
 
@@ -64,8 +65,9 @@ If something is not set up, `run` tells you to run `sh install.sh` (or `install.
 - lets you pick three models (vision, embedding, text) and downloads them;
 - measures your computer with the vision model, by itself and with no questions: it tries pictures from large to small
   until one works, and stores the largest picture size, the memory window, whether the model is paged in from disk and
-  how long to wait for a reply, all as measured here, not guessed. Running install again measures again if the vision
-  model changed;
+  how long to wait for a reply, all as measured here, not guessed. It also checks that the embedding model runs while
+  the vision model is loaded, as it does for every image; if the two do not fit in memory together, indexing loads one
+  at a time (a little slower). Running install again measures again if the vision model changed;
 - unpacks a set of test pictures (real photos of many kinds and sizes, and files made on the spot: huge, damaged and odd
   ones, up to about 120 MB) and checks that this computer reads them, again by itself.
 
@@ -82,21 +84,26 @@ interrupt: run it again and it carries on with what is left.
 ### When an image cannot be indexed
 
 Every kind of trouble has its own steps, and none of them lowers the quality of the result. Nothing is stored half
-done: an image is either indexed completely or set aside with the reason.
+done: an image is either indexed completely or listed with the reason and what you can do about it.
 
 | Trouble | What Imagent does |
 | --- | --- |
 | The model's reply is cut off | Asks again with different sampling, then with a higher output limit, step by step |
 | The reply does not fit the schema | Tells the model what is wrong and asks again |
-| No reply in time, or Ollama stopped | Waits longer; or restarts Ollama or frees memory, and asks again once |
+| No reply in time, or Ollama stopped | Waits longer; or restarts Ollama or frees memory, and asks again once. If that fails, the image is tried again, 3 tries in all, and again on every later scan |
+| The embedding model fails (usually the memory ran out beside the vision model) | Unloads every model, waits, and asks again once |
 | The text in the image cannot be read | Reads it in tiles, then again with the engine reloaded |
-| The image is damaged, unsupported or too large for the free memory | Sets it aside at once, with the reason |
+| The image is in a format Imagent cannot open | Converts a copy to PNG with the tool the system has (`sips` on macOS, the built-in imaging components on Windows), analyses the copy and deletes it. Linux has no such tool |
+| The image is damaged | Sets it aside at once, with the reason and what to do |
+| The image is too large for the free memory | Leaves it for the next scan, with the reason |
 | The file is still being copied | Leaves it for the next run |
 | The embedding text is too long | Splits it and averages the parts; nothing is cut off |
 
-An image that is set aside is queued again by itself when the file changes, or (for the model's replies) when the
-model or the prompt changes. To try it again yourself, choose **Try again the images that could not be indexed**.
-Indexing stops, and says why, when the same trouble keeps happening: Ollama or the machine failing several images
+You do not have to retry anything yourself. An image that could not be indexed is queued again by itself when the
+file changes, when the model or the prompt changes (for the model's replies), or on the next scan (when the trouble was
+Ollama or the memory). Only when every try is over are you told, at the end of the scan and under **Show the images
+that could not be indexed**: each image with the reason and what you can do about it. An image leaves that list as soon
+as it is indexed. Indexing stops, and says why, when the same trouble keeps happening: Ollama or the machine failing several images
 in a row, files that cannot be read one after another (a drive that went away), or most replies needing a retry
 (which points to the model or the prompt).
 
@@ -107,7 +114,7 @@ add `"max_megapixels": 100` to `config.json`.
 ### If the embedding model changed
 
 Imagent refuses to index or search if the installed embedding model is not the version the stored vectors were made
-with, because the vectors could not be compared. Choose **Re-embed images**: it shows how long it will take, makes all
+with, because the vectors could not be compared. The menu then offers **Re-embed images** (it is not shown otherwise): choose it; it shows how long it will take, makes all
 the vectors again from what is stored (the vision model is not asked again) and saves the model as a copy of its own.
 
 ### Search
@@ -118,7 +125,7 @@ Type `exit` to quit. Scan and index at least one folder first.
 ### Uninstall
 
 Choose **Uninstall Imagent** (or run `sh uninstall/uninstall.sh` / `uninstall\uninstall.bat`). It shows what
-will be lost and asks three times before deleting anything. It removes the Ollama models Imagent downloaded,
+will be lost and asks three times before deleting anything (the last time you type a random 10-character code it shows). It removes the Ollama models Imagent downloaded,
 Imagent's data (index, settings, logs) and `.venv`. It never touches your images or Ollama itself.
 
 ## Where your data lives
@@ -149,8 +156,8 @@ something goes wrong, the details are in `last_error.log` there.
 
 ```
 install.sh, install.bat      Set up Imagent
-run.sh, run.bat              Menu: search, scan and index, try again, re-embed, uninstall
-install/  search/  scan_and_index/  retry_failed/  reembed/  uninstall/    One folder per command
+run.sh, run.bat              Open the menu (menu/): search, scan and index, images that failed, re-embed (when needed), uninstall
+install/  menu/  search/  scan_and_index/  show_failed/  reembed/  uninstall/    One folder per command
 config/                      Settings
 db/  vlm/  image_processing/  text_processing/  pipeline/  prompts/    Shared code
 tests/                       Automated tests

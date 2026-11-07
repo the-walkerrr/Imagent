@@ -22,7 +22,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MIN_SQLITE_VERSION = (3, 24, 0)
 
 # The version of the schema in schema.sql. Raise it, and add the steps to _MIGRATIONS, with every schema change.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Version 1 is the schema of databases made before versions were recorded (user_version 0 with tables).
 # _MIGRATIONS[n] holds the statements that turn version n - 1 into version n.
@@ -46,6 +46,10 @@ _MIGRATIONS: dict[int, list[str]] = {
             app_version TEXT NOT NULL,
             calibrated_at DATETIME NOT NULL
         )""",
+    ],
+    # 4: whether the vision and embedding models fit in memory together.
+    4: [
+        "ALTER TABLE device_settings ADD COLUMN one_model_at_a_time INTEGER CHECK (one_model_at_a_time IN (0, 1))",
     ],
 }
 

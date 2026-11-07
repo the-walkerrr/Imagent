@@ -3,7 +3,6 @@
 import contextlib
 import io
 import json
-import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,8 +16,8 @@ from db.operations import (
 from install import install
 from pipeline import versions as versions_module
 from pipeline.serialisation import serialize_embedding
+from menu import menu
 from reembed import reembed
-from retry_failed import retry_failed
 from tests.support import DEVICE, IsolatedHome
 from vlm import client as vlm_client
 from vlm.client import NotReady, check_ready, pin_model, pinned_name
@@ -343,61 +342,6 @@ class ReembedTests(IsolatedHome):
         self.assertIn(config.INSTALL_COMMAND, str(raised.exception))
 
 
-class RetryFailedTests(IsolatedHome):
-    def setUp(self):
-        super().setUp()
-        self.conn = self.connect()
-        with self.conn:
-            root = get_or_add_root(self.conn, str(self.work))
-            for name, kind in (("a", "cut_off"), ("b", "cut_off"), ("c", "unreadable")):
-                upsert_backlog(self.conn, str(self.work / f"{name}.png"), root, "t")
-                park_backlog(self.conn, str(self.work / f"{name}.png"), kind, f"{kind} message", "on_request")
-
-    def run_command(self, argv, answers=(), run_now=False):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(sys, "argv", ["retry_failed.py", *argv]), \
-                mock.patch("builtins.input", side_effect=list(answers)), \
-                mock.patch.object(retry_failed, "_ask_yes_no", return_value=run_now), mock.patch.object(retry_failed, "run") as run:
-            try:
-                retry_failed.main()
-                error = None
-            except SystemExit as exc:
-                error = exc
-        return out.getvalue(), run, error
-
-    def test_one_kind_can_be_given_on_the_command_line(self):
-        out, run, _ = self.run_command(["unreadable"])
-        self.assertIn("1 image(s) queued again", out)
-        self.assertEqual(len(list_parked(self.conn)), 2)
-
-    def test_all_can_be_asked_for_and_indexing_offered(self):
-        out, run, _ = self.run_command(["all"], run_now=True)
-        self.assertIn("3 image(s) queued again", out)
-        run.assert_called_once()
-
-    def test_without_an_argument_the_kind_is_chosen_from_a_list(self):
-        out, _, _ = self.run_command([], answers=["1"])  # kinds are sorted: 1 = cut_off
-        self.assertIn("2 image(s) queued again", out)
-        self.assertEqual([p["park_kind"] for p in list_parked(self.conn)], ["unreadable"])
-
-    def test_the_reason_of_each_kind_is_shown(self):
-        out, _, _ = self.run_command(["all"])
-        self.assertIn("cut_off message", out)
-        self.assertIn("unreadable message", out)
-
-    def test_an_unknown_kind_is_refused_and_nothing_changes(self):
-        _, _, error = self.run_command(["nonsense"])
-        self.assertIn("cut_off", str(error))
-        self.assertEqual(len(list_parked(self.conn)), 3)
-
-    def test_nothing_set_aside_is_said_plainly(self):
-        with self.conn:
-            requeue_parked(self.conn)
-        out, run, _ = self.run_command([])
-        self.assertIn("nothing to try again", out)
-        run.assert_not_called()
-
-
 class SetupPinTests(IsolatedHome):
     def test_setup_locks_the_embedding_model_as_a_copy_of_its_own_and_records_it(self):
         client = ReadyClient(models(**{"v:latest": "vd", "e:latest": "sha256:abc123abc123xx", "j:latest": "jd"}))
@@ -436,17 +380,50 @@ class SetupPinTests(IsolatedHome):
         self.assertIn("Re-embed images", say.call_args[0][0])
 
 
+class MenuTests(IsolatedHome):
+    def changed(self, listing, settings=SETTINGS, ready=True):
+        """What embedding_model_changed says with the models in ``listing`` installed and ``settings`` stored."""
+        conn = self.connect()
+        with conn:
+            set_model_settings(conn, settings)
+        outcome = (ReadyClient(listing), settings) if ready else NotReady("Cannot reach Ollama")
+        with mock.patch.object(menu, "check_ready", **({"return_value": outcome} if ready else {"side_effect": outcome})):
+            return menu.embedding_model_changed()
+
+    def test_re_embed_is_offered_when_the_embedding_model_is_another_version(self):
+        self.assertTrue(self.changed(models(**{"v:latest": "vd", "e:latest": "NEW"})))
+
+    def test_re_embed_is_offered_when_the_embedding_model_was_deleted(self):
+        self.assertTrue(self.changed(models(**{"v:latest": "vd"})))
+
+    def test_re_embed_is_not_offered_when_the_embedding_model_is_unchanged(self):
+        self.assertFalse(self.changed(models(**{"v:latest": "vd", "e:latest": "ed"})))
+
+    def test_re_embed_is_not_offered_when_the_models_cannot_be_checked(self):
+        self.assertFalse(self.changed(None, ready=False))
+
+    def test_re_embed_is_in_the_choices_only_when_asked_for_and_uninstall_is_always_last(self):
+        for with_reembed in (False, True):
+            values = [choice.value for choice in menu.choices(with_reembed)]
+            self.assertEqual(menu.REEMBED[1] in values, with_reembed)
+            self.assertEqual(values[0], menu.SEARCH[1])
+            self.assertEqual(values[-1], menu.UNINSTALL)
+
+
 class LaunchersTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
     def test_every_menu_entry_runs_a_script_that_exists(self):
-        import re
+        for script in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT, menu.REEMBED[1]):
+            self.assertTrue((self.ROOT / script).is_file(), script)
+
+    def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):
         shell = (self.ROOT / "run.sh").read_text()
         batch = (self.ROOT / "run.bat").read_bytes().decode()
-        scripts = set(re.findall(r'script="([\w/]+\.py)"', shell)) | {s.replace("\\", "/") for s in re.findall(r'SCRIPT=([\w\\]+\.py)', batch)}
-        self.assertEqual(len(scripts), 4)
-        for script in scripts:
-            self.assertTrue((self.ROOT / script).is_file(), script)
+        self.assertIn(f"UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE} ", shell)
+        self.assertIn(f'set "UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE}"', batch)
+        self.assertTrue((self.ROOT / "uninstall" / "uninstall.sh").is_file())
+        self.assertTrue((self.ROOT / "uninstall" / "uninstall.bat").is_file())
 
     def test_batch_files_keep_their_windows_line_endings(self):
         for name in ("run.bat", "install.bat", "uninstall/uninstall.bat"):

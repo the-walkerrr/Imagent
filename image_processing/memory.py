@@ -104,10 +104,12 @@ def plan_image(path: str) -> str:
         megapixels = width * height / 1_000_000
         limit = config.IMAGE_MAX_MEGAPIXELS
         if limit and megapixels > limit:
-            reason = f"more than the {limit:g} megapixels allowed by max_megapixels in config.json"
+            reason = f"more than the {limit:g} megapixels allowed by max_megapixels in config.json. Raise that number in config.json, or remove it"
+            detail = reason
         else:
-            reason = (f"more than the memory free right now allows: it needs about {width * height * GENTLE_BYTES_PER_PIXEL // 10**6} MB "
+            reason = "more than the memory free right now allows. Close other programs, then scan again"
+            detail = (f"more than the memory free right now allows: it needs about {width * height * GENTLE_BYTES_PER_PIXEL // 10**6} MB "
                       f"and {int(available * config.IMAGE_MEMORY_SHARE) // 10**6} MB can be used")
-        raise problem(TOO_LARGE, f"The image has {megapixels:.0f} megapixels, {reason}.", step="checked the size",
-                      retry_when="on_request")
+        raise problem(TOO_LARGE, f"The picture has {megapixels:.0f} megapixels, {reason}.", step="checked the size",
+                      detail=f"{megapixels:.0f} megapixels, {detail}", park=False)
     return route

@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS device_settings (
     -- Seconds to wait for the first reply of a request; each wait that runs out is doubled (vlm/analyzer.py).
     timeout_seconds INTEGER NOT NULL,
 
+    -- 1 when the vision and embedding models did not fit in memory together, so indexing loads one at a time; 0 when
+    -- they did; NULL when that was not tried (setup measures it again then).
+    one_model_at_a_time INTEGER CHECK (one_model_at_a_time IN (0, 1)),
+
     -- The vision model these were measured with (its digest) and the numbers they came from, as JSON.
     vlm_digest TEXT,
     measurements TEXT NOT NULL,

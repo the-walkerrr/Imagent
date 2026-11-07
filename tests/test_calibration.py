@@ -22,8 +22,16 @@ NO_MEMORY = ollama.ResponseError("model requires more system memory than is avai
 class FakeOllama:
     """Answers each chat request like a model would: ``outcome(request)`` is a reply's numbers, or an error to raise."""
 
-    def __init__(self, outcome, size=2_000_000_000, context_limit=32768):
+    def __init__(self, outcome, size=2_000_000_000, context_limit=32768, embedder=lambda: None):
         self.outcome, self.requests, self.size, self.context_limit = outcome, [], size, context_limit
+        self.embedder, self.embeds = embedder, []  # embedder() returns an error to raise for this embedding request, or None
+
+    def embed(self, **request):
+        self.embeds.append(request)
+        error = self.embedder()
+        if error is not None:
+            raise error
+        return SimpleNamespace(embeddings=[[0.0]])
 
     def chat(self, **request):
         self.requests.append(request)
@@ -72,7 +80,7 @@ class CalibrationTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def run_it(self, client):
-        return calibration.calibrate(client, "vlm", say=lambda message: None)
+        return calibration.calibrate(client, "vlm", "emb", say=lambda message: None)
 
     def test_a_computer_that_manages_the_largest_picture_gets_it(self):
         client = FakeOllama(lambda request: reply())
@@ -80,7 +88,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(found["image_long_edge"], config.IMAGE_EDGE_CEILING)
         self.assertEqual({edge_of(r) for r in client.requests}, {config.IMAGE_EDGE_CEILING})
         self.assertFalse(found["use_mmap"])
-        self.unload.assert_called_once()  # the model's memory is freed again
+        self.assertEqual([call.args[1] for call in self.unload.call_args_list], ["vlm", "emb"])  # both models' memory is freed again
 
     def test_the_picture_is_made_smaller_until_the_computer_manages_it(self):
         def outcome(request):
@@ -164,6 +172,37 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual((image.format, max(image.size)), ("JPEG", edge))
 
 
+    def test_an_embedding_model_that_fits_beside_the_vision_model_leaves_both_loaded_together(self):
+        client = FakeOllama(lambda request: reply())
+        found = self.run_it(client)
+        self.assertFalse(found["one_model_at_a_time"])
+        self.assertEqual(len(client.embeds), 1)
+        self.assertEqual(client.embeds[0]["model"], "emb")
+        self.assertIs(client.embeds[0]["options"]["use_mmap"], found["use_mmap"])  # the options indexing will use
+        self.assertGreater(len(client.embeds[0]["input"][0]), config.CALIBRATION_EMBED_TOKENS)  # about as long as a stored description
+
+    def test_an_embedding_model_that_fails_beside_the_vision_model_but_runs_alone_means_one_model_at_a_time(self):
+        failures = iter([ollama.ResponseError("Compute error.", 500)])  # the first try, with the vision model loaded
+        client = FakeOllama(lambda request: reply(), embedder=lambda: next(failures, None))
+        found = self.run_it(client)
+        self.assertTrue(found["one_model_at_a_time"])
+        self.assertEqual(len(client.embeds), 2)
+        # both were unloaded between the two tries
+        self.assertEqual([call.args[1] for call in self.unload.call_args_list][:2], ["emb", "vlm"])
+
+    def test_an_embedding_model_that_does_not_run_even_alone_means_the_computer_cannot_run_the_models(self):
+        client = FakeOllama(lambda request: reply(), embedder=lambda: ollama.ResponseError("Compute error.", 500))
+        with self.assertRaisesRegex(calibration.NotPossible, "embedding model 'emb' did not work"):
+            self.run_it(client)
+        self.assertEqual(len(client.embeds), 2)
+
+    def test_other_trouble_with_the_embedding_model_is_not_taken_for_not_fitting(self):
+        client = FakeOllama(lambda request: reply(), embedder=lambda: ollama.ResponseError("model 'emb' not found", 404))
+        with self.assertRaises(ollama.ResponseError):
+            self.run_it(client)
+        self.assertEqual(len(client.embeds), 1)
+
+
 class DeviceSettingsStoreTests(IsolatedHome):
     def test_what_was_measured_is_stored_with_the_model_it_was_measured_with(self):
         conn = self.connect()
@@ -174,6 +213,20 @@ class DeviceSettingsStoreTests(IsolatedHome):
         found = get_device_settings(conn)
         self.assertEqual((found["num_ctx"], found["use_mmap"], found["vlm_digest"]), (8192, True, "sha256:abc"))
         self.assertEqual(found["measurements"], {"tokens_per_second": 12.5})
+
+    def test_whether_the_two_models_fit_together_is_stored_and_not_trying_it_is_not_the_same_as_fitting(self):
+        conn = self.connect()
+        for stored in (True, False, None):
+            with conn:
+                set_device_settings(conn, {**DEVICE, "one_model_at_a_time": stored}, "d")
+            self.assertIs(get_device_settings(conn)["one_model_at_a_time"], stored)
+
+    def test_a_computer_measured_before_that_was_tried_is_run_with_the_models_sharing_memory(self):
+        found = {**DEVICE, "one_model_at_a_time": None}
+        config.apply_device_settings(found)
+        self.assertIs(config.ONE_MODEL_AT_A_TIME, False)
+        config.apply_device_settings({**found, "one_model_at_a_time": True})
+        self.assertIs(config.ONE_MODEL_AT_A_TIME, True)
 
     def test_measuring_again_replaces_the_earlier_measurement(self):
         conn = self.connect()

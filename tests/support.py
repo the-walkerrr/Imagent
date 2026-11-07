@@ -15,7 +15,7 @@ from image_processing.metadata import iso_utc
 
 
 # What setup measured about a computer (db/operations.set_device_settings).
-DEVICE = {"num_ctx": 8192, "use_mmap": False, "image_long_edge": 1024, "timeout_seconds": 300, "measurements": {}}
+DEVICE = {"num_ctx": 8192, "use_mmap": False, "image_long_edge": 1024, "timeout_seconds": 300, "one_model_at_a_time": False, "measurements": {}}
 
 
 class IsolatedHome(unittest.TestCase):
@@ -23,7 +23,7 @@ class IsolatedHome(unittest.TestCase):
 
     def setUp(self):
         # A run puts the measured settings in place of config's starting values (config.apply_device_settings); undo that afterwards.
-        for name in ("OLLAMA_TIMEOUT", "OLLAMA_NUM_CTX", "OLLAMA_USE_MMAP", "IMAGE_MAX_LONG_EDGE"):
+        for name in ("OLLAMA_TIMEOUT", "OLLAMA_NUM_CTX", "OLLAMA_USE_MMAP", "IMAGE_MAX_LONG_EDGE", "ONE_MODEL_AT_A_TIME"):
             patcher = mock.patch.object(config, name, getattr(config, name))
             patcher.start()
             self.addCleanup(patcher.stop)

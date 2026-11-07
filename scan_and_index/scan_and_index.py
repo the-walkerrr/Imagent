@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import textwrap
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -194,7 +196,13 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # ------------------------------------------------------------------
     on_stage("embedding description")
     search_text = build_search_text(analysis.reply, analysis.ocr_text, config.SUMMARY_FIELD)
-    embedding = embed_search_text(client, settings["embedding_model"], search_text)
+    if config.ONE_MODEL_AT_A_TIME:  # setup found the two models do not fit in memory together: the vision model goes before the embedding model comes
+        unload_model(client, settings["vlm_model"])
+    try:
+        embedding = embed_search_text(client, settings["embedding_model"], search_text)
+    finally:
+        if config.ONE_MODEL_AT_A_TIME:  # ... and the embedding model goes before the next image's vision model comes
+            unload_model(client, settings["embedding_model"])
     if len(embedding) != settings["embedding_dim"]:
         raise RunStopped(
             f"The embedding model returned {len(embedding)} values, but {settings['embedding_dim']} "
@@ -233,6 +241,26 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # ↑ Commit point — image is now considered fully indexed in the database.
 
     return ("updated" if is_update else "indexed"), short_description
+
+
+def _index_with_tries(conn, client: ollama.Client, settings: dict, root_id: int, image_path: Path,
+                      on_stage: Callable[[str], None], on_retry: Callable[[str], None]) -> tuple[str, str]:
+    """``index_image``, tried again right away when the failure is Ollama's or the machine's, up to ``config.SERVICE_TRIES`` times.
+
+    Each try runs the steps for its kind of trouble (waiting longer, starting Ollama again, freeing memory). What a failed
+    try was is shown while the next one runs, and kept in the record of what was tried. The last failure is raised."""
+    prefix = ""
+    for attempt in range(1, config.SERVICE_TRIES + 1):
+        try:
+            return index_image(conn, client, settings, root_id, image_path, lambda stage: on_stage(prefix + stage), on_retry)
+        except IndexingFailure as failure:
+            if not failure.service or attempt == config.SERVICE_TRIES:
+                raise
+            with conn:
+                add_failure_history(conn, str(image_path), failure.attempts)
+            prefix = f"{failure.kind.replace('_', ' ')}: trying again, {attempt + 1} of {config.SERVICE_TRIES} · "
+            on_stage(prefix + "starting")
+    raise AssertionError("unreachable")  # config.SERVICE_TRIES is at least 1
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +312,7 @@ def _index_backlog() -> None:
 
     if total == 0:
         print("[imagent] Nothing to index.")
-        _print_given_up(conn)
+        print_failed(conn)
         conn.close()
         return
 
@@ -316,8 +344,8 @@ def _index_backlog() -> None:
             retried: list[str] = []
             try:
                 try:
-                    result, short_description = index_image(conn, client, settings, row["root_id"], image_path, progress.stage,
-                                                            on_retry=retried.append)
+                    result, short_description = _index_with_tries(conn, client, settings, row["root_id"], image_path, progress.stage,
+                                                                  retried.append)
                     with conn:
                         delete_backlog(conn, row["file_path"])
                     counts[result] += 1
@@ -333,15 +361,20 @@ def _index_backlog() -> None:
                     # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
                     # fault is not the file's, left queued with its attempts untouched.
                     counts["failed"] += 1
+                    message = str(exc)
+                    if exc.service:  # the machine's trouble: it was tried several times, and the user is told what to do about it
+                        message += (f" Imagent tried {config.SERVICE_TRIES} times without success. "
+                                    "Close other apps that use a lot of memory, then scan again.")
                     log_error(conn, stage="pipeline", exc=exc, file_path=str(image_path),
                               metadata={"root_id": row["root_id"], "kind": exc.kind})
                     with conn:
                         add_failure_history(conn, row["file_path"], exc.attempts)
                         if exc.park:
-                            park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when, parked_versions)
+                            park_backlog(conn, row["file_path"], exc.kind, message, exc.retry_when, parked_versions)
                         else:
-                            record_backlog_failure(conn, row["file_path"], str(exc), count_attempt=False)
-                    progress.done("FAILED", str(exc))
+                            record_backlog_failure(conn, row["file_path"], message, count_attempt=False,
+                                                   kind=exc.kind if exc.report else None)
+                    progress.done("FAILED", message)
                     io_failures.clear()
                     if exc.service:
                         in_a_row += 1
@@ -398,7 +431,8 @@ def _index_backlog() -> None:
                 if len(recent_retries) == recent_retries.maxlen and sum(recent_retries) / len(recent_retries) >= config.RETRY_RATE_STOP:
                     stopped = (f"The model's reply had to be asked for again for {sum(recent_retries)} of the last {len(recent_retries)} images, "
                                "so indexing stopped: this points at the model or the prompt, not at the images. "
-                               "Try another vision model or revise the prompt, then run it again; the rest stays queued.")
+                               "Nothing was held against the images. Close other apps that use a lot of memory, then scan again; "
+                               "the rest stays queued.")
                     break
             except sqlite3.Error as exc:
                 counts["failed"] += 1
@@ -432,7 +466,7 @@ def _index_backlog() -> None:
     if stopped:
         print(f"\n[imagent] {stopped}")
     try:
-        _print_given_up(conn)
+        print_failed(conn)
     except sqlite3.Error:
         pass  # the database is what stopped the run; its message is above
     print()
@@ -450,16 +484,22 @@ def _is_gone(image_path: Path, root_path: str | None) -> bool:
     return root_path is not None and Path(root_path).is_dir() and not image_path.exists()
 
 
-def _print_given_up(conn) -> None:
-    """List the files that failed ``config.BACKLOG_MAX_ATTEMPTS`` times and are now left alone."""
-    given_up = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
-    if not given_up:
-        return
-    print(f"\n[imagent] {len(given_up)} file(s) could not be indexed and are set aside until they change:")
-    for item in given_up[:10]:
-        print(f"  {item['file_path']}  ({item['last_error']})")
-    if len(given_up) > 10:
-        print(f"  … and {len(given_up) - 10} more (see the backlog table)")
+def print_failed(conn, limit: int | None = 10) -> int:
+    """Tell the user which images could not be indexed, each with the reason and what can be done about it. Returns how many there are.
+
+    Only images whose every try is over are listed; one that is indexed later (or whose file is gone) drops out of the list by itself.
+    ``limit`` is how many to show; None shows them all."""
+    failed = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+    if not failed:
+        return 0
+    print(f"\n[imagent] {len(failed)} image(s) could not be indexed:")
+    width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
+    for item in failed[:limit]:
+        print(f"\n  {item['file_path']}")
+        print(textwrap.fill(item["last_error"] or "No reason was recorded.", width, initial_indent="    ", subsequent_indent="    "))
+    if limit is not None and len(failed) > limit:
+        print(f"\n  … and {len(failed) - limit} more. Choose \"Show the images that could not be indexed\" in the menu to see them all.")
+    return len(failed)
 
 
 # ---------------------------------------------------------------------------

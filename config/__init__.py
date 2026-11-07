@@ -135,12 +135,14 @@ FILE_SETTLE_SECONDS: int = 2  # a file that cannot be read is watched this long:
 IMAGE_EDGE_CEILING: int = 1024  # the largest long side setup tries for the image sent to the vision model: beyond it the extra detail is not worth the time
 IMAGE_MAX_LONG_EDGE: int = IMAGE_EDGE_CEILING  # the long side actually used: the largest the computer managed, never above the ceiling
 IMAGE_JPEG_QUALITY: int = 85
+ONE_MODEL_AT_A_TIME: bool = False  # True when setup found that the vision and embedding models do not fit in memory together (vlm/calibration.py)
 
 # --- Measuring the computer at setup (vlm/calibration.py) ---------------------
 CALIBRATION_EDGE_STEP: float = 0.75  # each smaller image tried is this share of the one before
 CALIBRATION_MIN_EDGE: int = 336  # below this long side the vision model gets too little detail to describe a picture usefully
 CALIBRATION_MEMORY_HEADROOM: float = 0.25  # share of the free memory that must stay free after a model is loaded into it; else it is paged in from disk
 CALIBRATION_TIMEOUT_MARGIN: float = 2.0  # the wait is the measured time for the largest first reply times this
+CALIBRATION_EMBED_TOKENS: int = 500  # length, in tokens, of the text the embedding model is given to see whether it fits in memory beside the vision model: about one stored description
 CALIBRATION_TRIAL_TOKENS: int = 48  # tokens a trial reply is asked for: enough to time the model, not to finish a description
 
 
@@ -148,11 +150,12 @@ def apply_device_settings(device: dict) -> None:
     """Put what setup measured about this computer in place of the starting values, for this run.
 
     The two option dicts are changed in place: code that took them earlier sees the new values."""
-    global OLLAMA_TIMEOUT, OLLAMA_NUM_CTX, OLLAMA_USE_MMAP, IMAGE_MAX_LONG_EDGE
+    global OLLAMA_TIMEOUT, OLLAMA_NUM_CTX, OLLAMA_USE_MMAP, IMAGE_MAX_LONG_EDGE, ONE_MODEL_AT_A_TIME
     OLLAMA_TIMEOUT = device["timeout_seconds"]
     OLLAMA_NUM_CTX = device["num_ctx"]
     OLLAMA_USE_MMAP = device["use_mmap"]
     IMAGE_MAX_LONG_EDGE = device["image_long_edge"]
+    ONE_MODEL_AT_A_TIME = bool(device.get("one_model_at_a_time"))  # None: not measured yet, so the two models are left to share the memory
     LLM_OPTIONS.update(num_ctx=OLLAMA_NUM_CTX, use_mmap=OLLAMA_USE_MMAP)
     EMBED_OPTIONS.update(use_mmap=OLLAMA_USE_MMAP)
 
@@ -163,6 +166,8 @@ SCAN_GUARD_MIN_FILES: int = 10  # a scan that finds at least this many indexed i
 SCAN_GUARD_MAX_SHARE: float = 0.5  # ... and more than this share of the folder's indexed images asks before forgetting them
 BACKLOG_MAX_ATTEMPTS: int = 3  # a file that fails this many times is left alone until it changes
 MAX_CONSECUTIVE_SERVICE_FAILURES: int = 3  # indexing stops after this many Ollama failures in a row
+SERVICE_TRIES: int = 3  # tries for an image whose failure is Ollama's or the machine's (each try runs the steps in vlm/analyzer.py), before the user is told
+CONVERT_TIMEOUT: int = 300  # seconds the operating system's tool may take to convert one picture Pillow cannot open
 RETRY_RATE_WINDOW: int = 10  # indexing stops when, among this many of the latest analysed images ...
 RETRY_RATE_STOP: float = 0.5  # ... at least this share needed the model's reply retried: the model or the prompt is the problem, not the files
 ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted

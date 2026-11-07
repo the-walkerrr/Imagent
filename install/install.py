@@ -34,6 +34,7 @@ import config as app_config
 from db.connection import init_db
 from db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
 from pipeline.console import make_output_safe, run_cli
+from pipeline.progress import SearchProgress
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 VENV_DIR = PROJECT_DIR / ".venv"
@@ -152,15 +153,42 @@ def _gpu() -> str:
     return "none detected"
 
 
+def _metal_gpu_memory_gb():
+    """Memory the macOS GPU may use in GB, as Metal reports it (recommendedMaxWorkingSetSize); None if Metal cannot be asked."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+        metal = ctypes.CDLL("/System/Library/Frameworks/Metal.framework/Metal")
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        objc.objc_msgSend.restype = ctypes.c_uint64
+        device = metal.MTLCreateSystemDefaultDevice()
+        if not device:
+            return None
+        size = objc.objc_msgSend(device, objc.sel_registerName(b"recommendedMaxWorkingSetSize"))
+        return size / 2**30 if size else None
+    except (OSError, AttributeError, TypeError):
+        return None
+
+
 def system_details() -> str:
     free_disk = shutil.disk_usage(Path.home()).free / 2**30
-    return "\n".join([
+    lines = [
         f"- OS: {platform.system()} {platform.release()} ({platform.machine()})",
         f"- CPU: {_cpu()}",
         f"- RAM: {_ram_gb()}",
         f"- GPU: {_gpu()}",
-        f"- Free disk space: {free_disk:.0f} GB",
-    ])
+    ]
+    metal_gb = _metal_gpu_memory_gb()
+    if metal_gb is not None:
+        lines.append(f"- GPU memory usable (reported by Metal for this computer): {metal_gb:.1f} GB")
+    lines.append(f"- Free disk space: {free_disk:.0f} GB")
+    return "\n".join(lines)
 
 
 # --- AI prompt ----------------------------------------------------------------
@@ -182,13 +210,13 @@ def build_ai_prompt() -> str:
 3. Capabilities: the vision model needs "vision", the text model needs "completion", the embedding model needs "embedding" (context of at least 1024 tokens, strong multilingual retrieval). The vision and text models must follow a JSON schema reliably and must not be thinking-only (reasoning) models. The text model may be the same model as the vision model.
 4. Quantization of 4-bit or better, never lower.
 5. Speed: a vision reply within a few seconds per image (never more than about 30 seconds) and a text reply within about 10 seconds. If two models are within about 30% of each other in speed, choose the more accurate one. Choose the faster one only when it is clearly faster (about twice as fast) and only slightly less accurate. Judge by published benchmarks and the model's own page, not by size, popularity or release date; an older maintained model is fine if the balance is better.
-6. Memory: model weights are fully loaded (no memory-mapping). Every set must fit entirely on the GPU, with no CPU offload and no swapping, in about 85% of my VRAM (or RAM if there is no dedicated GPU; with shared memory, the part the GPU can use). Check both cases; the vision and text models are never loaded together:
-   - indexing: vision model + embedding model, including the vision model's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens and its image-encoder working memory for images up to {app_config.IMAGE_MAX_LONG_EDGE} px on the long edge (reserved for a worst-case image);
-   - searching: text model + embedding model, including the text model's KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens.
+6. Memory: model weights are fully loaded (no memory-mapping). Every set must fit entirely on the GPU, with no CPU offload and no swapping, in about 85% of my VRAM (or RAM if there is no dedicated GPU). With shared (unified) memory the GPU cannot use all of the RAM: if "GPU memory usable" is listed above, it is the figure to use, so take 85% of that and do not look it up. Check both cases; the vision and text models are never loaded together:
+   - indexing: the vision model AND the embedding model are loaded at the same time, so both must fit together. Count the vision model's weights, its KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens and its image-encoder working memory for images up to {app_config.IMAGE_MAX_LONG_EDGE} px on the long edge (reserved for a worst-case image), plus the embedding model's weights and its own KV cache and compute buffers at the context Ollama gives it by default; those buffers can make an embedding model several times larger in memory than its weight file. Ollama does not publish buffer sizes, so estimate them and leave a safety margin instead of declining a set for lack of an exact figure;
+   - searching: the text model AND the embedding model are loaded at the same time. Count the text model's weights and its KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens, plus the embedding model in memory as above.
 7. Do the memory sums yourself and do not show the working.
 
 ## Answer
-Give three sets. A set is one complete choice: a vision model, a text model and an embedding model that work together. Set 1 is the best balance and the one you recommend; set 2 is a faster or lighter alternative; set 3 is a more accurate one that still fits. Only give a set if you verified all three of its models; if there are fewer than three, give fewer and say so.
+Give three sets. A set is one complete choice: a vision model, a text model and an embedding model that work together. Set 1 is the best balance and the one you recommend; set 2 is a faster or lighter alternative; set 3 is a more accurate one that still fits. Only give a set if you verified the tag and capabilities of all three of its models (memory is estimated, rule 6); if there are fewer than three, give fewer and say so.
 
 Reply with exactly these three parts, in this order, and nothing else:
 1. A table with one row per set and the columns: Set, Vision model, Text model, Embedding model, Memory (indexing / searching), Speed, Accuracy (the scores you used).
@@ -290,11 +318,26 @@ def _installed_versions(python: str, names: list):
 
 
 def _pip_install(python: str) -> None:
+    """Install requirements.txt with a live line (spinner and time so far). pip's own output is held back so it cannot
+    break that line, and shown only if pip fails."""
     cmd = [python, "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS)]
-    if not _succeeds(cmd):
-        fail("Could not install the required packages (the messages above say which one). Check your internet connection and "
-             f"run {app_config.INSTALL_COMMAND} again. If a package has no version for your Python ({platform.python_version()}), try another Python, "
-             "such as 3.11 or 3.12.")
+    progress = SearchProgress()
+    progress.step("Installing the required packages")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=INSTALL_TIMEOUT)
+        installed, details = result.returncode == 0, (result.stderr or result.stdout).strip()
+    except subprocess.TimeoutExpired:
+        installed, details = False, "pip did not finish in time."
+    if installed:
+        progress.close()
+        return
+    progress.fail("failed")
+    progress.close()
+    if details:
+        print(details, file=sys.stderr)
+    fail("Could not install the required packages (the messages above say which one). Check your internet connection and "
+         f"run {app_config.INSTALL_COMMAND} again. If a package has no version for your Python ({platform.python_version()}), try another Python, "
+         "such as 3.11 or 3.12.")
 
 
 def _sync_packages(python: str) -> None:
@@ -462,15 +505,6 @@ def _validate_model(value: str):
     return True
 
 
-def _ask_name(label: str, default: str = "") -> str:
-    """Ask for a model name. Returns '' when the box is left empty (clears the field)."""
-    def validate(value: str):
-        return True if not value.strip() else _validate_model(value)
-    return _clean_model_name(ask(questionary.text(
-        label, validate=validate, default=default, qmark=QMARK, style=STYLE,
-        instruction="(paste it here, leave empty to clear) ")))
-
-
 def parse_model_set(raw: str):
     """(vlm, embedding, text_model) from one pasted set, or None unless it holds exactly three model names.
 
@@ -483,90 +517,161 @@ def parse_model_set(raw: str):
     return vlm, embedding, text_model
 
 
-def _discard_pending_input() -> None:
-    """Drop the keys the prompt read ahead but did not use, such as the rest of a multi-line paste (a terminal without
-    bracketed paste submits only the first line). prompt_toolkit would otherwise hand them to the next menu."""
-    try:
-        from prompt_toolkit.input import create_input
-        from prompt_toolkit.input.typeahead import clear_typeahead
-        clear_typeahead(create_input())
-    except Exception:  # best effort: if it cannot be cleared the leftovers are simply replayed
-        pass
-
-
-def _paste_set():
-    """Ask for one set from the AI's answer. Returns (vlm, embedding, text_model), or None when it is left empty or unreadable."""
-    pasted = ask(questionary.text(
-        "Paste one set:", qmark=QMARK, style=STYLE, instruction="(leave empty to go back) "))
-    if "\n" not in pasted:
-        _erase_last_line()
-    if not pasted.strip():
-        return None
-    names = parse_model_set(pasted)
-    if names is None:
-        _discard_pending_input()
-        say("✗ Parsing failed. Please try again, or write the model names manually.", RED)
-    return names
-
-
 def _erase_last_line() -> None:
     """Remove the answered prompt line so the next menu redraws in the same place."""
     print("\033[1A\033[2K", end="", flush=True)
 
 
-def _field_choice(label: str, value: str, key: str):
-    """Menu row for a model field: green once filled, light red while unset."""
-    if value:
-        return questionary.Choice([("fg:ansigreen", f"○ {label} {value}")], value=key)
-    return questionary.Choice([("fg:ansibrightred", f"○ {label} not set")], value=key)
-
-
 def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
-    """One menu: open any field, copy the AI prompt (which adds a row on top to paste its answer), or continue once all names are set.
+    """One screen of editable rows: type or paste each model name where it is shown, copy the AI prompt (which adds a row to
+    paste its answer into), and choose Continue once all three names are set. Nothing is cleared while you type.
 
     Returns (vlm, embedding, text_model)."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.application import get_app
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.filters import Condition, has_focus, is_done
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import BufferControl, ConditionalContainer, FormattedTextControl, HSplit, Layout, VSplit, Window
+    from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor
+
     say("Fill in all three model names, then choose Continue.\n")
-    copied = asked = pasted = False
-    while True:
-        ready = bool(vlm and embedding and text_model)
-        choices = []
-        if asked and not pasted:  # only once the prompt was copied, and until a set was read
-            choices += [questionary.Choice(f"○ {PASTE_SET}", value="paste"), questionary.Separator()]
-        choices += [
-            _field_choice("VLM model:      ", vlm, "vlm"),
-            _field_choice("Embedding model:", embedding, "embedding"),
-            _field_choice("Text model:     ", text_model, "text"),
-            questionary.Separator(),
-            questionary.Choice([("fg:ansigreen", f"○ {COPIED}")] if copied else f"○ {ASK_AI}", value="ask"),
-            questionary.Separator(),
-            questionary.Choice("○ Continue" if ready else "Continue", value="continue",
-                               disabled=None if ready else "enter all three model names first"),
-        ]
-        default = "continue" if ready else "paste" if asked and not pasted else next(
-            key for key, value in (("vlm", vlm), ("embedding", embedding), ("text", text_model)) if not value)
-        choice = ask(questionary.select(
-            "What would you like to do?", choices=choices, default=default,
-            qmark=QMARK, pointer=POINTER, style=STYLE))
-        if choice == "continue":
-            return vlm, embedding, text_model
-        _erase_last_line()
-        if choice == "ask":
-            copied = offer_prompt_copy()
-            asked = True
-        elif choice == "paste":
-            names = _paste_set()
-            if names:
-                vlm, embedding, text_model = names
-                pasted = True
-        elif choice == "vlm":
-            vlm = _ask_name("VLM model name:", vlm)
-            _erase_last_line()
-        elif choice == "embedding":
-            embedding = _ask_name("Embedding model name:", embedding)
-            _erase_last_line()
+    state = {"copied": False, "asked": False, "pasted": False, "message": ""}
+
+    def one_line(buffer):  # a pasted line break would show as ^J
+        if "\n" in buffer.text or "\r" in buffer.text:
+            buffer.document = Document(" ".join(buffer.text.split()))
+
+    def make_buffer(text=""):
+        return Buffer(document=Document(text, len(text)), multiline=False, on_text_changed=one_line)
+
+    fields = {"vlm": make_buffer(vlm), "embedding": make_buffer(embedding), "text": make_buffer(text_model)}
+    paste = make_buffer()
+    pointer = lambda window: POINTER + " " if not is_done() and get_app().layout.has_focus(window) else " " * (len(POINTER) + 1)
+
+    def ready():
+        return all(buffer.text.strip() for buffer in fields.values())
+
+    show_paste = Condition(lambda: state["asked"] and not state["pasted"]) & ~is_done
+    show_message = Condition(lambda: bool(state["message"])) & ~is_done
+
+    def blank(visible=~is_done):
+        return ConditionalContainer(Window(height=1), filter=visible)
+
+    def text_row(label, buffer, filled_green=True):
+        window = Window(
+            BufferControl(buffer, input_processors=[ConditionalProcessor(
+                AfterInput("not set", style="fg:ansibrightred"), Condition(lambda: filled_green and not buffer.text))]),
+            height=1, style=lambda: "fg:ansigreen" if filled_green and buffer.text else "")
+        style = lambda: "fg:ansigreen" if buffer.text or not filled_green else "fg:ansibrightred"
+        title = Window(FormattedTextControl(lambda: [(style(), f"{pointer(window)}○ {label} ")]), height=1, dont_extend_width=True)
+        return window, VSplit([title, window])
+
+    rows = {}
+    field_rows = []
+    for key, label in (("vlm", "VLM model:      "), ("embedding", "Embedding model:"), ("text", "Text model:     ")):
+        rows[key], container = text_row(label, fields[key])
+        field_rows.append(container)
+    rows["paste"], paste_row = text_row("Paste one set:", paste, filled_green=False)
+
+    def button(text, style):
+        window = Window(FormattedTextControl(lambda: [(style(), f"{pointer(window)}○ {text()}")], focusable=True), wrap_lines=True)
+        return window
+
+    rows["ask"] = button(lambda: COPIED if state["copied"] else ASK_AI, lambda: "fg:ansigreen" if state["copied"] else "")
+    rows["continue"] = button(lambda: "Continue" if ready() else "Continue (enter all three model names first)",
+                              lambda: "" if ready() else "fg:ansibrightblack italic")
+    visible = {"vlm": Condition(lambda: True), "embedding": Condition(lambda: True), "text": Condition(lambda: True),
+               "paste": show_paste, "ask": ~is_done, "continue": ~is_done}
+
+    def initial_focus():
+        if ready():
+            return "continue"
+        if state["asked"] and not state["pasted"]:
+            return "paste"
+        return next(key for key, buffer in fields.items() if not buffer.text.strip())
+
+    def order():
+        return [rows[key] for key in ("vlm", "embedding", "text", "paste", "ask", "continue") if visible[key]()]
+
+    def commit(app):
+        """Tidy the name in the row being left; False (and say why) when it is not a model name."""
+        for key, buffer in fields.items():
+            if app.layout.has_focus(rows[key]):
+                name = _clean_model_name(buffer.text)
+                problem = _validate_model(name) if name else True
+                if problem is not True:
+                    state["message"] = "✗ " + problem
+                    return False
+                buffer.document = Document(name)
+        state["message"] = ""
+        return True
+
+    def move(app, step):
+        if not commit(app):
+            return
+        windows = order()
+        current = app.layout.current_window
+        index = windows.index(current) if current in windows else 0
+        app.layout.focus(windows[(index + step) % len(windows)])
+
+    bindings = KeyBindings()
+    for key, step in (("up", -1), ("s-tab", -1), ("down", 1), ("tab", 1)):
+        bindings.add(key)(lambda event, step=step: move(event.app, step))
+    for key in fields:
+        bindings.add("enter", filter=has_focus(rows[key]))(lambda event: move(event.app, 1))
+
+    @bindings.add("enter", filter=has_focus(rows["paste"]))
+    def _(event):
+        names = parse_model_set(paste.text)
+        if names is None:
+            state["message"] = "✗ Parsing failed. Please try again, or write the model names manually." if paste.text.strip() else ""
+            paste.document = Document()
+            return
+        for key, name in zip(("vlm", "embedding", "text"), names):
+            fields[key].document = Document(name)
+        event.app.layout.focus(rows["continue"])
+        state["pasted"], state["message"] = True, ""
+
+    @bindings.add("enter", filter=has_focus(rows["ask"]))
+    def _(event):
+        state["asked"], state["message"] = True, ""
+        if copy_to_clipboard(build_ai_prompt()):
+            state["copied"] = True
+            if not state["pasted"]:
+                event.app.layout.focus(rows["paste"])
+        else:  # nowhere to copy it to: leave the screen, print the prompt for copying by hand, and come back
+            event.app.erase_when_done = True
+            event.app.exit(result="print")
+
+    @bindings.add("enter", filter=has_focus(rows["continue"]))
+    def _(event):
+        if ready():
+            event.app.exit(result="continue")
         else:
-            text_model = _ask_name("Text model name:", text_model)
-            _erase_last_line()
+            state["message"] = "✗ Enter all three model names first."
+
+    @bindings.add("c-c")
+    def _(event):
+        event.app.exit(exception=KeyboardInterrupt)
+
+    while True:
+        layout = HSplit([
+            ConditionalContainer(HSplit([paste_row, Window(height=1, content=FormattedTextControl([("fg:ansibrightblack", INDENT + "  " + PASTE_SET)])), blank()]),
+                                 filter=show_paste),
+            *field_rows, blank(),
+            ConditionalContainer(HSplit([rows["ask"], blank(), rows["continue"]]), filter=~is_done),
+            ConditionalContainer(Window(FormattedTextControl(lambda: [(RED, INDENT + state["message"])]), height=1), filter=show_message),
+        ])
+        app = Application(layout=Layout(layout, focused_element=rows[initial_focus()]), key_bindings=bindings, erase_when_done=False)
+        try:
+            result = app.run()
+        except (KeyboardInterrupt, EOFError):
+            sys.exit("\nSetup cancelled. Run it again any time.")
+        if result == "continue":
+            return tuple(fields[key].text.strip() for key in ("vlm", "embedding", "text"))
+        state["copied"] = offer_prompt_copy()  # "print": offer_prompt_copy tries the clipboard once more, then prints the prompt
 
 
 # --- Model lookup (ollama.com registry, no Ollama server needed) ---------------
@@ -797,20 +902,23 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
     }, {}
 
 
-def measure_computer(client, vlm_model: str):
-    """Measure this computer with the vision model (vlm/calibration.py), with no questions asked.
+def measure_computer(client, vlm_model: str, embedding_model: str):
+    """Measure this computer with the vision model and the embedding model beside it (vlm/calibration.py), with no questions asked.
 
     Returns (device settings, None), or (None, what is wrong with the model) when it does not run on this computer."""
     from vlm.calibration import NotPossible, calibrate
     say("Measuring this computer with the vision model. This runs by itself and can take a few minutes…")
     try:
-        device = calibrate(client, vlm_model, lambda message: say(f"  {message}"))
+        device = calibrate(client, vlm_model, embedding_model, lambda message: say(f"  {message}"))
     except NotPossible as exc:
         return None, str(exc)
     except Exception as exc:
         return None, f"could not be measured ({type(exc).__name__}: {exc})."
     say(f"✓ Pictures up to {device['image_long_edge']} pixels, a memory window of {device['num_ctx']}, "
         f"waiting up to {device['timeout_seconds']} seconds for a reply.", "fg:ansigreen")
+    if device["one_model_at_a_time"]:
+        say("⚠ The vision and embedding models do not fit in memory together on this computer. Imagent will load one at a time, "
+            "which makes indexing a little slower.", "fg:ansimagenta")
     return device, None
 
 
@@ -844,7 +952,7 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
         if embedding in problems and embedding != original:
             problems[original] = problems.pop(embedding)
         if settings is not None:
-            settings["device"], reason = measure_computer(client, settings["vlm_model"])
+            settings["device"], reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
             if reason:
                 settings, problems = None, {vlm: reason}
     for name, reason in problems.items():
@@ -1018,9 +1126,9 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
             digest = {m.model: m.digest for m in client.list().models}.get(settings["vlm_model"])
         except Exception as exc:
             fail(f"Could not read the model list from Ollama: {exc}")
-        if digest is None or (device is not None and device["vlm_digest"] == digest):
+        if digest is None or (device is not None and device["vlm_digest"] == digest and device["one_model_at_a_time"] is not None):
             return  # a missing model was offered for reinstall above; a measured one is still right
-        device, reason = measure_computer(client, settings["vlm_model"])
+        device, reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
     if reason:
         fail(f"'{settings['vlm_model']}' {reason}")
     conn = init_db(str(app_config.DB_PATH))

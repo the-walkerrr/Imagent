@@ -106,6 +106,17 @@ class ReadinessTests(IsolatedHome):
         with self.assertRaisesRegex(NotReady, "not set up"):
             check_ready(self.connect(), ("vlm",))
 
+    def test_a_pillow_that_cannot_handle_pictures_stops_the_run_before_anything_else(self):
+        conn = self.connect()
+        with conn:
+            set_model_settings(conn, self.SETTINGS)
+            set_device_settings(conn, DEVICE, None)
+        with mock.patch.object(vlm_client.Image, "new", side_effect=OSError("encoder jpeg not available")), \
+                mock.patch.object(vlm_client, "make_client") as make_client:
+            with self.assertRaisesRegex(NotReady, "Pillow.*encoder jpeg not available.*install"):
+                check_ready(conn, ("vlm",))
+        make_client.assert_not_called()
+
     def test_a_computer_that_was_never_measured_is_sent_to_setup(self):
         conn = self.connect()
         with conn:

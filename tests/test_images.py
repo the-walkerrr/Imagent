@@ -70,8 +70,9 @@ class PlanImageTests(IsolatedHome):
         image = self.make_image(self.work / "a.png")
         with mock.patch.object(memory, "available_memory", return_value=100), self.assertRaises(ImageProblem) as raised:
             memory.plan_image(str(image))
-        self.assertEqual((raised.exception.kind, raised.exception.park, raised.exception.retry_when), (TOO_LARGE, True, "on_request"))
+        self.assertEqual((raised.exception.kind, raised.exception.park, raised.exception.retry_when), (TOO_LARGE, False, "on_request"))  # not parked: tried again by every run
         self.assertIn("megapixels", str(raised.exception))
+        self.assertIn("Close other programs", str(raised.exception))
         self.assertIsInstance(raised.exception, IndexingFailure)
 
     def test_a_file_that_is_not_an_image_is_unreadable(self):

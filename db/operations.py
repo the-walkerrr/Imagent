@@ -60,11 +60,14 @@ def set_model_settings(conn: sqlite3.Connection, settings: dict) -> None:
 def get_device_settings(conn: sqlite3.Connection) -> dict | None:
     """Return what setup measured about this computer (see ``vlm.calibration``), or None when it has not been measured."""
     row = conn.execute(
-        "SELECT num_ctx, use_mmap, image_long_edge, timeout_seconds, vlm_digest, measurements FROM device_settings WHERE id = 1"
+        "SELECT num_ctx, use_mmap, image_long_edge, timeout_seconds, one_model_at_a_time, vlm_digest, measurements "
+        "FROM device_settings WHERE id = 1"
     ).fetchone()
     if row is None:
         return None
-    return {**dict(row), "use_mmap": bool(row["use_mmap"]), "measurements": json.loads(row["measurements"])}
+    apart = row["one_model_at_a_time"]
+    return {**dict(row), "use_mmap": bool(row["use_mmap"]), "one_model_at_a_time": None if apart is None else bool(apart),
+            "measurements": json.loads(row["measurements"])}
 
 
 def set_device_settings(conn: sqlite3.Connection, device: dict, vlm_digest: str | None) -> None:
@@ -72,10 +75,12 @@ def set_device_settings(conn: sqlite3.Connection, device: dict, vlm_digest: str 
     conn.execute(
         """
         INSERT OR REPLACE INTO device_settings
-            (id, num_ctx, use_mmap, image_long_edge, timeout_seconds, vlm_digest, measurements, app_version, calibrated_at)
-        VALUES (1, :num_ctx, :use_mmap, :image_long_edge, :timeout_seconds, :vlm_digest, :measurements, :app_version, :calibrated_at)
+            (id, num_ctx, use_mmap, image_long_edge, timeout_seconds, one_model_at_a_time, vlm_digest, measurements, app_version, calibrated_at)
+        VALUES (1, :num_ctx, :use_mmap, :image_long_edge, :timeout_seconds, :one_model_at_a_time, :vlm_digest, :measurements,
+                :app_version, :calibrated_at)
         """,
         {**device, "use_mmap": int(device["use_mmap"]), "vlm_digest": vlm_digest,
+         "one_model_at_a_time": None if device.get("one_model_at_a_time") is None else int(device["one_model_at_a_time"]),
          "measurements": json.dumps(device["measurements"], sort_keys=True), "app_version": config.APP_VERSION,
          "calibrated_at": _now()},
     )
@@ -249,9 +254,11 @@ def get_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
 
 
 def get_exhausted_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
-    """Return the backlog rows that were given up on (parked, or failed ``max_attempts`` times), with their last error."""
+    """Return the backlog rows that could not be indexed, with their last error: parked, failed ``max_attempts`` times,
+    or left queued for the next run after every try for their kind of failure (``park_kind`` says which, see ``record_backlog_failure``)."""
     rows = conn.execute(
-        "SELECT file_path, last_error FROM backlog WHERE status = 'parked' OR attempts >= ? ORDER BY file_path",
+        "SELECT file_path, last_error, park_kind FROM backlog "
+        "WHERE status = 'parked' OR attempts >= ? OR park_kind IS NOT NULL ORDER BY file_path",
         (max_attempts,),
     ).fetchall()
     return [dict(row) for row in rows]
@@ -363,11 +370,15 @@ def delete_backlog_paths(conn: sqlite3.Connection, file_paths: list[str]) -> Non
         conn.execute(f"DELETE FROM backlog WHERE file_path IN ({placeholders})", chunk)
 
 
-def record_backlog_failure(conn: sqlite3.Connection, file_path: str, message: str, count_attempt: bool) -> None:
-    """Remember why indexing a file failed; ``count_attempt`` is False when the file is not to blame."""
+def record_backlog_failure(conn: sqlite3.Connection, file_path: str, message: str, count_attempt: bool,
+                           kind: str | None = None) -> None:
+    """Remember why indexing a file failed; ``count_attempt`` is False when the file is not to blame.
+
+    ``kind`` is given when every try for the failure was made and the file stays queued for the next run all the same
+    (the machine was to blame, not the file): it is what lets the user be told that the file could not be indexed."""
     conn.execute(
-        "UPDATE backlog SET attempts = attempts + ?, last_error = ? WHERE file_path = ?",
-        (1 if count_attempt else 0, message, file_path),
+        "UPDATE backlog SET attempts = attempts + ?, last_error = ?, park_kind = ? WHERE file_path = ?",
+        (1 if count_attempt else 0, message, kind, file_path),
     )
 
 

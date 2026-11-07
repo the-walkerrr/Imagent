@@ -6,6 +6,7 @@ indexing or search session.
 from __future__ import annotations
 
 import atexit
+import io
 import os
 import platform
 import shutil
@@ -18,6 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 import ollama
+from PIL import Image
 
 import config
 from db.operations import get_device_settings, get_model_settings
@@ -29,6 +31,20 @@ MIN_OLLAMA_VERSION = (0, 5, 0)
 
 class NotReady(Exception):
     """Setup is incomplete or Ollama cannot serve the locked models; the message tells the user what to do."""
+
+
+def check_pictures_readable() -> None:
+    """Confirm Pillow can write and read back a picture, so a broken install stops a run before it starts and does not fail on every image.
+
+    Done in memory: nothing is written to disk. Raises NotReady otherwise."""
+    try:
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2)).save(buffer, "PNG")
+        buffer.seek(0)
+        Image.open(buffer).load()
+    except Exception as exc:
+        raise NotReady(f"Pillow, the library Imagent reads pictures with, does not work on this computer ({type(exc).__name__}: {exc}). "
+                       f"Run: {config.INSTALL_COMMAND}. It installs the packages Imagent needs again.") from exc
 
 
 def make_client(host: str | None = None, timeout: float | None = None) -> ollama.Client:
@@ -157,6 +173,7 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
     again when the program exits. Its notices go through ``say``, so a caller with a live
     progress line can print them without breaking it.
     """
+    check_pictures_readable()
     settings = get_model_settings(conn)
     if settings is None:
         raise NotReady(f"Imagent is not set up yet. Run: {config.INSTALL_COMMAND}")

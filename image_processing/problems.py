@@ -26,8 +26,9 @@ class ImageProblem(IndexingFailure):
     """An image that cannot be indexed because of the image itself."""
 
 
-def problem(kind: str, message: str, step: str = "opened the image", **flags) -> ImageProblem:
-    return ImageProblem(kind, message, [attempt_record(step, kind, message)], **flags)
+def problem(kind: str, message: str, step: str = "opened the image", detail: str = "", **flags) -> ImageProblem:
+    """``message`` is what the user is told (the reason and what can be done); ``detail`` is the technical side, kept in the record."""
+    return ImageProblem(kind, message, [attempt_record(step, kind, detail or message)], **flags)
 
 
 def file_is_changing(path: str) -> bool:
@@ -48,15 +49,17 @@ def explain(exc: BaseException, path: str) -> ImageProblem | None:
     or a dropped drive do, and are left to the caller, who tells them from a drive that has gone.
     """
     if isinstance(exc, MemoryError):
-        return problem(TOO_LARGE, "There was not enough memory to open the image. Close other programs and try again.",
-                       retry_when="on_request")
+        return problem(TOO_LARGE, "There was not enough memory to open the picture. Close other programs, then scan again.",
+                       detail=f"{type(exc).__name__}: {exc}", park=False)
     if not (isinstance(exc, (UnidentifiedImageError, SyntaxError)) or (isinstance(exc, OSError) and exc.errno is None)):
         return None
     suffix = os.path.splitext(path)[1].lower()
     if isinstance(exc, UnidentifiedImageError) and suffix not in Image.registered_extensions():
-        return problem(UNSUPPORTED, f"Imagent cannot open {suffix} files on this computer: no decoder is installed for them.",
-                       retry_when="on_request")
+        return problem(UNSUPPORTED, f"Imagent cannot open {suffix} pictures on this computer. "
+                                    "Convert the picture to JPEG or PNG and keep the copy in the same folder.",
+                       detail=f"no decoder is installed for {suffix} files", retry_when="on_request")
     if file_is_changing(path):
-        return problem(BUSY, "The file is still being written, so it is tried again later.", park=False)
-    return problem(UNREADABLE, f"The image cannot be read; it is damaged or incomplete ({type(exc).__name__}: {exc}).",
-                   retry_when="file_changed")
+        return problem(BUSY, "The file is still being written, so it is tried again later.", park=False, report=False)
+    return problem(UNREADABLE, "The picture file is damaged or incomplete. Copy it again from the original, "
+                               "or open it in a photo app and save it as a new file.",
+                   detail=f"{type(exc).__name__}: {exc}", retry_when="file_changed")

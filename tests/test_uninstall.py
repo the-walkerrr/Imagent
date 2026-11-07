@@ -74,21 +74,32 @@ class PlanTests(IsolatedHome):
         self.assertEqual(plan["models_unreachable"], ["ours:latest"])
 
 
+CODE = "aB3dE5gH7j"
+
+
 class ConfirmationTests(unittest.TestCase):
     def ask(self, answers, images=12):
-        with mock.patch("builtins.input", side_effect=answers), contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch("builtins.input", side_effect=answers), mock.patch.object(uninstall, "make_final_code", return_value=CODE), \
+                contextlib.redirect_stdout(io.StringIO()):
             return uninstall.confirm_three_times({"images": images})
 
     def test_three_right_answers_confirm(self):
-        self.assertTrue(self.ask(["yes", "12", uninstall.FINAL_PHRASE]))
+        self.assertTrue(self.ask(["yes", "12", CODE]))
 
     def test_each_wrong_answer_cancels(self):
         self.assertFalse(self.ask(["no"]))
         self.assertFalse(self.ask(["yes", "11"]))
-        self.assertFalse(self.ask(["yes", "12", "uninstall"]))
+        self.assertFalse(self.ask(["yes", "12", "uninstall imagent"]))
+
+    def test_final_code_is_ten_random_letters_and_digits(self):
+        codes = {uninstall.make_final_code() for _ in range(20)}
+        self.assertGreater(len(codes), 1)
+        for code in codes:
+            self.assertEqual(len(code), 10)
+            self.assertTrue(code.isalnum() and code.isascii())
 
     def test_no_database_means_the_count_to_type_is_zero(self):
-        self.assertTrue(self.ask(["YES", "0", uninstall.FINAL_PHRASE], images=None))
+        self.assertTrue(self.ask(["YES", "0", CODE], images=None))
 
 
 class DeleteTests(IsolatedHome):

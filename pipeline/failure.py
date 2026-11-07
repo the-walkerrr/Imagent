@@ -18,10 +18,12 @@ class IndexingFailure(Exception):
     ``retry_when`` what would make another try worthwhile: ``file_changed``, ``model_changed`` or ``on_request``.
     ``service``    True when the trouble is not the file's but the machine's or Ollama's: several in a row stop the run.
     ``model_trouble`` True when the model's reply was the problem: many of these stop the run too (see config.RETRY_RATE_*).
+    ``report``     True: once the file is left (set aside, or queued for the next run) the user is told it could not be indexed, and why.
     """
 
     def __init__(self, kind: str, message: str, attempts: list[dict] | None = None, *, park: bool = True,
-                 retry_when: str = "on_request", service: bool = False, model_trouble: bool = False):
+                 retry_when: str = "on_request", service: bool = False, model_trouble: bool = False,
+                 report: bool = True):
         super().__init__(message)
         self.kind = kind
         self.attempts = attempts or []
@@ -29,6 +31,7 @@ class IndexingFailure(Exception):
         self.retry_when = retry_when
         self.service = service
         self.model_trouble = model_trouble
+        self.report = report
 
 
 class RunStopped(Exception):

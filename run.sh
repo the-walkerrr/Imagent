@@ -1,34 +1,37 @@
 #!/bin/sh
-# Imagent launcher for macOS and Linux: asks whether to search, scan and index, retry images that could not be indexed,
-# re-embed images, or uninstall, then runs it.
-# Search and scan run inside .venv. The uninstaller does not: it deletes .venv, so it picks its own Python.
+# Imagent launcher for macOS and Linux: opens a menu (arrow keys and Enter) to search, scan and index, see the images that
+# could not be indexed, re-embed images (only offered when the embedding model changed), or uninstall.
+# The menu and the commands run inside .venv. The uninstaller does not: it deletes .venv, so it picks its own Python.
+# If Imagent is not installed yet, it offers to run the installer first.
 # Usage: sh run.sh
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-
-echo "What would you like to do?"
-echo "  1) Search your images"
-echo "  2) Scan folders and index images"
-echo "  3) Try again the images that could not be indexed"
-echo "  4) Re-embed images (after the embedding model changed)"
-printf '\033[31m  5) Uninstall Imagent\033[0m\n'
-while true; do
-    printf "Choose 1, 2, 3, 4 or 5: "
-    read -r choice || exit 1
-    case "$choice" in
-        1) script="search/search.py"; break ;;
-        2) script="scan_and_index/scan_and_index.py"; break ;;
-        3) script="retry_failed/retry_failed.py"; break ;;
-        4) script="reembed/reembed.py"; break ;;
-        5) exec sh "$DIR/uninstall/uninstall.sh" ;;
-        *) echo "Please type 1, 2, 3, 4 or 5." ;;
-    esac
-done
+UNINSTALL_EXIT_CODE=75  # the same number as in menu/menu.py
 
 if [ ! -f "$DIR/.venv/bin/activate" ]; then
-    echo "The .venv folder was not found. Run the installer first: sh install.sh" >&2
-    exit 1
+    echo "Imagent is not installed yet (the .venv folder was not found)."
+    while true; do
+        printf "Install it now? (Y/N): "
+        read -r answer || exit 1
+        case "$answer" in
+            [Yy] | [Yy][Ee][Ss]) break ;;
+            [Nn] | [Nn][Oo])
+                echo "Nothing was installed. Run the installer any time: sh install.sh"
+                echo "To remove Imagent without it: sh uninstall/uninstall.sh"
+                exit 1 ;;
+            *) echo "Please type yes or no." ;;
+        esac
+    done
+    sh "$DIR/install.sh" || exit $?
+    if [ ! -f "$DIR/.venv/bin/activate" ]; then
+        echo "The installer finished but the .venv folder is still missing." >&2
+        exit 1
+    fi
 fi
 
-. "$DIR/.venv/bin/activate"
-exec python "$DIR/$script"
+( . "$DIR/.venv/bin/activate" && python "$DIR/menu/menu.py" )  # a subshell, so .venv is not active when the uninstaller starts
+code=$?
+if [ "$code" -eq "$UNINSTALL_EXIT_CODE" ]; then
+    exec sh "$DIR/uninstall/uninstall.sh"
+fi
+exit "$code"

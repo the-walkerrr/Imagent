@@ -9,11 +9,12 @@ import config
 from vlm.client import make_client, other_models_running, restart_server, unload_model
 from vlm.reply_validation import check_reply
 from vlm.response_format import QueryUnderstanding
+from image_processing.convert import ConversionFailed, converted_copy
 from image_processing.features import extract_image_features
 from image_processing.memory import GENTLE, plan_image
 from image_processing.ocr import extract_text_blocks
 from image_processing.preprocess import preprocess_image
-from image_processing.problems import ImageProblem, explain
+from image_processing.problems import UNSUPPORTED, ImageProblem, explain
 from pipeline.failure import IndexingFailure, attempt_record
 
 # What went wrong; each has its own way of being put right.
@@ -27,9 +28,11 @@ OUT_OF_MEMORY = "out_of_memory"  # Ollama has not enough memory for the model
 _HANDLING = {
     CUT_OFF: {"retry_when": "model_changed", "model_trouble": True},
     INVALID_REPLY: {"retry_when": "model_changed", "model_trouble": True},
-    TIMEOUT: {"service": True},
-    SERVER_CRASH: {"service": True},
-    OUT_OF_MEMORY: {"park": False, "service": True},  # the machine is short of memory, not the file at fault
+    # The machine's trouble, not the file's: the file stays queued and is tried again by the next run (the loop in
+    # scan_and_index tries it config.SERVICE_TRIES times first, and tells the user when that was not enough).
+    TIMEOUT: {"park": False, "service": True},
+    SERVER_CRASH: {"park": False, "service": True},
+    OUT_OF_MEMORY: {"park": False, "service": True},
 }
 
 
@@ -67,6 +70,22 @@ def analyse_image(client: ollama.Client, model: str, image_path: str,
     ``on_retry`` is told the kind of trouble each time the model's reply has to be asked for again.
     """
     on_stage("checking image")
+    try:
+        return _analyse_file(client, model, image_path, on_stage, on_retry)
+    except ImageProblem as unsupported:
+        if unsupported.kind != UNSUPPORTED:
+            raise
+        on_stage("converting image")
+        try:
+            with converted_copy(image_path) as converted:  # a PNG copy that is deleted when the analysis is done
+                return _analyse_file(client, model, converted, on_stage, on_retry)
+        except ConversionFailed as failed:
+            unsupported.attempts.append(attempt_record("converted the image", UNSUPPORTED, str(failed)))
+            raise unsupported from failed
+
+
+def _analyse_file(client: ollama.Client, model: str, image_path: str,
+                  on_stage: Callable[[str], None], on_retry: Callable[[str], None]) -> Analysis:
     gentle = plan_image(image_path) == GENTLE  # raises ImageProblem if the image cannot be opened or is too large
     # The steps that are quick and need no model come first: when one of them fails, no reply was asked for in vain.
     try:
@@ -82,6 +101,17 @@ def analyse_image(client: ollama.Client, model: str, image_path: str,
     on_stage("analysing image")
     reply, attempts = _request_analysis(client, model, image_bytes, on_stage, on_retry)
     return Analysis(reply, ocr_text, features, attempts)
+
+
+def _ran_out_of_memory(exc: Exception) -> bool:
+    """True if a failed request was the computer running out of memory.
+
+    Ollama does not always say so: when the graphics memory runs out in the middle of a request, all it reports is
+    "Compute error" (status 500), so that counts too."""
+    if not isinstance(exc, ollama.ResponseError):
+        return False
+    message = str(exc).lower()
+    return "memory" in message or "compute error" in message
 
 
 def send_request(client: ollama.Client, model: str, request: dict, note: Callable[[str, str], None],
@@ -100,7 +130,7 @@ def send_request(client: ollama.Client, model: str, request: dict, note: Callabl
         except httpx.ReadTimeout as exc:
             note(TIMEOUT, f"no reply within {timeout:g} seconds")
             if raises >= config.OLLAMA_TIMEOUT_RAISES:
-                raise ServiceTrouble(TIMEOUT, f"The model did not reply, even after waiting up to {timeout:g} seconds.") from exc
+                raise ServiceTrouble(TIMEOUT, "The model did not reply in time, even after waiting longer.") from exc
             raises += 1
             timeout *= config.OLLAMA_TIMEOUT_STEP
             client = make_client(timeout=timeout)
@@ -108,12 +138,12 @@ def send_request(client: ollama.Client, model: str, request: dict, note: Callabl
         except (httpx.RemoteProtocolError, httpx.ReadError, ConnectionError, ollama.ResponseError) as exc:
             if isinstance(exc, ollama.ResponseError) and exc.status_code != 500:
                 raise  # not a stopped runner (a missing model, a bad request): another kind of problem
-            out_of_memory = isinstance(exc, ollama.ResponseError) and "memory" in str(exc).lower()
+            out_of_memory = _ran_out_of_memory(exc)
             kind = OUT_OF_MEMORY if out_of_memory else SERVER_CRASH
             note(kind, f"{type(exc).__name__}: {exc}")
             if recovered:
-                raise ServiceTrouble(kind, f"The model failed again after {'memory was freed' if out_of_memory else 'Ollama was restarted'}: "
-                                           f"{type(exc).__name__}: {exc}") from exc
+                raise ServiceTrouble(kind, "Ollama ran out of memory, even after other models were unloaded." if out_of_memory
+                                     else "Ollama stopped responding, and starting it again did not help.") from exc
             recovered = True
             if out_of_memory:
                 for name in other_models_running(client, [model]):
@@ -202,18 +232,17 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
                 room = config.OLLAMA_NUM_CTX - (prompt_tokens or 0)  # the context window holds the prompt and the reply
                 larger = min(int(cap * config.ANALYSIS_CAP_STEP), room)
                 if raises >= config.ANALYSIS_CAP_RAISES or larger <= cap:
-                    raise AnalysisFailed(
-                        kind, f"The model's reply was cut off at {cap} tokens, even after a retry with different sampling "
-                              f"and after raising the limit {raises} time(s) (the context window has room for {room}).", attempts)
+                    raise AnalysisFailed(kind, "The model could not finish describing this picture, even after trying again with "
+                                               "different settings and with more room. Saving the picture again from a photo app, "
+                                               "as a new file, gives it a fresh try.", attempts)
                 cap, changed_sampling, step = larger, False, "raised cap"
                 raises += 1
                 messages = first_messages
                 reason = f"the reply was cut off; asking again with room for {cap} tokens"
         else:
             if feedback_tries >= config.ANALYSIS_RETRIES:
-                raise AnalysisFailed(
-                    kind, f"The model's reply did not fit the schema, even after being told what was wrong "
-                          f"{feedback_tries} time(s): {'; '.join(problems[:3])}", attempts)
+                raise AnalysisFailed(kind, "The model's answer was not in the expected form, even after it was told what was wrong. "
+                                           "Saving the picture again from a photo app, as a new file, gives it a fresh try.", attempts)
             feedback_tries += 1
             retries += 1
             changed_sampling, step = True, "problems sent back"
@@ -250,12 +279,26 @@ def _split(text: str) -> tuple[str, str]:
     return text[:cut], text[cut:]
 
 
+def _embed(client: ollama.Client, model: str, text: str) -> list[float]:
+    """One embedding request. If the embedding model's runner fails (status 500: usually the memory ran out because another
+    model is loaded beside it), every model is unloaded, which also resets the failed runner, and it is asked once more."""
+    request = {"model": model, "input": [text], "truncate": False, "options": config.EMBED_OPTIONS}
+    try:
+        return list(client.embed(**request).embeddings[0])
+    except ollama.ResponseError as exc:
+        if exc.status_code != 500:
+            raise
+    for name in other_models_running(client, []):
+        unload_model(client, name)
+    time.sleep(config.OLLAMA_RECOVERY_WAIT)
+    return list(client.embed(**request).embeddings[0])
+
+
 def embed_search_text(client: ollama.Client, model: str, search_text: str) -> list[float]:
     """The embedding of a text. Nothing is cut off: a text too long for the model's context is split in two, again and
     again until the parts fit, and its vector is the average of the parts', each weighted by its length."""
     try:
-        response = client.embed(model=model, input=[search_text], truncate=False, options=config.EMBED_OPTIONS)
-        return list(response.embeddings[0])
+        return _embed(client, model, search_text)
     except ollama.ResponseError as exc:
         if not _too_long(exc) or len(search_text) < 2:
             raise

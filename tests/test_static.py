@@ -15,7 +15,7 @@ MODULES = [
     "image_processing.metadata", "image_processing.ocr", "image_processing.preprocess", "image_processing.features",
     "text_processing.formatters", "vlm.analyzer", "vlm.client", "vlm.reply_validation",
     "image_processing.memory", "image_processing.problems", "pipeline.failure", "pipeline.storage", "pipeline.versions",
-    "reembed.reembed", "retry_failed.retry_failed",
+    "reembed.reembed", "menu.menu", "show_failed.show_failed", "image_processing.convert",
 ]
 
 

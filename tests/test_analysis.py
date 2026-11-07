@@ -219,13 +219,13 @@ class TroubleReachingTheModelTests(unittest.TestCase):
         self.assertEqual([a["kind"] for a in attempts], ["timeout", None])
         self.assertEqual(len(longer.requests), 1)  # the same request, to the client that waits longer
 
-    def test_the_wait_is_lengthened_a_set_number_of_times_and_then_the_file_is_set_aside(self):
+    def test_the_wait_is_lengthened_a_set_number_of_times_and_then_the_file_stays_queued_for_the_next_run(self):
         slow = httpx.ReadTimeout("slow", request=REQUEST)
         clients = [FlakyClient(slow) for _ in range(config.OLLAMA_TIMEOUT_RAISES)]
         make_client = mock.Mock(side_effect=clients)
         failure, _, _ = self.ask(FlakyClient(slow), make_client=make_client)
         self.assertIsInstance(failure, analyzer.AnalysisFailed)
-        self.assertEqual((failure.kind, failure.park, failure.service), ("timeout", True, True))
+        self.assertEqual((failure.kind, failure.park, failure.service), ("timeout", False, True))
         self.assertEqual(make_client.call_count, config.OLLAMA_TIMEOUT_RAISES)
         self.assertEqual(len(failure.attempts), config.OLLAMA_TIMEOUT_RAISES + 1)
 
@@ -243,10 +243,10 @@ class TroubleReachingTheModelTests(unittest.TestCase):
         self.assertEqual(reply, GOOD_REPLY)
         patched["restart_server"].assert_called_once()
 
-    def test_failing_again_after_the_restart_sets_the_file_aside_and_counts_as_trouble_with_the_machine(self):
+    def test_failing_again_after_the_restart_leaves_the_file_queued_and_counts_as_trouble_with_the_machine(self):
         broken = httpx.RemoteProtocolError("server disconnected", request=REQUEST)
         failure, _, patched = self.ask(FlakyClient(broken, broken))
-        self.assertEqual((failure.kind, failure.park, failure.service), ("server_crash", True, True))
+        self.assertEqual((failure.kind, failure.park, failure.service), ("server_crash", False, True))
         patched["restart_server"].assert_called_once()  # only one restart per image
 
     def test_ollama_that_cannot_be_started_is_left_to_the_usual_handling(self):
@@ -344,6 +344,64 @@ class EmbeddingTests(unittest.TestCase):
         client = self.Embedder(13)
         vector = analyzer.embed_search_text(client, "e", "aaaaaaaa bbbbbbbbbbbb")  # cut at the space into 8 and 13 characters
         self.assertAlmostEqual(vector[0], (8 * 8 + 13 * 13) / 21)
+
+
+class EmbeddingRecoveryTests(unittest.TestCase):
+    """An embedding model whose runner fails (the memory ran out beside another model) is put right once."""
+
+    class Embedder:
+        def __init__(self, *errors):
+            self.errors, self.requests, self.unloaded, self.loaded = list(errors), [], [], ["vlm", "emb"]
+
+        def embed(self, **request):
+            self.requests.append(request)
+            if self.errors:
+                raise self.errors.pop(0)
+            return SimpleNamespace(embeddings=[[1.0, 2.0]])
+
+        def ps(self):
+            return SimpleNamespace(models=[SimpleNamespace(model=name) for name in self.loaded])
+
+        def generate(self, **request):
+            self.unloaded.append(request["model"])
+
+    def setUp(self):
+        patcher = mock.patch("vlm.analyzer.time.sleep")
+        self.sleep = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_failed_runner_is_put_right_by_unloading_every_model_and_asking_again(self):
+        client = self.Embedder(ollama.ResponseError("Compute error.", 500))
+        self.assertEqual(analyzer.embed_search_text(client, "emb", "text"), [1.0, 2.0])
+        self.assertEqual(sorted(client.unloaded), ["emb", "vlm"])  # the embedding model too: its runner is what failed
+        self.assertEqual(len(client.requests), 2)
+        self.sleep.assert_called_once_with(config.OLLAMA_RECOVERY_WAIT)
+
+    def test_it_is_tried_once_more_and_no_more(self):
+        client = self.Embedder(ollama.ResponseError("Compute error.", 500), ollama.ResponseError("Compute error.", 500))
+        with self.assertRaises(ollama.ResponseError):
+            analyzer.embed_search_text(client, "emb", "text")
+        self.assertEqual(len(client.requests), 2)
+
+    def test_an_embedding_that_works_is_not_disturbed(self):
+        client = self.Embedder()
+        analyzer.embed_search_text(client, "emb", "text")
+        self.assertEqual((client.unloaded, len(client.requests)), ([], 1))
+        self.sleep.assert_not_called()
+
+    def test_trouble_that_unloading_cannot_cure_is_not_tried_again(self):
+        client = self.Embedder(ollama.ResponseError("model 'emb' not found", 404))
+        with self.assertRaises(ollama.ResponseError):
+            analyzer.embed_search_text(client, "emb", "text")
+        self.assertEqual((client.unloaded, len(client.requests)), ([], 1))
+
+
+class OutOfMemoryTests(unittest.TestCase):
+    def test_a_compute_error_counts_as_running_out_of_memory_as_well_as_the_plain_words(self):
+        for message in ("Compute error.", "model requires more system memory than is available"):
+            self.assertTrue(analyzer._ran_out_of_memory(ollama.ResponseError(message, 500)))
+        self.assertFalse(analyzer._ran_out_of_memory(ollama.ResponseError("something else", 500)))
+        self.assertFalse(analyzer._ran_out_of_memory(RuntimeError("memory")))  # only Ollama's replies say so
 
 
 class SearchTextTests(unittest.TestCase):
