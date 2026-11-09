@@ -7,16 +7,19 @@ search, because vectors of different versions cannot be compared). The vision mo
 of each image is built again from the reply and the text in the image that were stored, and only that is embedded.
 
 How long it takes is measured on a few images and shown first. All the vectors are made before any is replaced, so
-an interrupted run changes nothing. Afterwards the model is saved as a copy of its own (see vlm.client.pin_model), so a
+an interrupted run changes nothing: each is kept as it is made in a temporary table (not in memory, so the number of images
+does not decide how much memory this needs), and all are swapped in at once. Afterwards the model is saved as a copy of its own (see vlm.client.pin_model), so a
 later update of the original cannot change it again.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 import time
 from pathlib import Path
+from typing import Iterator
 
 # Make the project root importable when this file is run directly (``python reembed/reembed.py``).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -24,7 +27,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     import config
     from db.connection import init_db
-    from db.operations import list_records_for_embedding, update_embedding_settings, upsert_text_embedding
+    from db.operations import (
+        count_records_for_embedding,
+        create_embedding_staging,
+        drop_embedding_staging,
+        iter_records_for_embedding,
+        replace_embeddings_from_staging,
+        stage_embedding,
+        update_embedding_settings,
+    )
     from pipeline.console import make_output_safe, run_cli
     from pipeline.locking import AlreadyRunning, single_instance
     from pipeline.serialisation import serialize_embedding
@@ -35,7 +46,7 @@ except ModuleNotFoundError as exc:
     sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
              f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
 
-SAMPLE_SIZE = 3  # images embedded first, to measure how long one takes
+SAMPLE_SIZE = 3  # images embedded first, to measure how long one takes; the first of them only starts the model, and is not timed
 
 
 def _duration(seconds: float) -> str:
@@ -47,20 +58,25 @@ def _duration(seconds: float) -> str:
     return f"{seconds // 3600} h {seconds % 3600 // 60:02d} min"
 
 
-def search_texts(records: list[dict]) -> tuple[list[tuple[int, str]], int]:
-    """``(file_id, search text)`` for each record that has a stored reply to build it from, and how many have none."""
-    texts, without = [], 0
-    for record in records:
-        try:
-            stored = json.loads(record["vlm_metadata_json"])
-            reply = stored["vlm"]
-            if not isinstance(reply, dict):
-                raise TypeError
-        except (ValueError, KeyError, TypeError):
-            without += 1
-            continue
-        texts.append((record["file_id"], build_search_text(reply, stored.get("ocr_text") or [], config.SUMMARY_FIELD)))
-    return texts, without
+def search_text(record: dict) -> str | None:
+    """The search text of one record, built again from the reply and the text in the image that were stored; None if it has no stored reply."""
+    try:
+        stored = json.loads(record["vlm_metadata_json"])
+        reply = stored["vlm"]
+        if not isinstance(reply, dict):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        return None
+    return build_search_text(reply, stored.get("ocr_text") or [], config.SUMMARY_FIELD)
+
+
+def search_texts(conn) -> Iterator[tuple[int, str]]:
+    """``(file_id, search text)`` for each image that has a stored reply to build it from, one at a time (the images are read in batches)."""
+    for batch in iter_records_for_embedding(conn, config.DB_BATCH_ROWS):
+        for record in batch:
+            text = search_text(record)
+            if text is not None:
+                yield record["file_id"], text
 
 
 def _model_to_use(client, settings: dict) -> tuple[str, dict]:
@@ -84,23 +100,27 @@ def reembed(assume_yes: bool = False) -> None:
         except NotReady as exc:
             sys.exit(f"{exc}")
         model, installed = _model_to_use(client, settings)
-        texts, without = search_texts(list_records_for_embedding(conn))
+        total = sum(1 for _ in search_texts(conn))  # counted once, so that the user can be told how many and how long before anything is made
+        without = count_records_for_embedding(conn) - total
         if without:
             print(f"{without} image(s) have no stored reply to build their text from; their vectors are left as they are.")
-        if not texts:
+        if not total:
             print("Nothing to re-embed.")
             return
 
-        sample = texts[:SAMPLE_SIZE]
-        start = time.perf_counter()
+        # The first image is only there to start the model, whose loading is no measure of what an image costs; unless it is the only one.
+        sample = list(itertools.islice(search_texts(conn), SAMPLE_SIZE))
         try:
-            for _, text in sample:
+            embed_search_text(client, model, sample[0][1])
+            start = time.perf_counter()
+            timed = sample[1:] or sample
+            for _, text in timed:
                 embed_search_text(client, model, text)
         except Exception as exc:
             sys.exit(f"The embedding model did not answer ({type(exc).__name__}: {exc}). Nothing was changed.")
-        per_image = (time.perf_counter() - start) / len(sample)
-        print(f"{len(texts)} image(s) to embed again with {model}; one took about {per_image:.2f} s, "
-              f"so this takes about {_duration(per_image * len(texts))}.")
+        per_image = (time.perf_counter() - start) / len(timed)
+        print(f"{total} image(s) to embed again with {model}; one took about {per_image:.2f} s, "
+              f"so this takes about {_duration(per_image * total)}.")
         if not assume_yes:
             try:
                 if input("Continue? [y/N]: ").strip().lower() not in ("y", "yes"):
@@ -110,33 +130,38 @@ def reembed(assume_yes: bool = False) -> None:
                 print("Nothing was changed.")
                 return
 
-        vectors = []
-        for done, (_, text) in enumerate(texts, start=1):
-            try:
-                vectors.append(embed_search_text(client, model, text))
-            except Exception as exc:
-                sys.exit(f"Embedding stopped after {done - 1} of {len(texts)} ({type(exc).__name__}: {exc}). "
-                         "Nothing was changed; run it again when Ollama is working.")
-            if done % 25 == 0 or done == len(texts):
-                print(f"{done} of {len(texts)} embedded…", flush=True)
-        dimension = len(vectors[0])
-        if any(len(vector) != dimension for vector in vectors):
-            sys.exit("The model gave vectors of different sizes, so nothing was changed.")
-
+        create_embedding_staging(conn)
         try:
-            pinned, digest = (model, installed[model]) if is_pinned(model) else pin_model(client, model)
-            if pinned != model:
-                config.record_pinned_model(pinned, model)
-        except Exception as exc:
-            pinned, digest = model, installed[model]
-            print(f"Could not save a fixed copy of {model} ({type(exc).__name__}: {exc}); it is used as it is.")
+            dimension = None
+            for done, (file_id, text) in enumerate(search_texts(conn), start=1):
+                try:
+                    vector = embed_search_text(client, model, text)
+                except Exception as exc:
+                    sys.exit(f"Embedding stopped after {done - 1} of {total} ({type(exc).__name__}: {exc}). "
+                             "Nothing was changed; run it again when Ollama is working.")
+                if dimension is None:
+                    dimension = len(vector)
+                elif len(vector) != dimension:
+                    sys.exit("The model gave vectors of different sizes, so nothing was changed.")
+                stage_embedding(conn, file_id, serialize_embedding(vector))  # as bytes at once: a list of floats takes eight times the room
+                if done % 25 == 0 or done == total:
+                    conn.commit()  # only the temporary table has been written to; this ends the transaction, it does not change the database
+                    print(f"{done} of {total} embedded…", flush=True)
 
-        with conn:  # all or nothing
-            for (file_id, _), vector in zip(texts, vectors):
-                upsert_text_embedding(conn, file_id, serialize_embedding(vector), pinned, digest, dimension)
-                conn.execute("UPDATE image_data SET search_text_version = ? WHERE file_id = ?", (SEARCH_TEXT_VERSION, file_id))
-            update_embedding_settings(conn, pinned, digest, dimension)
-        print(f"Done: {len(texts)} vector(s) made again with {pinned}.")
+            try:
+                pinned, digest = (model, installed[model]) if is_pinned(model) else pin_model(client, model)
+                if pinned != model:
+                    config.record_pinned_model(pinned, model)
+            except Exception as exc:
+                pinned, digest = model, installed[model]
+                print(f"Could not save a fixed copy of {model} ({type(exc).__name__}: {exc}); it is used as it is.")
+
+            with conn:  # all or nothing
+                replace_embeddings_from_staging(conn, pinned, digest, dimension, SEARCH_TEXT_VERSION)
+                update_embedding_settings(conn, pinned, digest, dimension)
+            print(f"Done: {total} vector(s) made again with {pinned}.")
+        finally:
+            drop_embedding_staging(conn)
     finally:
         conn.close()
 

@@ -13,6 +13,15 @@ from datetime import datetime, timezone
 
 from PIL import Image
 
+from image_processing.memory import exif_can_be_read
+
+# What ``mimetypes`` knows depends on the computer's own list (and the Python version): it has no entry for HEIC, the iPhone's
+# format, on many. The formats Imagent reads are named here, so the type stored does not depend on the computer.
+_MIME_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+    ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff", ".heic": "image/heic", ".heif": "image/heif",
+    ".avif": "image/avif",
+}
 _EXIF_IFD = 0x8769  # pointer to the Exif sub-directory (DateTimeOriginal lives here)
 _GPS_IFD = 0x8825   # pointer to the GPS sub-directory
 _NO_EXIF = {"taken_at": None, "camera_make": None, "camera_model": None, "gps_lat": None, "gps_lon": None}
@@ -41,13 +50,14 @@ def extract_file_metadata(path: str) -> dict:
     try:
         with Image.open(path) as img:
             width, height = img.size
-            exif_fields = _extract_exif(img)
+            if exif_can_be_read(img):  # not for a PNG too large to decode: the size check that follows refuses it
+                exif_fields = _extract_exif(img)
     except Exception:
         # Non-fatal: dimensions stay None; the rest of the metadata is still valid.
         pass
 
     # --- MIME type ---
-    mime_type, _ = mimetypes.guess_type(path)
+    mime_type = _MIME_TYPES.get(os.path.splitext(path)[1].lower()) or mimetypes.guess_type(path)[0]
 
     # --- Timestamps ---
     modified_at = iso_utc(stat.st_mtime)

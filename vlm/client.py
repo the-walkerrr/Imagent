@@ -8,7 +8,6 @@ from __future__ import annotations
 import atexit
 import io
 import os
-import platform
 import shutil
 import signal
 import subprocess
@@ -23,7 +22,10 @@ from PIL import Image
 
 import config
 from db.operations import get_device_settings, get_model_settings
+from os_specific.process import background_process_options
 
+
+_FIRST_POLL_PAUSE = 0.2  # seconds between the first questions to a server that was just started; it doubles up to one second
 
 # Structured output (the JSON schema sent with each request) arrived in Ollama 0.5.0.
 MIN_OLLAMA_VERSION = (0, 5, 0)
@@ -112,22 +114,29 @@ def _stop_server_when_killed() -> None:
 def start_server(client: ollama.Client, host: str | None = None, wait_seconds: int = 30) -> subprocess.Popen | None:
     """Start ``ollama serve`` in the background, on the address of ``host`` (default: the one saved by setup), and wait until it answers.
 
-    Returns the process, or None if the command could not be run or the server never answered
-    (it is stopped again in that case). The caller must stop the process with ``stop_server``.
+    Returns the process, or None if the command could not be run, the server ended by itself, or it never answered within
+    ``wait_seconds`` (it is stopped again in that case). The caller must stop the process with ``stop_server``.
     A terminal closed or a ``kill`` while it runs also stops it.
     """
-    kwargs = {"creationflags": 0x00000008} if platform.system() == "Windows" else {"start_new_session": True}
     host = host or config.OLLAMA_HOST
     env = {**os.environ, "OLLAMA_HOST": host} if host else None  # otherwise the server listens on its default port, not the saved one
     try:
-        process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, **kwargs)
+        process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                                   **background_process_options())
     except OSError:
         return None
     _stop_server_when_killed()
-    for _ in range(wait_seconds):
+    deadline = time.monotonic() + wait_seconds
+    pause = _FIRST_POLL_PAUSE
+    while True:
+        if process.poll() is not None:  # it ended by itself (the port is taken, it crashed): waiting longer would only wait for nothing
+            return None
         if is_reachable(client):
             return process
-        time.sleep(1)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(pause)
+        pause = min(pause * 2, 1.0)  # a server that is quick to start is noticed quickly; a slow one is asked about once a second
     stop_server(process)
     return None
 

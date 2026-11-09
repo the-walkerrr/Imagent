@@ -233,6 +233,28 @@ class RunTests(IsolatedHome):
         self.assertEqual((row["status"], row["park_kind"], row["retry_when"], row["attempts"]), ("parked", "unreadable", "file_changed", 0))
         self.assertEqual(self.conn.execute("SELECT kind, step FROM failure_history").fetchone()[:], ("unreadable", "opened the image"))
 
+    def test_a_damaged_looking_file_that_changed_since_the_scan_is_still_being_written_and_stays_queued(self):
+        self.make_image(self.work / "b.png")  # its modification time is not the "t" the scan recorded for it
+        damaged = problem(UNREADABLE, "The image cannot be read; it is damaged.", retry_when="file_changed")
+        with mock.patch("time.sleep", side_effect=AssertionError("it waited")):
+            self.run_with([("indexed", "ok"), damaged, ("indexed", "ok"), ("indexed", "ok")])
+        row = self._rows()["b.png"]
+        self.assertEqual((row["status"], row["attempts"], row["park_kind"]), ("queued", 0, None))
+        self.assertIn("changed after it was scanned", row["last_error"])
+        self.assertEqual(get_exhausted_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS), [])  # not reported: tried again by the next run
+        self.assertEqual(self.conn.execute("SELECT kind FROM failure_history").fetchone()[0], "unreadable")  # what was found is kept
+
+    def test_a_damaged_looking_file_that_is_as_the_scan_saw_it_is_damaged_and_set_aside(self):
+        from image_processing.metadata import iso_utc
+        import os
+        path = self.make_image(self.work / "b.png")
+        with self.conn:
+            upsert_backlog(self.conn, str(path), 1, iso_utc(os.stat(path).st_mtime))
+        damaged = problem(UNREADABLE, "The image cannot be read; it is damaged.", retry_when="file_changed")
+        self.run_with([("indexed", "ok"), damaged, ("indexed", "ok"), ("indexed", "ok")])
+        row = self._rows()["b.png"]
+        self.assertEqual((row["status"], row["park_kind"]), ("parked", "unreadable"))
+
     def test_a_file_still_being_written_stays_queued_and_loses_no_attempt(self):
         busy = ImageProblem(BUSY, "still being written", park=False, report=False)
         self.run_with([("indexed", "ok"), busy, ("indexed", "ok"), ("indexed", "ok")])

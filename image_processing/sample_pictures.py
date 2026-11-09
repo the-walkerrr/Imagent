@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 import config
-from image_processing.memory import GENTLE, GENTLE_BYTES_PER_PIXEL, available_memory, plan_image
+from image_processing.memory import available_memory, check_image_size, peak_bytes_per_pixel
 from image_processing.preprocess import preprocess_image
 from image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain
 
@@ -85,7 +85,7 @@ def make_extremes(folder: Path, target_bytes: int = TARGET_BYTES, say: Callable[
     # A small file that expands to twice the pixels the memory check allows, kept as one bit a pixel so that making it is cheap.
     available = available_memory()
     if available:
-        side = int((2 * available * config.IMAGE_MEMORY_SHARE / GENTLE_BYTES_PER_PIXEL) ** 0.5)
+        side = int((2 * available * config.IMAGE_MEMORY_SHARE / peak_bytes_per_pixel("1")) ** 0.5)
         if _fits(side * side // 8, folder) is None:
             Image.new("1", (side, side)).save(folder / "extreme-expands-to-many-pixels.png")
             made["extreme-expands-to-many-pixels.png"] = "too large"
@@ -93,39 +93,68 @@ def make_extremes(folder: Path, target_bytes: int = TARGET_BYTES, say: Callable[
     good = io.BytesIO()
     Image.fromarray(np.random.default_rng(1).integers(0, 256, (600, 800, 3), dtype=np.uint8)).save(good, format="JPEG")
     jpeg = good.getvalue()
-    (folder / "damaged-cut-off.jpg").write_bytes(jpeg[: len(jpeg) * 6 // 10])
-    (folder / "damaged-empty.jpg").write_bytes(b"")
-    (folder / "damaged-not-a-picture.png").write_bytes(b"This is text, not a picture.\n" * 40)
-    made.update({"damaged-cut-off.jpg": "damaged", "damaged-empty.jpg": "damaged", "damaged-not-a-picture.png": "damaged"})
+    png = io.BytesIO()
+    Image.fromarray(np.random.default_rng(2).integers(0, 256, (300, 400, 3), dtype=np.uint8)).save(png, format="PNG")
+    whole_png = png.getvalue()
+    # What damage looks like in practice: a copy that stopped half way, an empty file, a file that is not a picture at all,
+    # a header with nothing after it, and a JPEG start followed by noise.
+    damaged = {
+        "damaged-cut-off.jpg": jpeg[: len(jpeg) * 6 // 10],
+        "damaged-empty.jpg": b"",
+        "damaged-not-a-picture.png": b"This is text, not a picture.\n" * 40,
+        "damaged-cut-off.png": whole_png[: len(whole_png) // 2],
+        "damaged-header-only.png": whole_png[:8],
+        "damaged-noise-after-jpeg-start.jpg": b"\xff\xd8\xff\xe0" + np.random.default_rng(3).bytes(4000),
+    }
+    for name, content in damaged.items():
+        (folder / name).write_bytes(content)
+        made[name] = "damaged"
 
+    animated = [Image.new("RGB", (120, 90), colour) for colour in ((255, 0, 0), (0, 255, 0), (0, 0, 255))]
+    sideways = Image.Exif()
+    sideways[0x0112] = 6  # stored sideways: shown turned a quarter
+    palette = Image.new("P", (200, 150))
+    palette.putpalette([0, 0, 0, 255, 128, 0] + [0] * 762)
+    palette.paste(1, (50, 40, 150, 110))
     odd = {
         "odd-transparent.png": Image.new("RGBA", (400, 300), (0, 0, 0, 0)),
         "odd-sixteen-bit.png": Image.fromarray((np.arange(300 * 400, dtype=np.uint32).reshape(300, 400) % 65536).astype(np.uint16)),
         "odd-cmyk.jpg": Image.new("CMYK", (400, 300), (10, 80, 200, 20)),
         "odd-panorama.jpg": Image.new("RGB", (12000, 300), (90, 140, 200)),
+        "odd-tall-and-thin.jpg": Image.new("RGB", (40, 9000), (200, 140, 90)),
         "odd-one-pixel.png": Image.new("RGB", (1, 1), (255, 0, 0)),
+        "odd-black-and-white.png": Image.new("1", (300, 200), 1),
+        "odd-grey-with-transparency.png": Image.new("LA", (300, 200), (128, 200)),
+        "odd-palette.png": palette,
     }
     for name, picture in odd.items():
         picture.save(folder / name)
         made[name] = "read"
+    animated[0].save(folder / "odd-animated.gif", save_all=True, append_images=animated[1:], duration=100, loop=0)
+    Image.new("RGB", (600, 300), (30, 90, 160)).save(folder / "odd-stored-sideways.jpg", exif=sideways)
+    (folder / "odd-capital-extension.JPG").write_bytes(jpeg)
+    (folder / "odd-a-jpeg-named-png.png").write_bytes(jpeg)  # Pillow goes by what is inside, not by the name
+    (folder / "odd name (with spaces, an accent é and # % &).jpg").write_bytes(jpeg)  # what no file name should be able to break
+    made.update({name: "read" for name in ("odd-animated.gif", "odd-stored-sideways.jpg", "odd-capital-extension.JPG",
+                                           "odd-a-jpeg-named-png.png", "odd name (with spaces, an accent é and # % &).jpg")})
     return made
 
 
 def check_pictures(folder: Path, expected: dict | None = None, say: Callable[[str], None] = lambda m: None) -> dict:
     """Run the steps of indexing that need no model over every picture in ``folder``. Returns the number of pictures per outcome.
 
-    The outcomes: ``read`` (and ``read gently`` for the ones that need the memory-saving way), ``too large`` for the
+    The outcomes: ``read``, ``too large`` for the
     memory this computer has free, ``damaged``, ``unsupported``, ``busy``, and ``unexpected`` for an error that should have been
     one of those. Where ``expected`` says what a picture should come to, any other outcome is said."""
     outcomes: dict[str, int] = {}
     for path in sorted(p for p in folder.iterdir() if p.is_file() and p.name != "manifest.json"):
         try:
-            route = plan_image(str(path))
+            check_image_size(str(path))
             try:
-                preprocess_image(str(path), route == GENTLE)
+                preprocess_image(str(path))
             except Exception as exc:  # as vlm.analyzer.analyse_image does: an error of the picture becomes its explanation
                 raise (explain(exc, str(path)) or exc) from exc
-            outcome = "read gently" if route == GENTLE else "read"
+            outcome = "read"
         except ImageProblem as problem:
             outcome = {TOO_LARGE: "too large", UNREADABLE: "damaged", UNSUPPORTED: "unsupported", BUSY: "busy"}.get(problem.kind, "unexpected")
         except Exception as exc:  # an error that no step of indexing turns into a plain explanation
@@ -139,5 +168,5 @@ def check_pictures(folder: Path, expected: dict | None = None, say: Callable[[st
 
 
 def _accepted(wanted: str) -> tuple:
-    """What a picture meant to be read may come to: read either way, or too large for the memory this computer has free."""
-    return ("read", "read gently", "too large") if wanted == "read" else (wanted,)
+    """What a picture meant to be read may come to: read, or too large for the memory this computer has free."""
+    return ("read", "too large") if wanted == "read" else (wanted,)

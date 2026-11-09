@@ -11,10 +11,10 @@ from vlm.reply_validation import check_reply
 from vlm.response_format import QueryUnderstanding
 from image_processing.convert import ConversionFailed, converted_copy
 from image_processing.features import extract_image_features
-from image_processing.memory import GENTLE, plan_image
+from image_processing.memory import check_image_size
 from image_processing.ocr import extract_text_blocks
 from image_processing.preprocess import preprocess_image
-from image_processing.problems import UNSUPPORTED, ImageProblem, explain
+from image_processing.problems import TOO_LARGE, UNSUPPORTED, ImageProblem, explain
 from pipeline.failure import IndexingFailure, attempt_record
 
 # What went wrong; each has its own way of being put right.
@@ -84,16 +84,44 @@ def analyse_image(client: ollama.Client, model: str, image_path: str,
             raise unsupported from failed
 
 
+def _check_image_size(client: ollama.Client, image_path: str, on_stage: Callable[[str], None]) -> None:
+    """``check_image_size``, but an image too large for the memory free is given more chances, one step after the other:
+    every model Ollama has loaded is unloaded (whatever setup found about the models sharing the memory) and the size is checked
+    again with the memory this frees; if it is still too large, it is checked once more with the larger share of the free memory,
+    ``config.IMAGE_MEMORY_SHARE_LAST_TRY``.
+
+    The models load again by themselves when the next request needs them. Raises ``ImageProblem`` as ``check_image_size`` does."""
+    try:
+        check_image_size(image_path)
+        return
+    except ImageProblem as large:
+        if large.kind != TOO_LARGE:
+            raise
+    loaded = other_models_running(client, [])
+    if loaded:  # when no model is using memory there is nothing to free, and no reason to wait
+        on_stage("freeing memory for a large image")
+        for name in loaded:
+            unload_model(client, name)
+        time.sleep(config.OLLAMA_RECOVERY_WAIT)  # the memory is not free the moment Ollama says the model is gone
+        try:
+            check_image_size(image_path)
+            return
+        except ImageProblem as still_large:
+            if still_large.kind != TOO_LARGE:
+                raise
+    check_image_size(image_path, config.IMAGE_MEMORY_SHARE_LAST_TRY)
+
+
 def _analyse_file(client: ollama.Client, model: str, image_path: str,
                   on_stage: Callable[[str], None], on_retry: Callable[[str], None]) -> Analysis:
-    gentle = plan_image(image_path) == GENTLE  # raises ImageProblem if the image cannot be opened or is too large
+    _check_image_size(client, image_path, on_stage)  # raises ImageProblem if the image cannot be opened or is too large
     # The steps that are quick and need no model come first: when one of them fails, no reply was asked for in vain.
     try:
         on_stage("preparing image")
-        image_bytes = preprocess_image(image_path, gentle)
-        features = extract_image_features(image_path, gentle)
+        image_bytes = preprocess_image(image_path)
+        features = extract_image_features(image_path)
         on_stage("reading text in image")
-        ocr_text = extract_text_blocks(image_path, tiled=gentle)
+        ocr_text = extract_text_blocks(image_path)
     except ImageProblem:
         raise
     except Exception as exc:

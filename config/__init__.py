@@ -121,17 +121,9 @@ OCR_MIN_CONFIDENCE: float = 0.6  # OCR blocks scoring below this are dropped
 OCR_TILE_SHARE: float = 0.5  # a tile is this share of the largest image the OCR engine reads without shrinking it: it finds text only above about 2% of the image side, so smaller tiles read smaller text
 OCR_TILE_OVERLAP: float = 0.1  # share of a tile that the next one covers again, so text on a border is read whole in one of them
 IMAGE_MEMORY_SHARE: float = 0.5  # share of the memory free right now that one image may use at its peak (image_processing/memory.py)
+IMAGE_MEMORY_SHARE_LAST_TRY: float = 0.75  # the share for one last check of an image still too large after every model is unloaded (vlm/analyzer.py)
 
 
-def _megapixel_limit() -> float:
-    try:
-        return max(float(load_config().get("max_megapixels") or 0), 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-IMAGE_MAX_MEGAPIXELS: float = _megapixel_limit()  # optional hard limit in megapixels, set as max_megapixels in config.json; 0 = none
-FILE_SETTLE_SECONDS: int = 2  # a file that cannot be read is watched this long: if it changes it is still being written
 IMAGE_EDGE_CEILING: int = 1024  # the largest long side setup tries for the image sent to the vision model: beyond it the extra detail is not worth the time
 IMAGE_MAX_LONG_EDGE: int = IMAGE_EDGE_CEILING  # the long side actually used: the largest the computer managed, never above the ceiling
 IMAGE_JPEG_QUALITY: int = 85
@@ -173,6 +165,7 @@ RETRY_RATE_STOP: float = 0.5  # ... at least this share needed the model's reply
 ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 
 # --- Search ------------------------------------------------------------------
+DB_BATCH_ROWS: int = 1000  # rows read from the database at a time by search and re-embed: the memory they use is about this many rows, however many images are indexed
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
 

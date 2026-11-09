@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import NamedTuple
 
+from os_specific.files import is_hidden_folder
+
 # Extensions that Imagent can process.  All comparisons are done case-insensitively.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
     ".jpg", ".jpeg",
@@ -17,8 +19,9 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
 })
 
 # Folders that hold no pictures of the user's own, only copies, caches or system files. Names are compared
-# case-insensitively; a folder whose name starts with "." (.git, .Trash, .thumbnails, ...) is skipped too,
-# and so is one that ends in a suffix of SKIPPED_FOLDER_SUFFIXES (the photo libraries of macOS).
+# case-insensitively; a folder whose name starts with "." (.git, .Trash, .thumbnails, ...) is skipped too, and so is
+# one the operating system itself marks as hidden (AppData on Windows, ~/Library on macOS: see os_specific/files.py),
+# and one that ends in a suffix of SKIPPED_FOLDER_SUFFIXES (the photo libraries of macOS).
 SKIPPED_FOLDERS: frozenset[str] = frozenset({
     "node_modules", "__pycache__",
     "@eadir",  # Synology thumbnails
@@ -56,7 +59,8 @@ def discover(root: Path) -> Discovery:
             unreadable.append(Path(os.fsdecode(exc.filename)))
 
     for folder, subfolders, files in os.walk(root, onerror=on_error):
-        subfolders[:] = sorted(name for name in subfolders if not _skip_folder(name))  # pruning in place steers the walk
+        subfolders[:] = sorted(name for name in subfolders  # pruning in place steers the walk
+                               if not _skip_folder(name) and not is_hidden_folder(os.path.join(folder, name)))
         for name in files:
             if _skip_file(name):
                 continue

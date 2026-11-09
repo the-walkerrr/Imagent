@@ -64,7 +64,7 @@ def _read(pixels_bgr: np.ndarray) -> list[str]:
 
 
 def _bgr(img: Image.Image) -> np.ndarray:
-    return np.array(img.convert("RGB"))[:, :, ::-1]  # the engine expects BGR
+    return np.array(img if img.mode == "RGB" else img.convert("RGB"))[:, :, ::-1]  # the engine expects BGR
 
 
 def _read_whole(image_path: str) -> list[str]:
@@ -75,7 +75,8 @@ def _read_whole(image_path: str) -> list[str]:
     if longest > int(getattr(_engine(), "max_side_len", 0) or longest):
         return _read_tiled(image_path)
     with Image.open(image_path) as img:
-        pixels = _bgr(ImageOps.exif_transpose(img))
+        ImageOps.exif_transpose(img, in_place=True)  # turned where it is: a copy of the whole image is not made
+        pixels = _bgr(img)
     return _read(pixels)
 
 
@@ -106,14 +107,12 @@ def _read_tiled(image_path: str) -> list[str]:
     return texts
 
 
-def extract_text_blocks(image_path: str, tiled: bool = False) -> list[str]:
+def extract_text_blocks(image_path: str) -> list[str]:
     """Return each separate piece of text found in the image (empty if it has none).
 
-    ``tiled`` starts with tiles, for an image that is big for the memory free (see image_processing/memory.py).
     Raises ``ImageProblem`` if the image cannot be opened, or if reading its text failed in every way tried.
     """
-    steps = [("tiles", _read_tiled), ("tiles, engine loaded afresh", _read_tiled)] if tiled else [
-        ("whole image", _read_whole), ("tiles", _read_tiled), ("tiles, engine loaded afresh", _read_tiled)]
+    steps = [("whole image", _read_whole), ("tiles", _read_tiled), ("tiles, engine loaded afresh", _read_tiled)]
     attempts: list[dict] = []
     for name, read in steps:
         if name.endswith("afresh"):

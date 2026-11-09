@@ -16,6 +16,8 @@ MODULES = [
     "text_processing.formatters", "vlm.analyzer", "vlm.client", "vlm.reply_validation",
     "image_processing.memory", "image_processing.problems", "pipeline.failure", "pipeline.storage", "pipeline.versions",
     "reembed.reembed", "menu.menu", "show_failed.show_failed", "image_processing.convert",
+    "os_specific", "os_specific.convert", "os_specific.files", "os_specific.locking", "os_specific.memory", "os_specific.process",
+    "os_specific.storage",
 ]
 
 
