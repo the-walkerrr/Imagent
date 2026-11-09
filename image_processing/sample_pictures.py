@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 import config
-from image_processing.memory import GENTLE, GENTLE_BYTES_PER_PIXEL, available_memory, plan_image
+from image_processing.memory import available_memory, check_image_size, peak_bytes_per_pixel
 from image_processing.preprocess import preprocess_image
 from image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain
 
@@ -85,7 +85,7 @@ def make_extremes(folder: Path, target_bytes: int = TARGET_BYTES, say: Callable[
     # A small file that expands to twice the pixels the memory check allows, kept as one bit a pixel so that making it is cheap.
     available = available_memory()
     if available:
-        side = int((2 * available * config.IMAGE_MEMORY_SHARE / GENTLE_BYTES_PER_PIXEL) ** 0.5)
+        side = int((2 * available * config.IMAGE_MEMORY_SHARE / peak_bytes_per_pixel("1")) ** 0.5)
         if _fits(side * side // 8, folder) is None:
             Image.new("1", (side, side)).save(folder / "extreme-expands-to-many-pixels.png")
             made["extreme-expands-to-many-pixels.png"] = "too large"
@@ -114,18 +114,18 @@ def make_extremes(folder: Path, target_bytes: int = TARGET_BYTES, say: Callable[
 def check_pictures(folder: Path, expected: dict | None = None, say: Callable[[str], None] = lambda m: None) -> dict:
     """Run the steps of indexing that need no model over every picture in ``folder``. Returns the number of pictures per outcome.
 
-    The outcomes: ``read`` (and ``read gently`` for the ones that need the memory-saving way), ``too large`` for the
+    The outcomes: ``read``, ``too large`` for the
     memory this computer has free, ``damaged``, ``unsupported``, ``busy``, and ``unexpected`` for an error that should have been
     one of those. Where ``expected`` says what a picture should come to, any other outcome is said."""
     outcomes: dict[str, int] = {}
     for path in sorted(p for p in folder.iterdir() if p.is_file() and p.name != "manifest.json"):
         try:
-            route = plan_image(str(path))
+            check_image_size(str(path))
             try:
-                preprocess_image(str(path), route == GENTLE)
+                preprocess_image(str(path))
             except Exception as exc:  # as vlm.analyzer.analyse_image does: an error of the picture becomes its explanation
                 raise (explain(exc, str(path)) or exc) from exc
-            outcome = "read gently" if route == GENTLE else "read"
+            outcome = "read"
         except ImageProblem as problem:
             outcome = {TOO_LARGE: "too large", UNREADABLE: "damaged", UNSUPPORTED: "unsupported", BUSY: "busy"}.get(problem.kind, "unexpected")
         except Exception as exc:  # an error that no step of indexing turns into a plain explanation
@@ -139,5 +139,5 @@ def check_pictures(folder: Path, expected: dict | None = None, say: Callable[[st
 
 
 def _accepted(wanted: str) -> tuple:
-    """What a picture meant to be read may come to: read either way, or too large for the memory this computer has free."""
-    return ("read", "read gently", "too large") if wanted == "read" else (wanted,)
+    """What a picture meant to be read may come to: read, or too large for the memory this computer has free."""
+    return ("read", "too large") if wanted == "read" else (wanted,)

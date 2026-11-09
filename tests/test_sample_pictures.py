@@ -53,7 +53,7 @@ class ShippedZipTests(Folder):
         count = sample_pictures.unpack(self.folder)
         self.assertGreaterEqual(count, 25)
         outcomes = sample_pictures.check_pictures(self.folder)
-        self.assertEqual(set(outcomes) - {"read", "read gently"}, set(), outcomes)
+        self.assertEqual(set(outcomes) - {"read"}, set(), outcomes)
 
     def test_unpacking_twice_leaves_the_files_alone(self):
         sample_pictures.unpack(self.folder)
