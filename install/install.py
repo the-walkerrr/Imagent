@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One-command installer and first-run setup: show system details, create .venv and check its
 packages, check Python and Ollama versions, collect and verify the model names, then lock them in the
-Imagent database. Anything that is missing or too old is listed and installed only after you agree,
-and packages only ever go into .venv. The models cannot be changed afterwards; running this again only
+Imagent database. Missing or outdated packages are installed automatically (only into .venv); Ollama
+and a broken .venv are only fixed after you agree. The models cannot be changed afterwards; running this again only
 shows their status and reinstalls a missing one. Starts Ollama only temporarily, to download the models."""
 
 import json
@@ -341,7 +341,7 @@ def _pip_install(python: str) -> None:
 
 
 def _sync_packages(python: str) -> None:
-    """Install into .venv what requirements.txt needs and it lacks or has too old, after asking. Nothing outside .venv changes."""
+    """Install into .venv what requirements.txt needs and it lacks or has too old, without asking. Nothing outside .venv changes."""
     wanted = _requirements()
     installed = _installed_versions(python, [name for name, _ in wanted])
     todo = []
@@ -359,9 +359,7 @@ def _sync_packages(python: str) -> None:
         say("These packages are needed in .venv:")
         for item in todo:
             say(f"  - {item}")
-    say("They go into .venv only; Python and the packages elsewhere on your computer are not touched.")
-    if not _confirm("Install them now? (this can take a minute)"):
-        fail(f"The packages are required. Run {app_config.INSTALL_COMMAND} again when you are ready.")
+    say("Installing them now (this can take a minute). They go into .venv only; Python and the packages elsewhere on your computer are not touched.")
     _pip_install(python)
 
 

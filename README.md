@@ -1,7 +1,6 @@
 # Imagent (Beta)
 
-**A local-first image search tool.** Find your pictures by describing them in plain English, such as
-"the receipt from the coffee shop".
+**Local image indexing and search tool.**
 
 - **Private:** everything runs on your computer, and your images never leave it.
 - **Offline:** after setup, no internet connection is needed.
