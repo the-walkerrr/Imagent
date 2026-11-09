@@ -84,18 +84,45 @@ class StartServerTests(unittest.TestCase):
         with mock.patch.object(vlm_client.subprocess, "Popen") as popen, \
                 mock.patch.object(vlm_client, "is_reachable", return_value=True), \
                 mock.patch.object(vlm_client.signal, "signal") as handler:
+            popen.return_value.poll.return_value = None  # still running
             self.assertIsNotNone(start_server(object(), "http://localhost:5555"))
         self.assertEqual(popen.call_args.kwargs["env"]["OLLAMA_HOST"], "http://localhost:5555")
         installed = {call.args[0] for call in handler.call_args_list}
         self.assertIn(vlm_client.signal.SIGTERM, installed)  # a plain `kill` must still stop the server
 
     def test_a_server_that_never_answers_is_stopped_and_reported(self):
+        clock = iter(range(0, 100))  # one second per look at the clock
         with mock.patch.object(vlm_client.subprocess, "Popen") as popen, \
                 mock.patch.object(vlm_client, "is_reachable", return_value=False), \
-                mock.patch.object(vlm_client.time, "sleep"), \
+                mock.patch.object(vlm_client.time, "sleep") as sleep, \
+                mock.patch.object(vlm_client.time, "monotonic", side_effect=lambda: next(clock)), \
                 mock.patch.object(vlm_client.signal, "signal"):
+            popen.return_value.poll.return_value = None
             self.assertIsNone(start_server(object(), "localhost", wait_seconds=2))
         popen.return_value.terminate.assert_called_once()
+        pauses = [call.args[0] for call in sleep.call_args_list]
+        self.assertEqual(pauses, sorted(pauses))  # asked about more and more slowly ...
+        self.assertLessEqual(max(pauses), 1.0)  # ... but never less often than once a second
+
+    def test_a_server_that_ends_by_itself_is_given_up_on_at_once(self):
+        with mock.patch.object(vlm_client.subprocess, "Popen") as popen, \
+                mock.patch.object(vlm_client, "is_reachable", return_value=False), \
+                mock.patch.object(vlm_client.time, "sleep") as sleep, \
+                mock.patch.object(vlm_client.signal, "signal"):
+            popen.return_value.poll.return_value = 1  # the port was taken: ollama serve exited
+            self.assertIsNone(start_server(object(), "localhost", wait_seconds=30))
+        sleep.assert_not_called()
+        popen.return_value.terminate.assert_not_called()  # nothing left to stop
+
+    def test_a_server_that_starts_late_is_found_without_waiting_the_whole_time(self):
+        answers = iter([False, False, True])
+        with mock.patch.object(vlm_client.subprocess, "Popen") as popen, \
+                mock.patch.object(vlm_client, "is_reachable", side_effect=lambda client: next(answers)), \
+                mock.patch.object(vlm_client.time, "sleep") as sleep, \
+                mock.patch.object(vlm_client.signal, "signal"):
+            popen.return_value.poll.return_value = None
+            self.assertIs(start_server(object(), "localhost", wait_seconds=30), popen.return_value)
+        self.assertEqual(sleep.call_count, 2)
 
 
 class ReadinessTests(IsolatedHome):

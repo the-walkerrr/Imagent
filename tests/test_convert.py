@@ -13,6 +13,7 @@ from image_processing import convert
 from image_processing.convert import ConversionFailed, converted_copy
 from image_processing.problems import UNSUPPORTED, ImageProblem, problem
 from menu import menu
+from os_specific import convert as os_convert
 from scan_and_index import scan_and_index
 from tests.support import IsolatedHome
 from vlm import analyzer
@@ -32,7 +33,7 @@ class ConvertedCopyTests(unittest.TestCase):
         return run
 
     def test_on_a_mac_sips_makes_the_png_and_the_copy_is_deleted_afterwards(self):
-        with mock.patch.object(convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
+        with mock.patch.object(os_convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
                 mock.patch.object(convert.subprocess, "run", side_effect=self.tool_that_writes()) as run:
             with converted_copy("/pictures/a.heic") as copy:
                 self.assertTrue(os.path.isfile(copy))
@@ -42,7 +43,7 @@ class ConvertedCopyTests(unittest.TestCase):
         self.assertEqual(run.call_args[0][0][:4], ["sips", "-s", "format", "png"])
 
     def test_on_windows_powershell_gets_the_paths_in_the_environment_not_in_the_script(self):
-        with mock.patch.object(convert.platform, "system", return_value="Windows"), mock.patch.object(convert.shutil, "which", return_value="powershell"), \
+        with mock.patch.object(os_convert.platform, "system", return_value="Windows"), mock.patch.object(convert.shutil, "which", return_value="powershell"), \
                 mock.patch.object(convert.subprocess, "run", side_effect=self.tool_that_writes()) as run:
             with converted_copy("C:\\pictures\\a'b.heic") as copy:
                 self.assertTrue(os.path.isfile(copy))
@@ -50,7 +51,7 @@ class ConvertedCopyTests(unittest.TestCase):
         self.assertNotIn("a'b", run.call_args[0][0][-1])
 
     def test_the_copy_is_deleted_when_the_analysis_fails_too(self):
-        with mock.patch.object(convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
+        with mock.patch.object(os_convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
                 mock.patch.object(convert.subprocess, "run", side_effect=self.tool_that_writes()):
             with self.assertRaises(ValueError):
                 with converted_copy("/a.heic") as copy:
@@ -58,7 +59,7 @@ class ConvertedCopyTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.dirname(copy)))
 
     def test_a_computer_without_a_tool_cannot_convert(self):
-        with mock.patch.object(convert.platform, "system", return_value="Linux"), self.assertRaisesRegex(ConversionFailed, "no built-in tool"):
+        with mock.patch.object(os_convert.platform, "system", return_value="Linux"), self.assertRaisesRegex(ConversionFailed, "no built-in tool"):
             with converted_copy("/a.heic"):
                 pass
 
@@ -70,7 +71,7 @@ class ConvertedCopyTests(unittest.TestCase):
             folders.append(original(**kwargs))
             return folders[-1]
         for result in (finished(1, "cannot read it"), finished(0)):  # an error, and "success" without a file
-            with mock.patch.object(convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
+            with mock.patch.object(os_convert.platform, "system", return_value="Darwin"), mock.patch.object(convert.shutil, "which", return_value="/usr/bin/sips"), \
                     mock.patch.object(convert.subprocess, "run", return_value=result), mock.patch.object(convert.tempfile, "mkdtemp", mkdtemp):
                 with self.assertRaises(ConversionFailed):
                     with converted_copy("/a.heic"):

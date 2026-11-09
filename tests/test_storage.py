@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest import mock
 
+from os_specific import storage as os_storage
 from pipeline import storage, validation
 
 MOUNT_OUTPUT = """/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
@@ -19,33 +20,33 @@ MOUNTINFO = r"""36 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
 
 class ParsingTests(unittest.TestCase):
     def test_macos_mount_output(self):
-        mounts = storage._parse_mount_output(MOUNT_OUTPUT)
+        mounts = os_storage._parse_mount_output(MOUNT_OUTPUT)
         self.assertIn(("/Volumes/My Photos", "smbfs", "//user@nas._smb._tcp.local/Photos"), mounts)
         self.assertIn(("/", "apfs", "/dev/disk3s1s1"), mounts)
         self.assertEqual(len(mounts), 4)
 
     def test_linux_mountinfo_with_an_escaped_space(self):
-        mounts = storage._parse_mountinfo(MOUNTINFO)
+        mounts = os_storage._parse_mountinfo(MOUNTINFO)
         self.assertIn(("/mnt/nas share", "nfs4", "server:/export"), mounts)
         self.assertIn(("/media/usb", "vfat", "/dev/sdb1"), mounts)
 
     def test_a_folder_belongs_to_the_mount_that_holds_it_most_closely(self):
-        mounts = storage._parse_mount_output(MOUNT_OUTPUT)
-        self.assertEqual(storage._owner("/Volumes/My Photos/2020/a", mounts)[1], "smbfs")
-        self.assertEqual(storage._owner("/Users/me/Pictures", mounts)[0], "/")
-        self.assertEqual(storage._owner("/Volumes/My PhotosOther", mounts)[0], "/")  # not inside "My Photos"
+        mounts = os_storage._parse_mount_output(MOUNT_OUTPUT)
+        self.assertEqual(os_storage._owner("/Volumes/My Photos/2020/a", mounts)[1], "smbfs")
+        self.assertEqual(os_storage._owner("/Users/me/Pictures", mounts)[0], "/")
+        self.assertEqual(os_storage._owner("/Volumes/My PhotosOther", mounts)[0], "/")  # not inside "My Photos"
 
 
 class ClassifyTests(unittest.TestCase):
     def classify(self, system, path, mounts, **patches):
         parse = "_parse_mount_output" if system == "Darwin" else "_parse_mountinfo"
-        with mock.patch.object(storage.platform, "system", return_value=system), \
-                mock.patch.object(storage.subprocess, "run", return_value=mock.Mock(stdout="")), \
-                mock.patch.object(storage.Path, "read_text", return_value=""), \
-                mock.patch.object(storage, parse, return_value=mounts), \
-                mock.patch.object(storage, "_macos_is_external", patches.get("mac", mock.Mock(return_value=False))), \
-                mock.patch.object(storage, "_linux_is_external", patches.get("linux", mock.Mock(return_value=False))):
-            return storage._classify(path)
+        with mock.patch.object(os_storage.platform, "system", return_value=system), \
+                mock.patch.object(os_storage.subprocess, "run", return_value=mock.Mock(stdout="")), \
+                mock.patch.object(os_storage.Path, "read_text", return_value=""), \
+                mock.patch.object(os_storage, parse, return_value=mounts), \
+                mock.patch.object(os_storage, "_macos_is_external", patches.get("mac", mock.Mock(return_value=False))), \
+                mock.patch.object(os_storage, "_linux_is_external", patches.get("linux", mock.Mock(return_value=False))):
+            return os_storage.classify(path)
 
     def test_a_network_file_system_is_refused_on_both_systems(self):
         self.assertEqual(self.classify("Darwin", "/Volumes/Photos/a", [("/Volumes/Photos", "smbfs", "//x/y")]), storage.NETWORK)
@@ -71,13 +72,13 @@ class ClassifyTests(unittest.TestCase):
 
 class StorageProblemTests(unittest.TestCase):
     def test_a_folder_that_cannot_be_checked_is_allowed(self):
-        with mock.patch.object(storage, "_classify", side_effect=OSError("no diskutil")):
+        with mock.patch.object(storage, "classify", side_effect=OSError("no diskutil")):
             self.assertIsNone(storage.storage_problem("/x"))
 
     def test_the_message_says_what_is_wrong_and_what_to_do(self):
-        with mock.patch.object(storage, "_classify", return_value=storage.NETWORK):
+        with mock.patch.object(storage, "classify", return_value=storage.NETWORK):
             self.assertIn("network drive", storage.storage_problem("/x"))
-        with mock.patch.object(storage, "_classify", return_value=storage.EXTERNAL):
+        with mock.patch.object(storage, "classify", return_value=storage.EXTERNAL):
             message = storage.storage_problem("/x")
         self.assertIn("external or removable drive", message)
         self.assertIn("Copy the pictures to this computer", message)
@@ -90,6 +91,35 @@ class StorageProblemTests(unittest.TestCase):
     def test_an_ordinary_folder_is_accepted(self):
         with mock.patch.object(validation, "storage_problem", return_value=None):
             self.assertEqual(validation.validate_folder(os.path.expanduser("~")), validation.Path(os.path.expanduser("~")).resolve())
+
+
+
+class RootOverlapTests(unittest.TestCase):
+    """Whether two folders are the same one, as the file system of each operating system sees it."""
+
+    def overlap(self, system, root, known):
+        from pathlib import Path
+        from os_specific import files
+        with mock.patch.object(files.platform, "system", return_value=system):
+            return validation.find_overlapping_root(Path(root), known)
+
+    def test_a_folder_inside_a_known_one_overlaps_whatever_the_system(self):
+        for system in ("Darwin", "Windows", "Linux"):
+            self.assertEqual(self.overlap(system, "/pics/2020", ["/pics"]), "/pics", system)
+
+    def test_the_same_folder_is_a_rescan_not_an_overlap(self):
+        self.assertIsNone(self.overlap("Linux", "/pics", ["/pics"]))
+
+    def test_a_folder_that_differs_only_by_case_overlaps_on_macos_and_not_on_linux(self):
+        self.assertEqual(self.overlap("Darwin", "/Pics/2020", ["/pics"]), "/pics")
+        self.assertIsNone(self.overlap("Linux", "/Pics/2020", ["/pics"]))
+
+    def test_a_folder_whose_accent_is_written_the_other_way_overlaps_on_macos_and_not_on_linux(self):
+        import unicodedata
+        typed = unicodedata.normalize("NFD", "/caf\u00e9/2020")
+        stored = unicodedata.normalize("NFC", "/caf\u00e9")
+        self.assertEqual(self.overlap("Darwin", typed, [stored]), stored)
+        self.assertIsNone(self.overlap("Linux", typed, [stored]))  # on Linux they are two folders
 
 
 if __name__ == "__main__":
