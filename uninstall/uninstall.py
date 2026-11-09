@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import secrets
 import shutil
 import sqlite3
@@ -34,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 from pipeline.console import make_output_safe, run_cli
+from os_specific.process import background_process_options
 from pipeline.locking import AlreadyRunning, single_instance
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -149,10 +149,10 @@ def _ollama(host: str):
     try:
         if not _reachable(base):
             if _is_local(host) and shutil.which("ollama"):
-                kwargs = {"creationflags": 0x00000008} if platform.system() == "Windows" else {"start_new_session": True}
                 try:
                     process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                               env={**os.environ, "OLLAMA_HOST": host}, **kwargs)
+                                               env={**os.environ, "OLLAMA_HOST": host},
+                                               **background_process_options())
                 except OSError:
                     process = None
                 for _ in range(30 if process else 0):

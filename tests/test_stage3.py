@@ -327,11 +327,10 @@ class ReembedTests(IsolatedHome):
 
     def test_the_search_text_is_the_one_indexing_would_build(self):
         from text_processing.formatters import build_search_text
-        records = [{"file_id": 1, "vlm_metadata_json": json.dumps({"vlm": {"short_description": "A cat.", "scene": "x"}, "ocr_text": ["EXIT"]})},
-                   {"file_id": 2, "vlm_metadata_json": "not json"}]
-        texts, without = reembed.search_texts(records)
-        self.assertEqual(without, 1)
-        self.assertEqual(texts, [(1, build_search_text({"short_description": "A cat.", "scene": "x"}, ["EXIT"], config.SUMMARY_FIELD))])
+        good = {"file_id": 1, "vlm_metadata_json": json.dumps({"vlm": {"short_description": "A cat.", "scene": "x"}, "ocr_text": ["EXIT"]})}
+        self.assertEqual(reembed.search_text(good), build_search_text({"short_description": "A cat.", "scene": "x"}, ["EXIT"], config.SUMMARY_FIELD))
+        for bad in ("not json", "{}", json.dumps({"vlm": "not a dict"}), None):
+            self.assertIsNone(reembed.search_text({"file_id": 2, "vlm_metadata_json": bad}))
 
     def test_a_missing_embedding_model_is_pointed_at_the_installer(self):
         self.make_database()
@@ -340,6 +339,106 @@ class ReembedTests(IsolatedHome):
         with mock.patch.object(config, "load_install_record", return_value={}), self.assertRaises(SystemExit) as raised:
             reembed._model_to_use(client, get_model_settings(self.connect()))
         self.assertIn(config.INSTALL_COMMAND, str(raised.exception))
+
+
+    def add_images(self, conn, count):
+        """Add ``count`` more indexed images, each with a stored reply."""
+        root = conn.execute("SELECT root_id FROM scan_roots").fetchone()[0]
+        with conn:
+            conn.executemany(
+                "INSERT INTO image_data(root_id, file_path, hash, vlm_metadata_json, modified_at) VALUES (?, ?, 'h', ?, 't')",
+                [(root, f"/extra{n}.png", json.dumps({"vlm": {"short_description": f"Picture {n}.", "scene": "A scene."}, "ocr_text": [], "features": {}}))
+                 for n in range(count)])
+
+    def staging_tables(self, conn):
+        return [row[0] for row in conn.execute("SELECT name FROM sqlite_temp_master WHERE type = 'table'")] + \
+               [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE name LIKE '%staging%'")]
+
+    def test_the_vectors_wait_in_a_temporary_table_that_is_gone_afterwards_and_never_in_the_database(self):
+        conn = self.make_database()
+        seen = []
+        original = reembed.stage_embedding
+
+        def stage(conn_, file_id, blob):
+            original(conn_, file_id, blob)
+            seen.append((self.staging_tables(conn_), conn_.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0]))
+        with mock.patch.object(reembed, "stage_embedding", stage):
+            self.run_reembed(self.Embedder(), assume_yes=True)
+        self.assertTrue(all(tables == ["embedding_staging"] for tables, _ in seen))  # a temporary table, not one of the database's own
+        self.assertEqual([stored for _, stored in seen], [0, 0])  # nothing in the database until all are made
+        self.assertEqual(self.staging_tables(conn), [])
+
+    def test_an_interrupted_run_leaves_no_temporary_table_behind(self):
+        conn = self.make_database()
+        self.run_reembed(self.Embedder(fail_on=4), assume_yes=True)
+        self.assertEqual(self.staging_tables(conn), [])
+
+    def embed_in_batches_of(self, batch):
+        conn = self.make_database()
+        self.add_images(conn, 5)
+        with mock.patch.object(config, "DB_BATCH_ROWS", batch):
+            out, _, error = self.run_reembed(self.Embedder(dimension=4), assume_yes=True)
+        self.assertIsNone(error)
+        self.assertIn("7 image(s) to embed again", out)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 7)
+        self.assertEqual(conn.execute("SELECT COUNT(DISTINCT file_id) FROM text_embeddings").fetchone()[0], 7)  # none twice, none missed
+
+    def test_one_row_at_a_time_gives_every_image_its_vector(self):
+        self.embed_in_batches_of(1)
+
+    def test_a_batch_that_does_not_divide_the_images_evenly_gives_every_image_its_vector(self):
+        self.embed_in_batches_of(3)
+
+    def test_a_batch_larger_than_the_images_gives_every_image_its_vector(self):
+        self.embed_in_batches_of(1000)
+
+    def test_vectors_of_different_sizes_change_nothing(self):
+        conn = self.make_database()
+        sizes = iter([4, 4, 4, 3])  # the estimate takes two, then the first image, then the second comes back shorter
+        embedder = self.Embedder()
+        original = embedder.embed
+        embedder.embed = lambda **request: SimpleNamespace(embeddings=[[1.0] * next(sizes)])
+        _, _, error = self.run_reembed(embedder, assume_yes=True)
+        self.assertIn("different sizes", str(error))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 0)
+        self.assertEqual(self.staging_tables(conn), [])
+
+    def test_the_first_embedding_only_starts_the_model_and_is_not_what_the_estimate_is_made_of(self):
+        conn = self.make_database()
+        self.add_images(conn, 8)  # 10 images: the estimate embeds SAMPLE_SIZE of them, then every one is embedded
+        client = self.Embedder()
+        self.run_reembed(client, assume_yes=True)
+        self.assertEqual(client.calls, reembed.SAMPLE_SIZE + 10)
+
+    def test_a_single_image_is_embedded_to_warm_up_then_again_to_be_timed_and_then_for_real(self):
+        conn = self.make_database()
+        conn.execute("DELETE FROM image_data WHERE file_path = '/1.png'")
+        conn.commit()
+        client = self.Embedder()
+        out, _, error = self.run_reembed(client, assume_yes=True)
+        self.assertIsNone(error)
+        self.assertEqual(client.calls, 3)  # the model's start is never what is timed, even when there is only one image to time
+        self.assertIn("1 image(s) to embed again", out)
+
+    def test_memory_does_not_grow_with_the_number_of_images(self):
+        import random
+        import tracemalloc
+        conn = self.make_database()
+        self.add_images(conn, 1500)
+        dimension = 1024
+
+        class Embedder(self.Embedder):
+            def embed(self, **request):
+                self.calls += 1
+                return SimpleNamespace(embeddings=[[random.random() for _ in range(dimension)]])  # distinct floats, as a real model gives
+        tracemalloc.start()
+        _, _, error = self.run_reembed(Embedder(dimension=dimension), assume_yes=True)
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        self.assertIsNone(error)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 1502)
+        held_as_python_floats = 1502 * dimension * (8 + 24)  # what a list of lists of floats would take
+        self.assertLess(peak, held_as_python_floats / 4, f"peak {peak} bytes")
 
 
 class SetupPinTests(IsolatedHome):

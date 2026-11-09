@@ -124,7 +124,6 @@ IMAGE_MEMORY_SHARE: float = 0.5  # share of the memory free right now that one i
 IMAGE_MEMORY_SHARE_LAST_TRY: float = 0.75  # the share for one last check of an image still too large after every model is unloaded (vlm/analyzer.py)
 
 
-FILE_SETTLE_SECONDS: int = 2  # a file that cannot be read is watched this long: if it changes it is still being written
 IMAGE_EDGE_CEILING: int = 1024  # the largest long side setup tries for the image sent to the vision model: beyond it the extra detail is not worth the time
 IMAGE_MAX_LONG_EDGE: int = IMAGE_EDGE_CEILING  # the long side actually used: the largest the computer managed, never above the ceiling
 IMAGE_JPEG_QUALITY: int = 85
@@ -166,6 +165,7 @@ RETRY_RATE_STOP: float = 0.5  # ... at least this share needed the model's reply
 ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 
 # --- Search ------------------------------------------------------------------
+DB_BATCH_ROWS: int = 1000  # rows read from the database at a time by search and re-embed: the memory they use is about this many rows, however many images are indexed
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
 

@@ -5,14 +5,14 @@ from pathlib import Path
 from unittest import mock
 
 from scan_and_index import scan_and_index
-from db.operations import get_backlog, get_or_add_root, list_images_for_root
+from db.operations import get_backlog, get_or_add_root, images_by_path
 from pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed
 
 CAN_HIDE_FOLDERS = os.name == "posix" and (not hasattr(os, "geteuid") or os.geteuid() != 0)  # root ignores permissions
 
 
-class ScanSafetyTests(IsolatedHome):
+class ScanBase(IsolatedHome):
     def _index(self, root: Path, names: list[str]) -> None:
         """Create the images, scan them in, and mark them as indexed."""
         for number, name in enumerate(names):
@@ -29,8 +29,10 @@ class ScanSafetyTests(IsolatedHome):
         conn = self.connect()
         with conn:  # get_or_add_root writes, and an open write transaction would block the next scan
             root_id = get_or_add_root(conn, str(root))
-        return len(list_images_for_root(conn, root_id))
+        return len(images_by_path(conn, root_id))
 
+
+class ScanSafetyTests(ScanBase):
     @unittest.skipUnless(CAN_HIDE_FOLDERS, "needs folder permissions that root ignores")
     def test_a_folder_that_cannot_be_read_keeps_its_images(self):
         root = self.work / "pictures"
@@ -124,3 +126,81 @@ class DiscoveryTests(IsolatedHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloudAndHiddenTests(ScanBase):
+    """Files kept in cloud storage are neither read nor forgotten; folders the system hides are not walked."""
+
+    def _scan_with_away(self, root, away_names):
+        """``is_not_downloaded`` says yes for the files with these names, as the operating system would for an evicted file."""
+        away_inodes = {os.stat(root / name).st_ino for name in away_names}
+        return mock.patch.object(scan_and_index, "is_not_downloaded", side_effect=lambda status: status.st_ino in away_inodes)
+
+    def test_a_file_that_is_only_in_the_cloud_is_not_read_and_is_not_queued(self):
+        root = self.work / "pictures"
+        self.make_image(root / "here.png", 1)
+        self.make_image(root / "cloud.png", 2)
+        opened = []
+        with self._scan_with_away(root, ["cloud.png"]), mock.patch.object(scan_and_index, "compute_hash", side_effect=opened.append):
+            counts = scan_and_index.scan(root)
+        self.assertNotIn("cloud.png", [Path(path).name for path in opened])  # a new file is hashed only to tell a move from a new file
+        self.assertEqual((counts["scanned"], counts["queued_new"], counts["not_downloaded"]), (1, 1, 1))
+        self.assertEqual([Path(item["file_path"]).name for item in get_backlog(self.connect(), 99)], ["here.png"])
+
+    def test_an_indexed_file_that_goes_to_the_cloud_keeps_its_record(self):
+        root = self.work / "pictures"
+        self._index(root, ["a.png", "b.png", "c.png"])
+        with self._scan_with_away(root, ["a.png", "b.png", "c.png"]):  # all of them: the folder looks empty, like an unmounted drive
+            counts = scan_and_index.scan(root)
+        self.assertEqual((counts["deleted"], counts["delete_blocked"], counts["not_downloaded"]), (0, 0, 3))
+        self.assertEqual(self._stored(root), 3)
+
+    def test_a_queued_file_that_goes_to_the_cloud_stays_queued(self):
+        root = self.work / "pictures"
+        self.make_image(root / "a.png", 1)
+        scan_and_index.scan(root)
+        with self._scan_with_away(root, ["a.png"]):
+            scan_and_index.scan(root)
+        self.assertEqual(len(get_backlog(self.connect(), 99)), 1)
+
+    def test_the_user_is_told_how_many_files_were_left_alone(self):
+        import contextlib
+        import io
+        root = self.work / "pictures"
+        self.make_image(root / "a.png", 1)
+        out = io.StringIO()
+        with self._scan_with_away(root, ["a.png"]), contextlib.redirect_stdout(out):
+            scan_and_index._scan_and_report(root)
+        self.assertIn("cloud storage and not downloaded", out.getvalue())
+        self.assertIn("1 image(s) in cloud storage", out.getvalue())
+
+    def test_a_file_that_went_to_the_cloud_after_the_scan_is_set_aside_with_what_to_do_and_not_downloaded(self):
+        from image_processing.problems import NOT_DOWNLOADED, ImageProblem
+        conn = self.connect()
+        with conn:
+            root_id = get_or_add_root(conn, str(self.work))
+        path = self.make_image(self.work / "a.png")
+        settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 2, "versions": {}}
+        with mock.patch.object(scan_and_index, "is_not_downloaded", return_value=True), \
+                mock.patch.object(scan_and_index, "compute_hash", side_effect=AssertionError("downloaded it")), \
+                self.assertRaises(ImageProblem) as raised:
+            scan_and_index.index_image(conn, object(), settings, root_id, path)
+        self.assertEqual((raised.exception.kind, raised.exception.park, raised.exception.report), (NOT_DOWNLOADED, False, True))
+        self.assertIn("available offline", str(raised.exception))
+
+    def test_a_folder_the_system_hides_is_not_walked(self):
+        root = self.work / "pictures"
+        self.make_image(root / "shown" / "a.png", 1)
+        self.make_image(root / "AppDataLike" / "b.png", 2)
+        with mock.patch("pipeline.discovery.is_hidden_folder", side_effect=lambda path: os.path.basename(path) == "AppDataLike"):
+            found = discover(root)
+        self.assertEqual([path.name for path in found.images], ["a.png"])
+
+    def test_a_scan_keeps_one_small_tuple_per_stored_image(self):
+        root = self.work / "pictures"
+        self._index(root, ["a.png"])
+        conn = self.connect()
+        with conn:
+            root_id = get_or_add_root(conn, str(root))
+        (record,) = images_by_path(conn, root_id).values()
+        self.assertEqual(sorted(record._fields), ["file_id", "hash", "modified_at"])

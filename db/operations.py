@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from typing import Iterator, NamedTuple
 
 import config
 
@@ -21,6 +22,8 @@ VERSION_COLUMNS = ("vlm_digest", "prompt_hash", "schema_hash", "search_text_vers
 # Rows deleted per statement. SQLite limits the number of ``?`` in one statement
 # (999 before version 3.32), so long lists are processed in chunks below that.
 _CHUNK = 500
+
+_BEFORE_EVERY_ID = -2 ** 63  # SQLite's smallest integer: batches are read by file_id, from the first one
 
 
 def _now() -> str:
@@ -125,13 +128,19 @@ def lookup_by_path(conn: sqlite3.Connection, file_path: str) -> dict | None:
     return dict(row) if row else None
 
 
-def list_images_for_root(conn: sqlite3.Connection, root_id: int) -> list[dict]:
-    """Return file_id, file_path, hash and modified_at of every image stored under a root."""
-    rows = conn.execute(
-        "SELECT file_id, file_path, hash, modified_at FROM image_data WHERE root_id = ?",
-        (root_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
+class StoredImage(NamedTuple):
+    """What a scan needs to know about an image that is indexed already."""
+    file_id: int
+    hash: str | None
+    modified_at: str | None
+
+
+def images_by_path(conn: sqlite3.Connection, root_id: int) -> dict[str, StoredImage]:
+    """Every image stored under a root, by file path, for a scan to tell new, changed, moved and gone files apart.
+
+    Built row by row from the cursor: no list of all the rows is held beside the result, and each image is one small tuple."""
+    return {row[0]: StoredImage(row[1], row[2], row[3]) for row in conn.execute(
+        "SELECT file_path, file_id, hash, modified_at FROM image_data WHERE root_id = ?", (root_id,))}
 
 
 def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
@@ -245,9 +254,9 @@ def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modif
 
 
 def get_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
-    """Return the queued backlog rows that have failed fewer than ``max_attempts`` times (parked files are not queued)."""
+    """Return the queued backlog rows (file_path, root_id and the modified_at the scan saw) that have failed fewer than ``max_attempts`` times (parked files are not queued)."""
     rows = conn.execute(
-        "SELECT file_path, root_id FROM backlog WHERE status = 'queued' AND attempts < ? ORDER BY file_path",
+        "SELECT file_path, root_id, modified_at FROM backlog WHERE status = 'queued' AND attempts < ? ORDER BY file_path",
         (max_attempts,),
     ).fetchall()
     return [dict(row) for row in rows]
@@ -327,9 +336,58 @@ def update_embedding_settings(conn: sqlite3.Connection, model: str, digest: str 
                  (model, digest, dim))
 
 
-def list_records_for_embedding(conn: sqlite3.Connection) -> list[dict]:
-    """Every indexed image with what its search text is built from."""
-    return [dict(row) for row in conn.execute("SELECT file_id, file_path, vlm_metadata_json FROM image_data ORDER BY file_id")]
+def count_records_for_embedding(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM image_data").fetchone()[0]
+
+
+def iter_records_for_embedding(conn: sqlite3.Connection, size: int) -> Iterator[list[sqlite3.Row]]:
+    """Every indexed image with what its search text is built from (file_id, vlm_metadata_json), ``size`` rows at a time, in file_id order.
+
+    Only one batch is in memory at a time, however many images are indexed."""
+    last = _BEFORE_EVERY_ID
+    while True:
+        rows = conn.execute("SELECT file_id, vlm_metadata_json FROM image_data WHERE file_id > ? ORDER BY file_id LIMIT ?", (last, size)).fetchall()
+        if not rows:
+            return
+        yield rows
+        last = rows[-1]["file_id"]
+
+
+def create_embedding_staging(conn: sqlite3.Connection) -> None:
+    """Make an empty temporary table for the vectors a re-embed makes, until all of them are made.
+
+    A temporary table lives in SQLite's own temporary file, not in the database and not in memory, and goes away when the
+    connection closes: a re-embed that is stopped leaves nothing behind."""
+    conn.execute("DROP TABLE IF EXISTS temp.embedding_staging")
+    conn.execute("CREATE TEMP TABLE embedding_staging (file_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL)")
+
+
+def stage_embedding(conn: sqlite3.Connection, file_id: int, embedding_bytes: bytes) -> None:
+    conn.execute("INSERT OR REPLACE INTO temp.embedding_staging (file_id, embedding) VALUES (?, ?)", (file_id, embedding_bytes))
+
+
+def replace_embeddings_from_staging(conn: sqlite3.Connection, model: str, digest: str | None, dim: int, search_text_version: int) -> int:
+    """Put the staged vectors in place of the stored ones, with the model that made them, and mark their images as made with
+    ``search_text_version``. Returns how many. The caller's transaction makes it all-or-nothing."""
+    conn.execute(
+        """
+        INSERT INTO text_embeddings (file_id, embedding, created_at, embedding_model, embedding_digest, embedding_dim)
+        SELECT file_id, embedding, ?, ?, ?, ? FROM temp.embedding_staging WHERE true
+        ON CONFLICT(file_id) DO UPDATE SET
+            embedding        = excluded.embedding,
+            created_at       = excluded.created_at,
+            embedding_model  = excluded.embedding_model,
+            embedding_digest = excluded.embedding_digest,
+            embedding_dim    = excluded.embedding_dim
+        """,
+        (_now(), model, digest, dim),
+    )
+    conn.execute("UPDATE image_data SET search_text_version = ? WHERE file_id IN (SELECT file_id FROM temp.embedding_staging)", (search_text_version,))
+    return conn.execute("SELECT COUNT(*) FROM temp.embedding_staging").fetchone()[0]
+
+
+def drop_embedding_staging(conn: sqlite3.Connection) -> None:
+    conn.execute("DROP TABLE IF EXISTS temp.embedding_staging")
 
 
 def add_failure_history(conn: sqlite3.Connection, file_path: str, attempts: list[dict]) -> None:
@@ -412,9 +470,17 @@ def count_embeddings(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) AS n FROM text_embeddings").fetchone()["n"]
 
 
-def iter_embeddings(conn: sqlite3.Connection):
-    """Yield every stored (file_id, embedding blob) row without loading them all at once."""
-    return conn.execute("SELECT file_id, embedding FROM text_embeddings")
+def iter_embedding_batches(conn: sqlite3.Connection, size: int) -> Iterator[list[sqlite3.Row]]:
+    """Every stored (file_id, embedding blob) row, ``size`` rows at a time, in file_id order.
+
+    Only one batch is in memory at a time, however many images are indexed."""
+    last = _BEFORE_EVERY_ID
+    while True:
+        rows = conn.execute("SELECT file_id, embedding FROM text_embeddings WHERE file_id > ? ORDER BY file_id LIMIT ?", (last, size)).fetchall()
+        if not rows:
+            return
+        yield rows
+        last = rows[-1]["file_id"]
 
 
 def get_image_summary(conn: sqlite3.Connection, file_id: int) -> dict | None:

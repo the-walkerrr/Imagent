@@ -7,34 +7,14 @@ ends, however it ends (a crash, a power cut, a killed terminal). There is no sta
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 
 import config
+from os_specific.locking import lock, unlock
 
 
 class AlreadyRunning(RuntimeError):
     """The job is already running in another window; the message says so in plain words."""
-
-
-def _lock(handle) -> None:
-    if os.name == "nt":
-        import msvcrt
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _unlock(handle) -> None:
-    if os.name == "nt":
-        import msvcrt
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def is_running(name: str) -> bool:
@@ -55,10 +35,10 @@ def single_instance(name: str, what: str):
     config.IMAGENT_HOME.mkdir(parents=True, exist_ok=True)
     with open(config.IMAGENT_HOME / f"{name}.lock", "a+b") as handle:
         try:
-            _lock(handle)
+            lock(handle)
         except OSError as exc:
             raise AlreadyRunning(f"{what} is already running in another window. Wait for it to finish, then try again.") from exc
         try:
             yield
         finally:
-            _unlock(handle)
+            unlock(handle)

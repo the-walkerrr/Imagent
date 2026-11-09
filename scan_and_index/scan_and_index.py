@@ -48,7 +48,7 @@ try:
         get_backlog_paths_for_root,
         get_exhausted_backlog,
         get_or_add_root,
-        list_images_for_root,
+        images_by_path,
         list_roots,
         lookup_by_path,
         mark_root_scanned,
@@ -65,6 +65,8 @@ try:
     from image_processing import ocr
     from image_processing.hashing import compute_hash
     from image_processing.metadata import extract_file_metadata, iso_utc
+    from image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
+    from os_specific.files import is_not_downloaded
     from pipeline.console import make_output_safe, run_cli
     from pipeline.discovery import discover
     from pipeline.error_logger import log_error
@@ -124,6 +126,18 @@ def is_unchanged(existing: dict | None, file_hash: str, modified_at: str) -> boo
     return existing["hash"] == file_hash and existing["modified_at"] == modified_at
 
 
+def _changed_since_scan(image_path: Path, scanned_modified_at: str | None) -> bool:
+    """True if the file's modification time is not the one the scan saw: it changed after the scan, so it may still be being written.
+
+    A damaged-looking file that is still changing is not damaged yet; it is tried again later, and nothing is held against it."""
+    if not scanned_modified_at:
+        return False
+    try:
+        return iso_utc(os.stat(image_path).st_mtime) != scanned_modified_at
+    except OSError:
+        return False
+
+
 def classify_failure(exc: Exception) -> tuple[bool, bool]:
     """Return ``(counts_as_attempt, ollama_problem)`` for an exception raised while indexing one image.
 
@@ -170,6 +184,10 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     path_str = str(image_path)
     versions = settings.get("versions", {})
     on_stage("checking file")
+    if is_not_downloaded(os.stat(path_str)):  # evicted to cloud storage since the scan: reading it would download it
+        raise problem(NOT_DOWNLOADED, "The picture is kept in cloud storage and is not on this computer, and Imagent does not use the internet. "
+                                      "Make it available offline (download it), then scan again.",
+                      step="checked the file", park=False)
 
     # ------------------------------------------------------------------
     # Stage 1: file_scan — gather hash and file-level metadata
@@ -357,6 +375,9 @@ def _index_backlog() -> None:
                 except sqlite3.Error:
                     raise  # the database is the problem, not this image: handled below
                 except IndexingFailure as exc:
+                    if exc.kind == UNREADABLE and _changed_since_scan(image_path, row["modified_at"]):
+                        exc = ImageProblem(BUSY, "The file changed after it was scanned, so it may still be being written. It is tried again later.",
+                                           exc.attempts, park=False, report=False)
                     # Every step for this kind of trouble was tried, so trying again would only repeat them. The file is set
                     # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
                     # fault is not the file's, left queued with its attempts untouched.
@@ -554,6 +575,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         "unreadable_dirs": 0,
         "empty": 0,
         "bad_names": 0,
+        "not_downloaded": 0,
     }
 
     try:
@@ -572,6 +594,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         _warn_about(found.bad_names, "file(s) have a name that is not valid text", "rename them to have them indexed:")
         unseen = [str(folder) for folder in found.unreadable_dirs]
         on_disk: dict[str, str] = {}
+        not_downloaded: list[Path] = []  # in cloud storage, not on this computer: neither read (it would be downloaded) nor forgotten
         for file_path in found.images:
             try:
                 status = os.stat(file_path)
@@ -579,15 +602,22 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
                 counts["unreadable"] += 1
                 log_error(conn, stage="scan", exc=exc, file_path=str(file_path))
                 continue
+            if is_not_downloaded(status):
+                not_downloaded.append(file_path)
+                continue
             if status.st_size == 0:
                 counts["empty"] += 1
                 continue
             on_disk[str(file_path)] = iso_utc(status.st_mtime)
         counts["scanned"] = len(on_disk)
+        counts["not_downloaded"] = len(not_downloaded)
+        _warn_about(not_downloaded, "image(s) are in cloud storage and not downloaded to this computer",
+                    "they were not read, and what is indexed of them was kept:")
+        away = {str(path) for path in not_downloaded}
 
-        stored = {row["file_path"]: row for row in list_images_for_root(conn, root_id)}
-        # Whatever lies in a folder that could not be read is unknown, not gone.
-        vanished = [path for path in stored if path not in on_disk and not _inside(path, unseen)]
+        stored = images_by_path(conn, root_id)
+        # Whatever lies in a folder that could not be read is unknown, not gone; so is a file that is in the cloud only.
+        vanished = [path for path in stored if path not in on_disk and path not in away and not _inside(path, unseen)]
         new_paths = [path for path in on_disk if path not in stored]
 
         # A new path whose content equals that of a vanished one is the same image moved or renamed.
@@ -596,7 +626,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         if vanished and new_paths:
             vanished_by_hash = defaultdict(list)
             for path in vanished:
-                vanished_by_hash[stored[path]["hash"]].append(path)
+                vanished_by_hash[stored[path].hash].append(path)
             for path in new_paths:
                 try:
                     candidates = vanished_by_hash.get(compute_hash(path))
@@ -608,7 +638,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
                     moved[path] = candidates.pop(0)
         with conn:
             for new_path, old_path in moved.items():
-                update_image_location(conn, stored[old_path]["file_id"], new_path, on_disk[new_path])
+                update_image_location(conn, stored[old_path].file_id, new_path, on_disk[new_path])
         counts["moved"] = len(moved)
 
         # Files present before and now: unchanged, touched only, or modified.
@@ -616,11 +646,11 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
             row = stored.get(path)
             if row is None:
                 continue
-            if row["modified_at"] == modified_at:
+            if row.modified_at == modified_at:
                 counts["unchanged"] += 1
                 continue
             try:
-                content_changed = compute_hash(path) != row["hash"]
+                content_changed = compute_hash(path) != row.hash
             except OSError as exc:
                 counts["unreadable"] += 1
                 log_error(conn, stage="scan", exc=exc, file_path=path)
@@ -629,7 +659,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
                 if content_changed:
                     upsert_backlog(conn, path, root_id, modified_at)
                 else:  # a touch or a sync changed the timestamp, not the picture
-                    update_image_modified_at(conn, row["file_id"], modified_at)
+                    update_image_modified_at(conn, row.file_id, modified_at)
             counts["queued_modified" if content_changed else "unchanged"] += 1
 
         with conn:
@@ -649,9 +679,9 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
             counts["delete_blocked"] = len(gone)
             gone = []
         stale_queue = [path for path in get_backlog_paths_for_root(conn, root_id)
-                       if path not in on_disk and not _inside(path, unseen)]
+                       if path not in on_disk and path not in away and not _inside(path, unseen)]
         with conn:
-            counts["deleted"] = delete_images(conn, [stored[path]["file_id"] for path in gone])
+            counts["deleted"] = delete_images(conn, [stored[path].file_id for path in gone])
             delete_backlog_paths(conn, stale_queue)
 
         with conn:
@@ -846,6 +876,8 @@ def _scan_and_report(root: Path) -> None:
         print(f"Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
     if counts["empty"]:
         print(f"Skipped  : {counts['empty']} empty file(s)")
+    if counts["not_downloaded"]:
+        print(f"Skipped  : {counts['not_downloaded']} image(s) in cloud storage that are not downloaded to this computer")
     if counts["unreadable"]:
         print(f"Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
     print()

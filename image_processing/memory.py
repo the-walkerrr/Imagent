@@ -3,21 +3,18 @@ image_processing/memory.py — Decide whether an image fits in the memory this c
 
 No pixel count is fixed in advance: what an image may be depends on the machine, and on what else is using it. Before an
 image is opened its size is read from the file's header; if the memory it needs at its peak is more than the share of the
-free memory it may use, the image is set aside with the reason.
+free memory it may use, the image is set aside with the reason. When this computer will not say how much memory is free,
+Pillow's own limit stands in for it (see image_processing/__init__.py), so an image is never let through unchecked.
 """
 
 from __future__ import annotations
 
-import ctypes
-import platform
-import re
-import subprocess
-from pathlib import Path
-
 from PIL import Image
 
 import config
+from image_processing import PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN
 from image_processing.problems import TOO_LARGE, explain, problem
+from os_specific.memory import available_memory
 
 # Bytes of memory one pixel needs at the peak of reading an image, by the picture's mode. Pillow keeps a decoded picture in
 # 1 byte a pixel for the modes 1, L and P, 2 for the 16-bit gray ones and 4 for every other (RGB too: it is padded to 4; the
@@ -55,56 +52,28 @@ def _is_turned(img: Image.Image) -> bool:
     return img.getexif().get(_EXIF_ORIENTATION, 1) in _TURNED
 
 
-def _parse_meminfo(text: str) -> int | None:
-    for line in text.splitlines():
-        if line.startswith("MemAvailable:"):
-            return int(line.split()[1]) * 1024
-    return None
-
-
-def _parse_vm_stat(text: str) -> int | None:
-    size = re.search(r"page size of (\d+) bytes", text)
-    pages = {name: int(count) for name, count in re.findall(r"Pages (free|inactive|speculative):\s+(\d+)", text)}
-    if not size or len(pages) < 3:
-        return None
-    return (pages["free"] + pages["inactive"] + pages["speculative"]) * int(size.group(1))
-
-
-class _MemoryStatus(ctypes.Structure):
-    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-
-def available_memory() -> int | None:
-    """Bytes of memory free for a program to use right now, or None if this computer will not say."""
-    try:
-        system = platform.system()
-        if system == "Linux":
-            return _parse_meminfo(Path("/proc/meminfo").read_text())
-        if system == "Darwin":
-            return _parse_vm_stat(subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout)
-        if system == "Windows":
-            status = _MemoryStatus()
-            status.dwLength = ctypes.sizeof(status)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-            return int(status.ullAvailPhys)
-    except Exception:
-        pass
-    return None
-
-
 def fits_in_memory(width: int, height: int, bytes_per_pixel: int, available: int | None, share: float | None = None) -> bool:
-    """Whether an image of this size fits in the memory free (None: not known, so there is nothing to check against).
+    """Whether an image of this size fits in the memory free.
 
+    ``available`` None means this computer does not say; the image then fits if it is within Pillow's own limit.
     ``bytes_per_pixel``: what a pixel of the image needs at the peak (``peak_bytes_per_pixel``).
     ``share`` is the part of the free memory the image may use; ``config.IMAGE_MEMORY_SHARE`` unless given.
     """
     if available is None:
-        return True
+        return PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN is None or width * height <= PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN
     budget = available * (config.IMAGE_MEMORY_SHARE if share is None else share)
     return width * height * bytes_per_pixel <= budget
+
+
+def exif_can_be_read(img: Image.Image) -> bool:
+    """Whether the EXIF of the opened picture can be asked for without risking the memory.
+
+    A PNG whose header has no EXIF chunk is the exception: Pillow then reads to the end of the file for one, which decodes the
+    whole picture, so it is asked only when the picture fits in the memory free. Every other format keeps its EXIF in the header."""
+    if img.format != "PNG" or "exif" in img.info:
+        return True
+    width, height = img.size
+    return fits_in_memory(width, height, peak_bytes_per_pixel(img.mode), available_memory())
 
 
 def check_image_size(path: str, share: float | None = None) -> None:
@@ -121,8 +90,12 @@ def check_image_size(path: str, share: float | None = None) -> None:
     share = config.IMAGE_MEMORY_SHARE if share is None else share
     if not fits_in_memory(width, height, bytes_per_pixel, available, share):
         megapixels = width * height / 1_000_000
-        detail = (f"more than the memory free right now allows: it needs about {width * height * bytes_per_pixel // 10**6} MB "
-                  f"and {int(available * share) // 10**6} MB can be used")
-        raise problem(TOO_LARGE, f"The picture has {megapixels:.0f} megapixels, more than the memory free right now allows. "
-                                 "Close other programs, then scan again.",
+        if available is None:
+            detail = f"this computer does not say how much memory is free, and the picture is more than Pillow's own limit of {PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN} pixels"
+            advice = "this computer does not say how much memory is free, so only a picture that is not very large can be read. Save a smaller copy of it from a photo app, then scan again."
+        else:
+            detail = (f"more than the memory free right now allows: it needs about {width * height * bytes_per_pixel // 10**6} MB "
+                      f"and {int(available * share) // 10**6} MB can be used")
+            advice = "more than the memory free right now allows. Close other programs, then scan again."
+        raise problem(TOO_LARGE, f"The picture has {megapixels:.0f} megapixels, {advice}",
                       step="checked the size", detail=f"{megapixels:.0f} megapixels, {detail}", park=False)

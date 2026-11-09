@@ -93,21 +93,50 @@ def make_extremes(folder: Path, target_bytes: int = TARGET_BYTES, say: Callable[
     good = io.BytesIO()
     Image.fromarray(np.random.default_rng(1).integers(0, 256, (600, 800, 3), dtype=np.uint8)).save(good, format="JPEG")
     jpeg = good.getvalue()
-    (folder / "damaged-cut-off.jpg").write_bytes(jpeg[: len(jpeg) * 6 // 10])
-    (folder / "damaged-empty.jpg").write_bytes(b"")
-    (folder / "damaged-not-a-picture.png").write_bytes(b"This is text, not a picture.\n" * 40)
-    made.update({"damaged-cut-off.jpg": "damaged", "damaged-empty.jpg": "damaged", "damaged-not-a-picture.png": "damaged"})
+    png = io.BytesIO()
+    Image.fromarray(np.random.default_rng(2).integers(0, 256, (300, 400, 3), dtype=np.uint8)).save(png, format="PNG")
+    whole_png = png.getvalue()
+    # What damage looks like in practice: a copy that stopped half way, an empty file, a file that is not a picture at all,
+    # a header with nothing after it, and a JPEG start followed by noise.
+    damaged = {
+        "damaged-cut-off.jpg": jpeg[: len(jpeg) * 6 // 10],
+        "damaged-empty.jpg": b"",
+        "damaged-not-a-picture.png": b"This is text, not a picture.\n" * 40,
+        "damaged-cut-off.png": whole_png[: len(whole_png) // 2],
+        "damaged-header-only.png": whole_png[:8],
+        "damaged-noise-after-jpeg-start.jpg": b"\xff\xd8\xff\xe0" + np.random.default_rng(3).bytes(4000),
+    }
+    for name, content in damaged.items():
+        (folder / name).write_bytes(content)
+        made[name] = "damaged"
 
+    animated = [Image.new("RGB", (120, 90), colour) for colour in ((255, 0, 0), (0, 255, 0), (0, 0, 255))]
+    sideways = Image.Exif()
+    sideways[0x0112] = 6  # stored sideways: shown turned a quarter
+    palette = Image.new("P", (200, 150))
+    palette.putpalette([0, 0, 0, 255, 128, 0] + [0] * 762)
+    palette.paste(1, (50, 40, 150, 110))
     odd = {
         "odd-transparent.png": Image.new("RGBA", (400, 300), (0, 0, 0, 0)),
         "odd-sixteen-bit.png": Image.fromarray((np.arange(300 * 400, dtype=np.uint32).reshape(300, 400) % 65536).astype(np.uint16)),
         "odd-cmyk.jpg": Image.new("CMYK", (400, 300), (10, 80, 200, 20)),
         "odd-panorama.jpg": Image.new("RGB", (12000, 300), (90, 140, 200)),
+        "odd-tall-and-thin.jpg": Image.new("RGB", (40, 9000), (200, 140, 90)),
         "odd-one-pixel.png": Image.new("RGB", (1, 1), (255, 0, 0)),
+        "odd-black-and-white.png": Image.new("1", (300, 200), 1),
+        "odd-grey-with-transparency.png": Image.new("LA", (300, 200), (128, 200)),
+        "odd-palette.png": palette,
     }
     for name, picture in odd.items():
         picture.save(folder / name)
         made[name] = "read"
+    animated[0].save(folder / "odd-animated.gif", save_all=True, append_images=animated[1:], duration=100, loop=0)
+    Image.new("RGB", (600, 300), (30, 90, 160)).save(folder / "odd-stored-sideways.jpg", exif=sideways)
+    (folder / "odd-capital-extension.JPG").write_bytes(jpeg)
+    (folder / "odd-a-jpeg-named-png.png").write_bytes(jpeg)  # Pillow goes by what is inside, not by the name
+    (folder / "odd name (with spaces, an accent é and # % &).jpg").write_bytes(jpeg)  # what no file name should be able to break
+    made.update({name: "read" for name in ("odd-animated.gif", "odd-stored-sideways.jpg", "odd-capital-extension.JPG",
+                                           "odd-a-jpeg-named-png.png", "odd name (with spaces, an accent é and # % &).jpg")})
     return made
 
 
