@@ -14,7 +14,8 @@ import config
 from image_processing import memory, ocr
 from image_processing.features import extract_image_features
 from image_processing.preprocess import preprocess_image
-from image_processing.problems import BUSY, OCR_FAILED, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
+from os_specific import memory as os_memory
+from image_processing.problems import OCR_FAILED, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
 from pipeline.failure import IndexingFailure
 from tests.support import IsolatedHome
 from vlm import analyzer
@@ -27,10 +28,10 @@ VM_STAT = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages fr
 
 class MemoryTests(unittest.TestCase):
     def test_free_memory_is_read_from_what_each_system_says(self):
-        self.assertEqual(memory._parse_meminfo(MEMINFO), 8000000 * 1024)
-        self.assertEqual(memory._parse_vm_stat(VM_STAT), (100 + 50 + 10) * 16384)
-        self.assertIsNone(memory._parse_meminfo("MemTotal: 1 kB\n"))
-        self.assertIsNone(memory._parse_vm_stat("nonsense"))
+        self.assertEqual(os_memory._parse_meminfo(MEMINFO), 8000000 * 1024)
+        self.assertEqual(os_memory._parse_vm_stat(VM_STAT), (100 + 50 + 10) * 16384)
+        self.assertIsNone(os_memory._parse_meminfo("MemTotal: 1 kB\n"))
+        self.assertIsNone(os_memory._parse_vm_stat("nonsense"))
 
     def test_an_image_fits_when_the_memory_it_needs_is_within_the_share_and_this_scales_with_the_memory(self):
         pixels, per_pixel = 10_000_000, memory.peak_bytes_per_pixel("RGB")  # a 10 megapixel image
@@ -65,8 +66,13 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(memory.peak_bytes_per_pixel("RGBA", turned=True), memory.peak_bytes_per_pixel("RGBA"))  # the copies are not held together
         self.assertEqual(memory.peak_bytes_per_pixel("L", turned=True), memory.peak_bytes_per_pixel("L"))
 
-    def test_when_free_memory_is_not_known_there_is_nothing_to_check_against(self):
-        self.assertTrue(memory.fits_in_memory(100_000, 100_000, 9, None))
+    def test_when_free_memory_is_not_known_pillows_own_limit_decides(self):
+        limit = memory.PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN
+        self.assertIsNotNone(limit)  # read from Pillow when the package is imported
+        self.assertTrue(memory.fits_in_memory(limit, 1, 9, None))
+        self.assertFalse(memory.fits_in_memory(limit + 1, 1, 9, None))
+        with mock.patch.object(memory, "PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN", None):
+            self.assertTrue(memory.fits_in_memory(100_000, 100_000, 9, None))  # a Pillow with no limit of its own: nothing to check against
 
     def test_pillows_own_pixel_limit_is_off(self):
         self.assertIsNone(Image.MAX_IMAGE_PIXELS)
@@ -78,10 +84,50 @@ class CheckImageSizeTests(IsolatedHome):
         with mock.patch.object(memory, "available_memory", return_value=10**12):
             self.assertIsNone(memory.check_image_size(str(image)))
 
-    def test_when_free_memory_is_not_known_the_image_is_let_through(self):
+    def test_when_free_memory_is_not_known_a_small_image_is_let_through(self):
         image = self.make_image(self.work / "a.png")
         with mock.patch.object(memory, "available_memory", return_value=None):
             self.assertIsNone(memory.check_image_size(str(image)))
+
+    def test_when_free_memory_is_not_known_pillows_own_limit_stands_in_for_it(self):
+        image = self.make_image(self.work / "a.png")  # 64 pixels
+        with mock.patch.object(memory, "available_memory", return_value=None), \
+                mock.patch.object(memory, "PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN", 63), self.assertRaises(ImageProblem) as raised:
+            memory.check_image_size(str(image))
+        self.assertEqual((raised.exception.kind, raised.exception.park), (TOO_LARGE, False))
+        self.assertIn("does not say how much memory is free", str(raised.exception))
+        with mock.patch.object(memory, "available_memory", return_value=None), mock.patch.object(memory, "PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN", 64):
+            self.assertIsNone(memory.check_image_size(str(image)))  # exactly the limit is still let through
+
+    def test_the_limit_used_when_memory_is_not_known_is_twice_pillows_own_default_read_from_pillow(self):
+        import importlib
+        import image_processing
+        with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 1000):
+            importlib.reload(image_processing)
+            self.assertEqual(image_processing.PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN, 2000)
+        with mock.patch.object(Image, "MAX_IMAGE_PIXELS", None):
+            importlib.reload(image_processing)
+            self.assertIsNone(image_processing.PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN)
+        importlib.reload(image_processing)  # Pillow's limit is off again, as in production
+
+    def test_exif_of_a_png_without_an_exif_chunk_is_not_asked_for_when_that_would_decode_a_picture_too_large(self):
+        path = self.make_image(self.work / "a.png")  # 64 pixels of RGB: 320 bytes
+        with Image.open(path) as img:
+            with mock.patch.object(memory, "available_memory", return_value=100):
+                self.assertFalse(memory.exif_can_be_read(img))
+            with mock.patch.object(memory, "available_memory", return_value=10**12):
+                self.assertTrue(memory.exif_can_be_read(img))
+
+    def test_exif_is_asked_for_in_every_other_case(self):
+        jpeg = self.make_image(self.work / "a.jpg")
+        with Image.open(jpeg) as img, mock.patch.object(memory, "available_memory", return_value=1):
+            self.assertTrue(memory.exif_can_be_read(img))  # a JPEG keeps its EXIF in the header
+        with_exif = self.work / "exif.png"
+        exif = Image.Exif()
+        exif[0x010F] = "Maker"
+        Image.new("RGB", (8, 8)).save(with_exif, exif=exif)
+        with Image.open(with_exif) as img, mock.patch.object(memory, "available_memory", return_value=1):
+            self.assertTrue(memory.exif_can_be_read(img))  # a PNG with an EXIF chunk in its header too
 
     def test_a_larger_share_lets_an_image_through_that_the_usual_share_refuses(self):
         image = self.make_image(self.work / "a.png")  # 64 pixels of RGB: 320 bytes
@@ -129,7 +175,7 @@ class CheckImageSizeTests(IsolatedHome):
     def test_a_file_that_is_not_an_image_is_unreadable(self):
         bad = self.work / "bad.png"
         bad.write_bytes(b"this is not a picture")
-        with mock.patch.object(config, "FILE_SETTLE_SECONDS", 0), self.assertRaises(ImageProblem) as raised:
+        with self.assertRaises(ImageProblem) as raised:
             memory.check_image_size(str(bad))
         self.assertEqual((raised.exception.kind, raised.exception.retry_when), (UNREADABLE, "file_changed"))
 
@@ -147,16 +193,14 @@ class ExplainTests(unittest.TestCase):
         self.assertIsNone(explain(PermissionError(13, "denied"), "/a.png"))  # a real I/O error carries an error number
         self.assertIsNone(explain(ValueError("x"), "/a.png"))
 
-    def test_a_file_still_being_written_is_not_held_against_it(self):
-        with mock.patch("image_processing.problems.file_is_changing", return_value=True):
-            found = explain(OSError("image file is truncated"), "/a.png")
-        self.assertEqual((found.kind, found.park), (BUSY, False))
-
     def test_pillows_errors_are_told_from_memory_trouble(self):
-        with mock.patch("image_processing.problems.file_is_changing", return_value=False):
-            self.assertEqual(explain(OSError("image file is truncated"), "/a.png").kind, UNREADABLE)
-            self.assertEqual(explain(SyntaxError("broken PNG file"), "/a.png").kind, UNREADABLE)
+        self.assertEqual(explain(OSError("image file is truncated"), "/a.png").kind, UNREADABLE)
+        self.assertEqual(explain(SyntaxError("broken PNG file"), "/a.png").kind, UNREADABLE)
         self.assertEqual(explain(MemoryError(), "/a.png").kind, TOO_LARGE)
+
+    def test_explaining_a_damaged_file_never_waits(self):
+        with mock.patch("time.sleep", side_effect=AssertionError("it waited")):
+            self.assertEqual(explain(OSError("image file is truncated"), "/a.png").kind, UNREADABLE)
 
 
 class PreparingTests(IsolatedHome):
@@ -288,7 +332,7 @@ class OcrTests(IsolatedHome):
         engine = FakeEngine()
         bad = self.work / "bad.png"
         bad.write_bytes(b"not a picture")
-        with mock.patch.object(config, "FILE_SETTLE_SECONDS", 0), mock.patch.object(ocr, "_engine", functools.lru_cache(maxsize=1)(lambda: engine)):
+        with mock.patch.object(ocr, "_engine", functools.lru_cache(maxsize=1)(lambda: engine)):
             with self.assertRaises(ImageProblem) as raised:
                 ocr.extract_text_blocks(str(bad))
         self.assertEqual(raised.exception.kind, UNREADABLE)
@@ -341,8 +385,7 @@ class AnalyseImageOrderTests(unittest.TestCase):
     def test_an_error_from_pillow_while_preparing_becomes_a_problem_with_the_image(self):
         def fail(*args, **kwargs):
             raise UnidentifiedImageError("cannot identify image file")
-        with mock.patch.object(config, "FILE_SETTLE_SECONDS", 0):
-            result, calls = self.run_analysis(preprocess_image=fail)
+        result, calls = self.run_analysis(preprocess_image=fail)
         self.assertEqual((type(result), result.kind), (ImageProblem, UNREADABLE))
         self.assertNotIn("model", calls)
 
@@ -435,3 +478,43 @@ class LargeImageFreesTheModelsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataGuardTests(IsolatedHome):
+    """Reading a picture's metadata is the first thing indexing does, before the size check: it must not decode a picture that does not fit."""
+
+    def test_a_png_too_large_to_decode_is_not_decoded_to_read_its_metadata(self):
+        from image_processing.metadata import extract_file_metadata
+        path = self.make_image(self.work / "a.png")
+        with mock.patch.object(memory, "available_memory", return_value=100), \
+                mock.patch.object(PngImageFile, "load", side_effect=AssertionError("decoded the picture")):
+            meta = extract_file_metadata(str(path))
+        self.assertEqual((meta["width"], meta["height"]), (8, 8))  # the size comes from the header
+        self.assertIsNone(meta["camera_make"])
+
+    def test_a_png_that_fits_still_has_its_exif_read(self):
+        from image_processing.metadata import extract_file_metadata
+        path = self.work / "a.png"
+        exif = Image.Exif()
+        exif[0x010F] = "Maker"
+        Image.new("RGB", (8, 8)).save(path, exif=exif)
+        with mock.patch.object(memory, "available_memory", return_value=10**12):
+            self.assertEqual(extract_file_metadata(str(path))["camera_make"], "Maker")
+
+
+class MimeTypeTests(IsolatedHome):
+    def test_the_formats_imagent_reads_have_a_type_whatever_the_computers_own_list_says(self):
+        from image_processing.metadata import extract_file_metadata
+        expected = {".heic": "image/heic", ".HEIF": "image/heif", ".avif": "image/avif", ".webp": "image/webp", ".jpg": "image/jpeg", ".tif": "image/tiff"}
+        with mock.patch("mimetypes.guess_type", return_value=(None, None)):  # a computer whose list has none of them
+            for suffix, mime in expected.items():
+                path = self.work / f"a{suffix}"
+                path.write_bytes(b"x")  # not a picture: the type comes from the name
+                self.assertEqual(extract_file_metadata(str(path))["mime_type"], mime, suffix)
+
+    def test_a_name_that_is_not_one_of_them_still_asks_the_computer(self):
+        from image_processing.metadata import extract_file_metadata
+        path = self.work / "a.xyz"
+        path.write_bytes(b"x")
+        with mock.patch("mimetypes.guess_type", return_value=("image/x-odd", None)):
+            self.assertEqual(extract_file_metadata(str(path))["mime_type"], "image/x-odd")

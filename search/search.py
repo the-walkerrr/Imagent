@@ -10,8 +10,9 @@ Pipeline:
   2. understand_query — an LLM drafts a hypothetical description of the image the query
      asks for (HyDE), and that description is embedded too. If this fails, the search
      continues with the query embedding alone.
-  3. Cosine similarity of each embedding to every stored image embedding; an image's
-     score is the mean of the similarities it has.
+  3. Cosine similarity of each embedding to every stored image embedding, read a batch at a
+     time (so memory does not grow with the number of images); an image's score is the mean of
+     the similarities it has.
   4. The top ``config.UNCERTAIN_TOP_K`` images by score whose file still exists are returned.
      There is no cut-off: the closest images are returned however weak the match.
 
@@ -38,7 +39,7 @@ try:
     from db.operations import (
         count_embeddings,
         get_image_summary,
-        iter_embeddings,
+        iter_embedding_batches,
     )
     from pipeline.console import make_output_safe, run_cli
     from pipeline.error_logger import log_error
@@ -55,34 +56,48 @@ except ModuleNotFoundError as exc:
 # Ranking
 # ---------------------------------------------------------------------------
 
-def _load_embeddings(conn, dim: int) -> tuple[list[int], np.ndarray, int]:
-    """Load every stored embedding into one unit-length float32 matrix, one row per image.
+def _unit(embedding: list[float]) -> np.ndarray:
+    """An embedding as a unit-length float32 vector: cosine similarity is then a plain dot product."""
+    vector = np.array(embedding, dtype=np.float32)
+    vector /= np.linalg.norm(vector) + 1e-10
+    return vector
 
-    Decoded straight into a preallocated array (never into Python lists), so memory use is
-    about ``images * dim * 4`` bytes whatever the machine. Rows whose size is not ``dim``
-    floats are skipped and counted (a defensive check: the models are locked, so none are expected).
+
+def _best_matches(conn, dim: int, query_embeddings: list[list[float]], keep: int) -> tuple[list[int], np.ndarray, int]:
+    """The ``keep`` stored images closest to the queries: ``(file_ids, similarities, skipped)``, best first.
+
+    ``similarities`` has a row per image and a column per query (the cosine similarity of that query's embedding to the image's);
+    the closest is the one with the highest mean over the columns. The embeddings are read ``config.DB_BATCH_ROWS`` at a time and
+    only the best ``keep`` so far are held, so memory use is about ``DB_BATCH_ROWS * dim * 4`` bytes whatever the number of
+    images. Rows whose size is not ``dim`` floats are skipped and counted (a defensive check: the models are locked, so none
+    are expected).
     """
-    matrix = np.empty((count_embeddings(conn), dim), dtype=np.float32)
-    file_ids: list[int] = []
+    queries = np.stack([_unit(embedding) for embedding in query_embeddings])
+    best_ids = np.empty(0, dtype=np.int64)
+    best_scores = np.empty((0, len(queries)), dtype=np.float32)
     skipped = 0
-    for row in iter_embeddings(conn):
-        blob = row["embedding"]
-        if len(blob) != dim * 4 or len(file_ids) >= len(matrix):
-            skipped += 1
+    for rows in iter_embedding_batches(conn, config.DB_BATCH_ROWS):
+        batch = np.empty((len(rows), dim), dtype=np.float32)
+        ids = []
+        for row in rows:
+            blob = row["embedding"]
+            if len(blob) != dim * 4:
+                skipped += 1
+                continue
+            batch[len(ids)] = np.frombuffer(blob, dtype="<f4")  # stored little-endian on every platform
+            ids.append(row["file_id"])
+        if not ids:
             continue
-        matrix[len(file_ids)] = np.frombuffer(blob, dtype="<f4")  # stored little-endian on every platform
-        file_ids.append(row["file_id"])
-    matrix = matrix[: len(file_ids)]
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    matrix /= norms + 1e-10  # cosine similarity is then a plain dot product
-    return file_ids, matrix, skipped
-
-
-def _similarities(matrix: np.ndarray, query_embedding: list[float]) -> np.ndarray:
-    """Cosine similarity of a query embedding to every loaded embedding, in the matrix's row order."""
-    query_vec = np.array(query_embedding, dtype=np.float32)
-    query_vec /= np.linalg.norm(query_vec) + 1e-10
-    return matrix @ query_vec
+        batch = batch[: len(ids)]
+        batch /= np.sqrt(np.einsum("ij,ij->i", batch, batch))[:, None] + 1e-10  # no full-size temporary, as np.linalg.norm would make
+        ids_all = np.concatenate([best_ids, np.array(ids, dtype=np.int64)])
+        scores_all = np.concatenate([best_scores, batch @ queries.T])
+        if len(ids_all) > keep:
+            closest = np.argpartition(-scores_all.mean(axis=1), keep - 1)[:keep]
+            ids_all, scores_all = ids_all[closest], scores_all[closest]
+        best_ids, best_scores = ids_all, scores_all
+    order = np.argsort(-best_scores.mean(axis=1), kind="stable")
+    return [int(file_id) for file_id in best_ids[order]], best_scores[order], skipped
 
 
 # ---------------------------------------------------------------------------
@@ -185,35 +200,35 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             # fall back to the query embedding alone.
 
         progress.step("Comparing images")
-        file_ids, matrix, skipped_dim = _load_embeddings(conn, settings["embedding_dim"])
+        queries = [query_embedding] if hyde_embedding is None else [query_embedding, hyde_embedding]
+        # Enough of the closest to still find UNCERTAIN_TOP_K whose file exists after skipping up to SEARCH_MAX_MISSING_SKIPPED that do not.
+        file_ids, similarities, skipped_dim = _best_matches(conn, settings["embedding_dim"], queries,
+                                                            config.UNCERTAIN_TOP_K + config.SEARCH_MAX_MISSING_SKIPPED)
         if skipped_dim:
             progress.say(f"Skipped {skipped_dim} embedding(s) with an unexpected size.")
         if not file_ids:
             return []
-
-        query_scores = _similarities(matrix, query_embedding)
-        hyde_scores = _similarities(matrix, hyde_embedding) if hyde_embedding is not None else None
-        scores = query_scores if hyde_scores is None else (query_scores + hyde_scores) / 2
+        scores = similarities.mean(axis=1)
 
         results: list[dict] = []
         missing = 0
-        for row in np.argsort(-scores):
+        for row, file_id in enumerate(file_ids):
             if len(results) >= config.UNCERTAIN_TOP_K or missing >= config.SEARCH_MAX_MISSING_SKIPPED:
                 break
-            summary = get_image_summary(conn, file_ids[row])
+            summary = get_image_summary(conn, file_id)
             if summary is None:
                 continue
             if not os.path.exists(summary["file_path"]):  # moved or deleted since the last scan, or on a drive that is not connected
                 missing += 1
                 continue
             results.append({
-                "file_id": file_ids[row],
+                "file_id": file_id,
                 "file_path": summary["file_path"],
                 "short_description": summary["short_description"],
                 "description": summary["description"],
                 "score": float(scores[row]),
-                "query_score": float(query_scores[row]),
-                "hyde_score": None if hyde_scores is None else float(hyde_scores[row]),
+                "query_score": float(similarities[row, 0]),
+                "hyde_score": None if hyde_embedding is None else float(similarities[row, 1]),
             })
         if missing:
             progress.say(f"Skipped {missing} closer match(es) whose file is missing "

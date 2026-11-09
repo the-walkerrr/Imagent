@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -23,9 +24,6 @@ class Folder(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.folder = Path(tmp.name) / "pictures"
-        patcher = mock.patch.object(config, "FILE_SETTLE_SECONDS", 0)  # a damaged file is not watched for being written
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
 
 class ShippedZipTests(Folder):
@@ -84,7 +82,7 @@ class MadePicturesTests(Folder):
         said = []
         outcomes = sample_pictures.check_pictures(self.folder, expected, say=said.append)
         self.assertEqual(said, [])  # every picture came to what it should
-        self.assertEqual(outcomes.get("damaged"), 3)
+        self.assertEqual(outcomes.get("damaged"), 6)
         self.assertNotIn("unexpected", outcomes)
 
     def test_a_picture_that_expands_to_more_pixels_than_the_memory_holds_is_too_large_not_an_error(self):
@@ -114,13 +112,42 @@ class MadePicturesTests(Folder):
         self.assertEqual(said, ["damaged-empty.jpg came to 'damaged', not 'read'."])
 
     def test_odd_ways_of_storing_colour_are_read(self):
-        sample_pictures.make_extremes(self.folder, target_bytes=SMALL)
-        for name in ("odd-transparent.png", "odd-sixteen-bit.png", "odd-cmyk.jpg", "odd-panorama.jpg", "odd-one-pixel.png"):
+        made = sample_pictures.make_extremes(self.folder, target_bytes=SMALL)
+        odd = [name for name in made if name.startswith("odd")]
+        self.assertGreaterEqual(len(odd), 14)
+        for name in odd:
             with Image.open(self.folder / name) as picture:
-                picture.load()  # they are real pictures
-        outcomes = sample_pictures.check_pictures(self.folder, {n: "read" for n in ("odd-transparent.png", "odd-sixteen-bit.png",
-                                                                                   "odd-cmyk.jpg", "odd-panorama.jpg", "odd-one-pixel.png")})
+                picture.load()  # they are real pictures, whatever the name says
+        outcomes = sample_pictures.check_pictures(self.folder, {name: "read" for name in odd})
         self.assertNotIn("unexpected", outcomes)
+
+    def test_the_edge_cases_a_real_library_has_are_all_there(self):
+        made = sample_pictures.make_extremes(self.folder, target_bytes=SMALL)
+        for name in ("odd-palette.png", "odd-animated.gif", "odd-stored-sideways.jpg", "odd-tall-and-thin.jpg", "odd-black-and-white.png",
+                     "odd-grey-with-transparency.png", "odd-capital-extension.JPG", "odd-a-jpeg-named-png.png",
+                     "damaged-cut-off.png", "damaged-header-only.png", "damaged-noise-after-jpeg-start.jpg",
+                     "odd name (with spaces, an accent é and # % &).jpg"):
+            self.assertIn(name, made)
+            self.assertTrue((self.folder / name).is_file(), name)
+        with Image.open(self.folder / "odd-animated.gif") as gif:
+            self.assertGreater(gif.n_frames, 1)
+        with Image.open(self.folder / "odd-stored-sideways.jpg") as sideways:
+            self.assertEqual(sideways.getexif().get(0x0112), 6)
+        with Image.open(self.folder / "odd-palette.png") as palette:
+            self.assertEqual(palette.mode, "P")
+
+    def test_every_picture_made_comes_to_what_it_was_made_to(self):
+        made = sample_pictures.make_extremes(self.folder, target_bytes=SMALL)
+        said = []
+        sample_pictures.check_pictures(self.folder, made, say=said.append)
+        self.assertEqual(said, [])
+
+    def test_the_pictures_are_made_on_every_system_with_names_every_system_can_keep(self):
+        made = sample_pictures.make_extremes(self.folder, target_bytes=SMALL)
+        for name in made:
+            self.assertEqual(name, os.path.basename(name))  # one flat folder, as the unpacking of the zip is
+            self.assertFalse(set(name) & set('<>:"/\\|?*'), name)  # nothing Windows refuses in a file name
+            self.assertFalse(name.endswith((" ", ".")), name)
 
 
 class SetupStepTests(unittest.TestCase):
