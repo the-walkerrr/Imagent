@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 import config
@@ -22,6 +24,22 @@ def make_output_safe() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(errors="replace")
+
+
+def file_link(text: str, path: str | Path, stream=None) -> str:
+    """``text`` as a link that opens the file ``path`` in the system's default viewer when clicked
+    (Cmd+click or Ctrl+click in most terminals). Plain ``text`` when ``stream`` is not a terminal.
+
+    The terminal is told exactly which file the text stands for, so a click does not depend on it guessing
+    where a path starts and ends (spaces, non-ASCII names and wrapped lines defeat that guess)."""
+    stream = stream or sys.stdout
+    if not stream.isatty() or os.environ.get("TERM") == "dumb":
+        return text
+    try:
+        uri = Path(path).absolute().as_uri()
+    except ValueError:
+        return text
+    return f"\033]8;;{uri}\033\\{text}\033]8;;\033\\"
 
 
 def _save_traceback() -> str | None:

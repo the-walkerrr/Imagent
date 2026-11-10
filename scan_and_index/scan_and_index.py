@@ -67,7 +67,7 @@ try:
     from image_processing.metadata import extract_file_metadata, iso_utc
     from image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
     from os_specific.files import is_not_downloaded
-    from pipeline.console import make_output_safe, run_cli
+    from pipeline.console import file_link, make_output_safe, run_cli
     from pipeline.discovery import discover
     from pipeline.error_logger import log_error
     from pipeline.failure import IndexingFailure, RunStopped
@@ -516,7 +516,7 @@ def print_failed(conn, limit: int | None = 10) -> int:
     print(f"\n{len(failed)} image(s) could not be indexed:")
     width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
     for item in failed[:limit]:
-        print(f"\n  {item['file_path']}")
+        print(f"\n  {file_link(item['file_path'], item['file_path'])}")
         print(textwrap.fill(item["last_error"] or "No reason was recorded.", width, initial_indent="    ", subsequent_indent="    "))
     if limit is not None and len(failed) > limit:
         print(f"\n  … and {len(failed) - limit} more. Choose \"Show the images that could not be indexed\" in the menu to see them all.")

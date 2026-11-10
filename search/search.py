@@ -41,7 +41,7 @@ try:
         get_image_summary,
         iter_embedding_batches,
     )
-    from pipeline.console import make_output_safe, run_cli
+    from pipeline.console import file_link, make_output_safe, run_cli
     from pipeline.error_logger import log_error
     from pipeline.locking import is_running
     from pipeline.progress import SearchProgress
@@ -247,7 +247,8 @@ def _show(query: str, results: list[dict]) -> None:
     print(f"\nTop {len(results)} result(s) for: {query!r}\n")
     bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
     for position, result in enumerate(results, start=1):
-        name = f"\033[1m{result['file_path']}\033[0m" if bold else result["file_path"]
+        name = file_link(result["file_path"], result["file_path"])
+        name = f"\033[1m{name}\033[0m" if bold else name
         print(f"{position}. {name}")
         print(f"   {result['description']}")
         print(f"   score={result['score']:.3f}")

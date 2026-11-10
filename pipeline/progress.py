@@ -22,6 +22,8 @@ import threading
 import time
 from pathlib import Path
 
+from pipeline.console import file_link
+
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _REFRESH_SECONDS = 0.2
 _TIMED = ("indexed", "updated", "FAILED")  # results that took real work, so their time is shown
@@ -60,6 +62,7 @@ class Progress:
         self._lock = threading.Lock()
         self._index = 0
         self._name = ""
+        self._path = ""
         self._stage = ""
         self._started = 0.0
         self._active = False  # an image is being processed, so its two lines are shown
@@ -74,6 +77,7 @@ class Progress:
         with self._lock:
             self._index = index
             self._name = Path(path).name
+            self._path = path
             self._stage = "starting"
             self._started = time.monotonic()
             self._active = True
@@ -135,7 +139,8 @@ class Progress:
     def _name_line(self, width: int) -> str:
         """The file name, with its place in the run after it."""
         position = f"({self._index:>{self._digits}}/{self._total})"
-        return f"{self._paint(_clip(self._name, width - len(position) - 2), '1')}  {self._paint(position, '2')}"
+        name = file_link(_clip(self._name, width - len(position) - 2), self._path, self._stream)
+        return f"{self._paint(name, '1')}  {self._paint(position, '2')}"
 
     def _erase(self) -> None:
         """Remove the two live lines; the cursor sits at the end of the second."""

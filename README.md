@@ -15,18 +15,30 @@
 
 **macOS / Linux**
 
+Clone and set up (once):
+
 ```bash
-git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
-sh install.sh    # set up (once)
-sh run.sh        # open the menu
+git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && sh install.sh
+```
+
+Open the menu:
+
+```bash
+sh run.sh
 ```
 
 **Windows** (Command Prompt)
 
+Clone and set up (once):
+
 ```bat
-git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
-call install.bat
-call run.bat
+git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && install.bat
+```
+
+Open the menu:
+
+```bat
+run.bat
 ```
 
 ## Menu
