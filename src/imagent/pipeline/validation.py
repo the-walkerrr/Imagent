@@ -11,8 +11,8 @@ import os
 import sys
 from pathlib import Path
 
-from os_specific.files import comparable_path
-from pipeline.storage import storage_problem
+from imagent.os_specific.files import comparable_path
+from imagent.pipeline.storage import storage_problem
 
 
 def validate_folder(raw_path: str) -> Path:

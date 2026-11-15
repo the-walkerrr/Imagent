@@ -1,6 +1,6 @@
 import json
 
-from text_processing.cleaners import (
+from imagent.text_processing.cleaners import (
     normalize_whitespace,
     normalize_terms,
     lead_sentence,

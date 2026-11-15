@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from os_specific.storage import EXTERNAL, NETWORK, classify  # EXTERNAL is part of this module's interface: callers and tests name storage.EXTERNAL
+from imagent.os_specific.storage import EXTERNAL, NETWORK, classify  # EXTERNAL is part of this module's interface: callers and tests name storage.EXTERNAL
 
 
 def storage_problem(path: str | Path) -> str | None:

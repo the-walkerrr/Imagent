@@ -4,8 +4,8 @@ import os
 import unittest
 from unittest import mock
 
-from os_specific import storage as os_storage
-from pipeline import storage, validation
+from imagent.os_specific import storage as os_storage
+from imagent.pipeline import storage, validation
 
 MOUNT_OUTPUT = """/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
 /dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse)
@@ -99,7 +99,7 @@ class RootOverlapTests(unittest.TestCase):
 
     def overlap(self, system, root, known):
         from pathlib import Path
-        from os_specific import files
+        from imagent.os_specific import files
         with mock.patch.object(files.platform, "system", return_value=system):
             return validation.find_overlapping_root(Path(root), known)
 

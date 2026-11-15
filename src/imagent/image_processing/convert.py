@@ -15,9 +15,9 @@ import tempfile
 from contextlib import contextmanager
 from typing import Iterator
 
-import config
-from os_specific import system_name
-from os_specific.convert import command as command_for
+from imagent import config
+from imagent.os_specific import system_name
+from imagent.os_specific.convert import command as command_for
 
 
 class ConversionFailed(Exception):

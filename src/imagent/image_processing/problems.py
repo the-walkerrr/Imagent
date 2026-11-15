@@ -11,7 +11,7 @@ import os
 
 from PIL import Image, UnidentifiedImageError
 
-from pipeline.failure import IndexingFailure, attempt_record
+from imagent.pipeline.failure import IndexingFailure, attempt_record
 
 UNREADABLE = "unreadable"  # damaged or incomplete: it is queued again when the file changes
 UNSUPPORTED = "unsupported"  # no decoder for its format on this computer

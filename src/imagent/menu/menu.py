@@ -13,29 +13,24 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
-
-# Make the project root importable when this file is run directly (``python menu/menu.py``).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     import questionary
 
-    import config
-    from db.connection import init_db
-    from db.operations import get_exhausted_backlog
-    from pipeline.console import make_output_safe, run_cli
+    from imagent import config
+    from imagent.db.connection import init_db
+    from imagent.db.operations import get_exhausted_backlog
+    from imagent.pipeline.console import make_output_safe, run_cli
 except ModuleNotFoundError as exc:
     sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
              f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
 UNINSTALL_EXIT_CODE = 75  # tells run.sh / run.bat to start the uninstaller (they compare with this number)
 UNINSTALL = "uninstall"
 
-SEARCH = ("Search your images", "search/search.py")
-SCAN = ("Scan folders and index images", "scan_and_index/scan_and_index.py")
-SHOW_FAILED_SCRIPT = "show_failed/show_failed.py"
+SEARCH = ("Search your images", "imagent.search.search")
+SCAN = ("Scan folders and index images", "imagent.scan_and_index.scan_and_index")
+SHOW_FAILED_SCRIPT = "imagent.show_failed.show_failed"
 
 STYLE = questionary.Style([
     ("qmark", "fg:ansidefault bold"),
@@ -74,7 +69,7 @@ def main() -> None:
         sys.exit(1)
     if choice == UNINSTALL:
         sys.exit(UNINSTALL_EXIT_CODE)
-    process = subprocess.Popen([sys.executable, str(PROJECT_DIR / choice)])
+    process = subprocess.Popen([sys.executable, "-m", choice])
     while True:
         try:
             sys.exit(process.wait())

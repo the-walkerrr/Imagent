@@ -20,9 +20,9 @@ import warnings
 import numpy as np
 from PIL import Image, ImageOps
 
-import config
-from image_processing.problems import OCR_FAILED, TOO_LARGE, ImageProblem, explain
-from pipeline.failure import attempt_record
+from imagent import config
+from imagent.image_processing.problems import OCR_FAILED, TOO_LARGE, ImageProblem, explain
+from imagent.pipeline.failure import attempt_record
 
 _EXIF_ORIENTATION = 0x0112
 # What each EXIF orientation does to a picture, undone on each tile the same way ImageOps.exif_transpose does on a whole image.

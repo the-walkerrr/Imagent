@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import config
-from install import install
-from db.operations import get_or_add_root
-from uninstall import uninstall
+from imagent import config
+from imagent.install import install
+from imagent.db.operations import get_or_add_root
+from imagent.uninstall import uninstall
 from tests.support import IsolatedHome, add_indexed
 
 

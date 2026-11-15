@@ -1,23 +1,24 @@
 """Versions, the embedding model that must not change, models that are local only, and the commands for set-aside."""
 
 import contextlib
+import importlib.util
 import io
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import config
-from db.operations import (
+from imagent import config
+from imagent.db.operations import (
     add_failure_history, get_backlog, get_or_add_root, list_parked, park_backlog, requeue_changed_parked,
     requeue_parked, set_device_settings, set_model_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
 )
-from install import install
-from pipeline import versions as versions_module
-from menu import menu
+from imagent.install import install
+from imagent.pipeline import versions as versions_module
+from imagent.menu import menu
 from tests.support import DEVICE, IsolatedHome
-from vlm import client as vlm_client
-from vlm.client import NotReady, check_ready, pin_model, pinned_name
+from imagent.vlm import client as vlm_client
+from imagent.vlm.client import NotReady, check_ready, pin_model, pinned_name
 
 SETTINGS = {"vlm_model": "v:latest", "embedding_model": "e:latest", "judge_model": "j:latest",
             "vlm_digest": "vd", "embedding_digest": "ed", "judge_digest": "jd", "embedding_dim": 3}
@@ -211,8 +212,8 @@ class IndexLoopVersionsTests(IsolatedHome):
     """A file parked for its model's replies is parked with the versions of the time, and queued again when they change."""
 
     def test_a_changed_prompt_queues_the_parked_file_again(self):
-        from scan_and_index import scan_and_index
-        from vlm.analyzer import AnalysisFailed
+        from imagent.scan_and_index import scan_and_index
+        from imagent.vlm.analyzer import AnalysisFailed
         conn = self.connect()
         with conn:
             root = get_or_add_root(conn, str(self.work))
@@ -284,19 +285,19 @@ class LaunchersTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
     def test_every_menu_entry_runs_a_script_that_exists(self):
-        for script in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT):
-            self.assertTrue((self.ROOT / script).is_file(), script)
+        for module in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT):
+            self.assertIsNotNone(importlib.util.find_spec(module), module)
 
     def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):
         shell = (self.ROOT / "run.sh").read_text()
         batch = (self.ROOT / "run.bat").read_bytes().decode()
         self.assertIn(f"UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE} ", shell)
         self.assertIn(f'set "UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE}"', batch)
-        self.assertTrue((self.ROOT / "uninstall" / "uninstall.sh").is_file())
-        self.assertTrue((self.ROOT / "uninstall" / "uninstall.bat").is_file())
+        self.assertTrue((self.ROOT / "uninstall.sh").is_file())
+        self.assertTrue((self.ROOT / "uninstall.bat").is_file())
 
     def test_batch_files_keep_their_windows_line_endings(self):
-        for name in ("run.bat", "install.bat", "uninstall/uninstall.bat"):
+        for name in ("run.bat", "install.bat", "uninstall.bat"):
             data = (self.ROOT / name).read_bytes()
             self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), name)  # a batch file with bare LF can misbehave
 

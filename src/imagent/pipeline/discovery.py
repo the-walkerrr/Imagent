@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import NamedTuple
 
-from os_specific.files import is_hidden_folder
+from imagent.os_specific.files import is_hidden_folder
 
 # Extensions that Imagent can process.  All comparisons are done case-insensitively.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({

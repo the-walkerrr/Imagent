@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from PIL import Image
 
-from image_processing.memory import exif_can_be_read
+from imagent.image_processing.memory import exif_can_be_read
 
 # What ``mimetypes`` knows depends on the computer's own list (and the Python version): it has no entry for HEIC, the iPhone's
 # format, on many. The formats Imagent reads are named here, so the type stored does not depend on the computer.

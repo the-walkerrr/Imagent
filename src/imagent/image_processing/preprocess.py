@@ -1,6 +1,6 @@
 import io
 from PIL import Image, ImageOps
-import config
+from imagent import config
 
 
 def preprocess_image(image_path: str) -> bytes:

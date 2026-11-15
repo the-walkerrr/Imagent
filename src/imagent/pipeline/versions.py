@@ -11,9 +11,9 @@ import hashlib
 import json
 from importlib import metadata
 
-import config
-from text_processing.formatters import SEARCH_TEXT_VERSION
-from vlm.client import server_version
+from imagent import config
+from imagent.text_processing.formatters import SEARCH_TEXT_VERSION
+from imagent.vlm.client import server_version
 
 # The versions that decide whether a file parked for its model's replies could do better now.
 MODEL_KEYS = ("vlm_digest", "prompt_hash", "schema_hash")

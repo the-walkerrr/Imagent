@@ -47,10 +47,10 @@ run.bat
 
 | Choice | Script |
 | --- | --- |
-| Search your images | `search/search.py` |
-| Scan folders and index images | `scan_and_index/scan_and_index.py` |
-| Show the images that could not be indexed (only when there are some) | `show_failed/show_failed.py` |
-| Uninstall Imagent | `uninstall/uninstall.sh` / `uninstall\uninstall.bat` |
+| Search your images | `imagent/search/search.py` |
+| Scan folders and index images | `imagent/scan_and_index/scan_and_index.py` |
+| Show the images that could not be indexed (only when there are some) | `imagent/show_failed/show_failed.py` |
+| Uninstall Imagent | `uninstall.sh` / `uninstall.bat` |
 
 To index: choose **Scan folders and index images**, give it a folder, then choose **Search your images**.
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from os_specific import convert, files, locking, memory, process, system_name
+from imagent.os_specific import convert, files, locking, memory, process, system_name
 
 MEMINFO = "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"
 

@@ -10,15 +10,15 @@ from unittest import mock
 from PIL import Image, UnidentifiedImageError
 from PIL.PngImagePlugin import PngImageFile
 
-import config
-from image_processing import memory, ocr
-from image_processing.features import extract_image_features
-from image_processing.preprocess import preprocess_image
-from os_specific import memory as os_memory
-from image_processing.problems import OCR_FAILED, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
-from pipeline.failure import IndexingFailure
+from imagent import config
+from imagent.image_processing import memory, ocr
+from imagent.image_processing.features import extract_image_features
+from imagent.image_processing.preprocess import preprocess_image
+from imagent.os_specific import memory as os_memory
+from imagent.image_processing.problems import OCR_FAILED, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
+from imagent.pipeline.failure import IndexingFailure
 from tests.support import IsolatedHome
-from vlm import analyzer
+from imagent.vlm import analyzer
 
 MEMINFO = "MemTotal:       16000000 kB\nMemFree:          500000 kB\nMemAvailable:    8000000 kB\nBuffers: 1 kB\n"
 VM_STAT = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               100.\n"
@@ -101,7 +101,7 @@ class CheckImageSizeTests(IsolatedHome):
 
     def test_the_limit_used_when_memory_is_not_known_is_twice_pillows_own_default_read_from_pillow(self):
         import importlib
-        import image_processing
+        from imagent import image_processing
         with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 1000):
             importlib.reload(image_processing)
             self.assertEqual(image_processing.PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN, 2000)
@@ -484,7 +484,7 @@ class MetadataGuardTests(IsolatedHome):
     """Reading a picture's metadata is the first thing indexing does, before the size check: it must not decode a picture that does not fit."""
 
     def test_a_png_too_large_to_decode_is_not_decoded_to_read_its_metadata(self):
-        from image_processing.metadata import extract_file_metadata
+        from imagent.image_processing.metadata import extract_file_metadata
         path = self.make_image(self.work / "a.png")
         with mock.patch.object(memory, "available_memory", return_value=100), \
                 mock.patch.object(PngImageFile, "load", side_effect=AssertionError("decoded the picture")):
@@ -493,7 +493,7 @@ class MetadataGuardTests(IsolatedHome):
         self.assertIsNone(meta["camera_make"])
 
     def test_a_png_that_fits_still_has_its_exif_read(self):
-        from image_processing.metadata import extract_file_metadata
+        from imagent.image_processing.metadata import extract_file_metadata
         path = self.work / "a.png"
         exif = Image.Exif()
         exif[0x010F] = "Maker"
@@ -504,7 +504,7 @@ class MetadataGuardTests(IsolatedHome):
 
 class MimeTypeTests(IsolatedHome):
     def test_the_formats_imagent_reads_have_a_type_whatever_the_computers_own_list_says(self):
-        from image_processing.metadata import extract_file_metadata
+        from imagent.image_processing.metadata import extract_file_metadata
         expected = {".heic": "image/heic", ".HEIF": "image/heif", ".avif": "image/avif", ".webp": "image/webp", ".jpg": "image/jpeg", ".tif": "image/tiff"}
         with mock.patch("mimetypes.guess_type", return_value=(None, None)):  # a computer whose list has none of them
             for suffix, mime in expected.items():
@@ -513,7 +513,7 @@ class MimeTypeTests(IsolatedHome):
                 self.assertEqual(extract_file_metadata(str(path))["mime_type"], mime, suffix)
 
     def test_a_name_that_is_not_one_of_them_still_asks_the_computer(self):
-        from image_processing.metadata import extract_file_metadata
+        from imagent.image_processing.metadata import extract_file_metadata
         path = self.work / "a.xyz"
         path.write_bytes(b"x")
         with mock.patch("mimetypes.guess_type", return_value=("image/x-odd", None)):

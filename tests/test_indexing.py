@@ -10,13 +10,13 @@ from unittest import mock
 import httpx
 import ollama
 
-import config
-from scan_and_index import scan_and_index
-from db.operations import get_backlog, get_exhausted_backlog, get_or_add_root, upsert_backlog
+from imagent import config
+from imagent.scan_and_index import scan_and_index
+from imagent.db.operations import get_backlog, get_exhausted_backlog, get_or_add_root, upsert_backlog
 from tests.support import IsolatedHome
-from image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, ImageProblem, problem
-from pipeline.failure import RunStopped
-from vlm.analyzer import AnalysisFailed
+from imagent.image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, ImageProblem, problem
+from imagent.pipeline.failure import RunStopped
+from imagent.vlm.analyzer import AnalysisFailed
 
 
 class ClassifyFailureTests(unittest.TestCase):
@@ -245,7 +245,7 @@ class RunTests(IsolatedHome):
         self.assertEqual(self.conn.execute("SELECT kind FROM failure_history").fetchone()[0], "unreadable")  # what was found is kept
 
     def test_a_damaged_looking_file_that_is_as_the_scan_saw_it_is_damaged_and_set_aside(self):
-        from image_processing.metadata import iso_utc
+        from imagent.image_processing.metadata import iso_utc
         import os
         path = self.make_image(self.work / "b.png")
         with self.conn:

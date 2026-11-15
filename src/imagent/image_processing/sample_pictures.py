@@ -1,7 +1,7 @@
 """
 image_processing/sample_pictures.py — The pictures setup checks this computer with.
 
-Real photos of many kinds and sizes ship as one zip (tests/fixtures/images.zip, with a manifest of where each came from and
+Real photos of many kinds and sizes ship as one zip (image_processing/data/images.zip, with a manifest of where each came from and
 its licence). What no zip should hold is made here instead: pictures far larger than anyone would commit, and files that are
 damaged or odd in their way of storing colour. How many are made, and how big, follows the memory and disk this computer has.
 
@@ -20,12 +20,12 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 
-import config
-from image_processing.memory import available_memory, check_image_size, peak_bytes_per_pixel
-from image_processing.preprocess import preprocess_image
-from image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain
+from imagent import config
+from imagent.image_processing.memory import available_memory, check_image_size, peak_bytes_per_pixel
+from imagent.image_processing.preprocess import preprocess_image
+from imagent.image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain
 
-ZIP_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "images.zip"
+ZIP_PATH = Path(__file__).resolve().parent / "data" / "images.zip"
 TARGET_BYTES = 120_000_000  # the size of the largest picture made: the range the pictures cover runs from small up to this
 PROBE_PIXELS = 4_000_000  # a picture this size is made first, to learn how many bytes a pixel of such a picture takes
 

@@ -8,10 +8,10 @@ from unittest import mock
 
 from PIL import Image
 
-import config
-from db.connection import init_db
-from image_processing.hashing import compute_hash
-from image_processing.metadata import iso_utc
+from imagent import config
+from imagent.db.connection import init_db
+from imagent.image_processing.hashing import compute_hash
+from imagent.image_processing.metadata import iso_utc
 
 
 # What setup measured about a computer (db/operations.set_device_settings).

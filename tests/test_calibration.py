@@ -10,10 +10,10 @@ import httpx
 import ollama
 from PIL import Image
 
-import config
-from db.operations import get_device_settings, set_device_settings
+from imagent import config
+from imagent.db.operations import get_device_settings, set_device_settings
 from tests.support import DEVICE, IsolatedHome
-from vlm import calibration
+from imagent.vlm import calibration
 
 REQUEST = httpx.Request("POST", "http://localhost")
 NO_MEMORY = ollama.ResponseError("model requires more system memory than is available", 500)
@@ -69,13 +69,13 @@ class CalibrationTests(unittest.TestCase):
         self.unload = calibration.unload_model
         # No waiting or restarting while the steps for a failure are tried.
         for target in ("restart_server", "other_models_running", "unload_model"):
-            patcher = mock.patch("vlm.analyzer." + target, mock.Mock(return_value=False if target == "restart_server" else []))
+            patcher = mock.patch("imagent.vlm.analyzer." + target, mock.Mock(return_value=False if target == "restart_server" else []))
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = mock.patch("vlm.analyzer.time.sleep")
+        patcher = mock.patch("imagent.vlm.analyzer.time.sleep")
         patcher.start()
         self.addCleanup(patcher.stop)
-        patcher = mock.patch("vlm.analyzer.make_client")
+        patcher = mock.patch("imagent.vlm.analyzer.make_client")
         self.make_client = patcher.start()
         self.addCleanup(patcher.stop)
 

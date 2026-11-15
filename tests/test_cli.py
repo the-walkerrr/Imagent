@@ -3,8 +3,8 @@ import io
 import sqlite3
 import unittest
 
-from db.connection import DatabaseProblem
-from pipeline.console import run_cli
+from imagent.db.connection import DatabaseProblem
+from imagent.pipeline.console import run_cli
 from tests.support import IsolatedHome
 
 

@@ -12,8 +12,8 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from db.operations import get_device_settings, set_device_settings
-from install import install
+from imagent.db.operations import get_device_settings, set_device_settings
+from imagent.install import install
 from tests.support import DEVICE, IsolatedHome
 
 EXPECTED = ("qwen2.5vl:7b", "bge-m3:567m", "qwen3:8b")  # (vlm, embedding, text), the order ask_models uses

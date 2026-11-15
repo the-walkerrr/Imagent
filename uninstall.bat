@@ -1,7 +1,7 @@
 @echo off
 rem Imagent uninstaller launcher for Windows: finds Python 3.9 or newer and runs the uninstaller with it.
 rem The uninstaller shows what will be lost and asks three times before it deletes anything.
-rem Usage: uninstall\uninstall.bat   (double-click it, or run it in a terminal)
+rem Usage: uninstall.bat   (double-click it, or run it in a terminal)
 setlocal
 set "DOUBLE_CLICKED="
 echo %cmdcmdline% | find /i "%~nx0" >nul && set "DOUBLE_CLICKED=1"
@@ -20,12 +20,14 @@ set "CODE=1"
 goto finish
 
 :use_py
-py -3 -B "%~dp0uninstall.py" %*
+set "PYTHONPATH=%~dp0src"
+py -3 -B -m imagent.uninstall.uninstall %*
 set "CODE=%errorlevel%"
 goto finish
 
 :use_python
-python -B "%~dp0uninstall.py" %*
+set "PYTHONPATH=%~dp0src"
+python -B -m imagent.uninstall.uninstall %*
 set "CODE=%errorlevel%"
 
 :finish

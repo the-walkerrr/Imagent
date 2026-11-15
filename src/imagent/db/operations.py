@@ -14,7 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Iterator, NamedTuple
 
-import config
+from imagent import config
 
 # The columns of image_data that say what produced a record (see db/schema.sql); a record without them has them empty.
 VERSION_COLUMNS = ("vlm_digest", "prompt_hash", "schema_hash", "search_text_version", "ocr_version", "ollama_version", "app_version")

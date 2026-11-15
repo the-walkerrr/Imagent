@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-import config
-from os_specific.locking import lock, unlock
+from imagent import config
+from imagent.os_specific.locking import lock, unlock
 
 
 class AlreadyRunning(RuntimeError):

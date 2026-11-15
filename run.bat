@@ -7,7 +7,7 @@ rem Usage: run.bat   (double-click it, or run it in a terminal)
 setlocal
 set "DOUBLE_CLICKED="
 echo %cmdcmdline% | find /i "%~nx0" >nul && set "DOUBLE_CLICKED=1"
-rem The same number as in menu\menu.py
+rem The same number as in src\imagent\menu\menu.py
 set "UNINSTALL_EXIT_CODE=75"
 
 if exist "%~dp0.venv\Scripts\activate.bat" goto run
@@ -25,7 +25,7 @@ goto finish
 
 :declined
 echo Nothing was installed. Run the installer any time: install.bat
-echo To remove Imagent without it: uninstall\uninstall.bat
+echo To remove Imagent without it: uninstall.bat
 set "CODE=1"
 goto finish
 
@@ -33,11 +33,12 @@ goto finish
 rem Its own scope, so .venv is not active when the uninstaller starts
 setlocal
 call "%~dp0.venv\Scripts\activate.bat"
-python "%~dp0menu\menu.py"
+set "PYTHONPATH=%~dp0src"
+python -m imagent.menu.menu
 set "CODE=%errorlevel%"
 endlocal & set "CODE=%CODE%"
 if not "%CODE%"=="%UNINSTALL_EXIT_CODE%" goto finish
-call "%~dp0uninstall\uninstall.bat"
+call "%~dp0uninstall.bat"
 set "CODE=%errorlevel%"
 
 :finish

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from PIL import Image
 
-import config
-from image_processing import PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN
-from image_processing.problems import TOO_LARGE, explain, problem
-from os_specific.memory import available_memory
+from imagent import config
+from imagent.image_processing import PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN
+from imagent.image_processing.problems import TOO_LARGE, explain, problem
+from imagent.os_specific.memory import available_memory
 
 # Bytes of memory one pixel needs at the peak of reading an image, by the picture's mode. Pillow keeps a decoded picture in
 # 1 byte a pixel for the modes 1, L and P, 2 for the 16-bit gray ones and 4 for every other (RGB too: it is padded to 4; the

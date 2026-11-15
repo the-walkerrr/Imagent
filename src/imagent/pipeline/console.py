@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-import config
-from db.connection import DatabaseProblem, describe_db_error
+from imagent import config
+from imagent.db.connection import DatabaseProblem, describe_db_error
 
 
 def make_output_safe() -> None:

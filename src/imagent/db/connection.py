@@ -13,7 +13,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-import config
+from imagent import config
 
 # schema.sql sits next to this file
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"

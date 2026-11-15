@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imagent"
+version = "0.1.0"
+description = "Local image indexing and search tool: private, offline, and cross-platform."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+imagent = ["prompts/*", "db/schema.sql", "image_processing/data/*.zip"]

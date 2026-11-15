@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scan_and_index import scan_and_index
-from db.operations import get_backlog, get_or_add_root, images_by_path
-from pipeline.discovery import discover
+from imagent.scan_and_index import scan_and_index
+from imagent.db.operations import get_backlog, get_or_add_root, images_by_path
+from imagent.pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed
 
 CAN_HIDE_FOLDERS = os.name == "posix" and (not hasattr(os, "geteuid") or os.geteuid() != 0)  # root ignores permissions
@@ -103,8 +103,8 @@ class DiscoveryTests(IsolatedHome):
 
     def test_a_name_that_is_not_valid_text_is_reported_not_fatal(self):
         bad = ("/pictures", [], ["bad\udce9.jpg", "good.jpg"])
-        with mock.patch("pipeline.discovery.os.walk", return_value=[bad]), \
-                mock.patch("pipeline.discovery.Path.is_file", return_value=True):
+        with mock.patch("imagent.pipeline.discovery.os.walk", return_value=[bad]), \
+                mock.patch("imagent.pipeline.discovery.Path.is_file", return_value=True):
             found = discover(Path("/pictures"))
         self.assertEqual([path.name for path in found.images], ["good.jpg"])
         self.assertEqual(len(found.bad_names), 1)
@@ -175,7 +175,7 @@ class CloudAndHiddenTests(ScanBase):
         self.assertIn("1 image(s) in cloud storage", out.getvalue())
 
     def test_a_file_that_went_to_the_cloud_after_the_scan_is_set_aside_with_what_to_do_and_not_downloaded(self):
-        from image_processing.problems import NOT_DOWNLOADED, ImageProblem
+        from imagent.image_processing.problems import NOT_DOWNLOADED, ImageProblem
         conn = self.connect()
         with conn:
             root_id = get_or_add_root(conn, str(self.work))
@@ -192,7 +192,7 @@ class CloudAndHiddenTests(ScanBase):
         root = self.work / "pictures"
         self.make_image(root / "shown" / "a.png", 1)
         self.make_image(root / "AppDataLike" / "b.png", 2)
-        with mock.patch("pipeline.discovery.is_hidden_folder", side_effect=lambda path: os.path.basename(path) == "AppDataLike"):
+        with mock.patch("imagent.pipeline.discovery.is_hidden_folder", side_effect=lambda path: os.path.basename(path) == "AppDataLike"):
             found = discover(root)
         self.assertEqual([path.name for path in found.images], ["a.png"])
 

@@ -5,17 +5,17 @@ from typing import Callable, NamedTuple
 
 import httpx
 import ollama
-import config
-from vlm.client import make_client, other_models_running, restart_server, unload_model
-from vlm.reply_validation import check_reply
-from vlm.response_format import QueryUnderstanding
-from image_processing.convert import ConversionFailed, converted_copy
-from image_processing.features import extract_image_features
-from image_processing.memory import check_image_size
-from image_processing.ocr import extract_text_blocks
-from image_processing.preprocess import preprocess_image
-from image_processing.problems import TOO_LARGE, UNSUPPORTED, ImageProblem, explain
-from pipeline.failure import IndexingFailure, attempt_record
+from imagent import config
+from imagent.vlm.client import make_client, other_models_running, restart_server, unload_model
+from imagent.vlm.reply_validation import check_reply
+from imagent.vlm.response_format import QueryUnderstanding
+from imagent.image_processing.convert import ConversionFailed, converted_copy
+from imagent.image_processing.features import extract_image_features
+from imagent.image_processing.memory import check_image_size
+from imagent.image_processing.ocr import extract_text_blocks
+from imagent.image_processing.preprocess import preprocess_image
+from imagent.image_processing.problems import TOO_LARGE, UNSUPPORTED, ImageProblem, explain
+from imagent.pipeline.failure import IndexingFailure, attempt_record
 
 # What went wrong; each has its own way of being put right.
 CUT_OFF = "cut_off"  # the reply ended at the output cap

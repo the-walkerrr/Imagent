@@ -3,8 +3,8 @@ import os
 import unittest
 from unittest import mock
 
-import config
-from pipeline.locking import AlreadyRunning, is_running, single_instance
+from imagent import config
+from imagent.pipeline.locking import AlreadyRunning, is_running, single_instance
 from tests.support import IsolatedHome
 
 
@@ -16,7 +16,7 @@ class ConfigFileTests(IsolatedHome):
 
     def test_a_crash_while_saving_leaves_the_old_file_intact(self):
         config.save_config({"ollama_host": "old"})
-        with mock.patch("config.os.replace", side_effect=OSError("power cut")):
+        with mock.patch("imagent.config.os.replace", side_effect=OSError("power cut")):
             with self.assertRaises(OSError):
                 config.save_config({"ollama_host": "new"})
         self.assertEqual(json.loads(config.CONFIG_PATH.read_text()), {"ollama_host": "old"})

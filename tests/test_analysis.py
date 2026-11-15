@@ -8,14 +8,14 @@ from unittest import mock
 import httpx
 import ollama
 
-import config
-from db.operations import add_failure_history, get_or_add_root, park_backlog, upsert_backlog
-from pipeline.failure import RunStopped
-from scan_and_index import scan_and_index
+from imagent import config
+from imagent.db.operations import add_failure_history, get_or_add_root, park_backlog, upsert_backlog
+from imagent.pipeline.failure import RunStopped
+from imagent.scan_and_index import scan_and_index
 from tests.support import IsolatedHome
-from text_processing.formatters import build_description, build_search_text
-from vlm import analyzer
-from vlm.reply_validation import check_reply
+from imagent.text_processing.formatters import build_description, build_search_text
+from imagent.vlm import analyzer
+from imagent.vlm.reply_validation import check_reply
 
 GOOD_REPLY = {
     "short_description": "A cat.", "scene": "A cat sits on a sofa.", "objects_and_layout": "A sofa.",
@@ -366,7 +366,7 @@ class EmbeddingRecoveryTests(unittest.TestCase):
             self.unloaded.append(request["model"])
 
     def setUp(self):
-        patcher = mock.patch("vlm.analyzer.time.sleep")
+        patcher = mock.patch("imagent.vlm.analyzer.time.sleep")
         self.sleep = patcher.start()
         self.addCleanup(patcher.stop)
 

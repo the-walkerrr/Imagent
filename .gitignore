@@ -19,3 +19,8 @@ benchmark_results/
 # Local benchmarks and their sample images
 benchmarks/
 sample_images/
+
+# Packaging
+*.egg-info
+build/
+dist/

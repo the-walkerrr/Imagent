@@ -28,10 +28,10 @@ from typing import Callable
 import ollama
 from PIL import Image, ImageDraw
 
-import config
-from image_processing.memory import available_memory
-from vlm.analyzer import OUT_OF_MEMORY, ServiceTrouble, send_request
-from vlm.client import unload_model
+from imagent import config
+from imagent.image_processing.memory import available_memory
+from imagent.vlm.analyzer import OUT_OF_MEMORY, ServiceTrouble, send_request
+from imagent.vlm.client import unload_model
 
 
 class NotPossible(Exception):

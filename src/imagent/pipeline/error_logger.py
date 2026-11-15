@@ -13,7 +13,7 @@ import sqlite3
 import traceback
 from datetime import datetime, timezone
 
-import config
+from imagent import config
 
 
 def log_error(

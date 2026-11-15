@@ -7,16 +7,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import config
-from db.operations import get_or_add_root, park_backlog, record_backlog_failure, upsert_backlog
-from image_processing import convert
-from image_processing.convert import ConversionFailed, converted_copy
-from image_processing.problems import UNSUPPORTED, ImageProblem, problem
-from menu import menu
-from os_specific import convert as os_convert
-from scan_and_index import scan_and_index
+from imagent import config
+from imagent.db.operations import get_or_add_root, park_backlog, record_backlog_failure, upsert_backlog
+from imagent.image_processing import convert
+from imagent.image_processing.convert import ConversionFailed, converted_copy
+from imagent.image_processing.problems import UNSUPPORTED, ImageProblem, problem
+from imagent.menu import menu
+from imagent.os_specific import convert as os_convert
+from imagent.scan_and_index import scan_and_index
 from tests.support import IsolatedHome
-from vlm import analyzer
+from imagent.vlm import analyzer
 
 
 def finished(returncode=0, stderr=""):
@@ -128,7 +128,7 @@ class WhatTheUserIsToldTests(unittest.TestCase):
 
     def test_no_message_suggests_changing_the_model(self):
         import inspect
-        from image_processing import memory, problems
+        from imagent.image_processing import memory, problems
         for module in (analyzer, memory, problems, scan_and_index):
             self.assertNotRegex(inspect.getsource(module).lower(), r"another (vision )?model|different (vision )?model|change the model")
 

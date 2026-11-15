@@ -28,25 +28,22 @@ import os
 import sys
 from pathlib import Path
 
-# Make the project root importable when this file is run directly (``python search/search.py``).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 try:
     import numpy as np
 
-    import config
-    from db.connection import init_db
-    from db.operations import (
+    from imagent import config
+    from imagent.db.connection import init_db
+    from imagent.db.operations import (
         count_embeddings,
         get_image_summary,
         iter_embedding_batches,
     )
-    from pipeline.console import file_link, make_output_safe, run_cli
-    from pipeline.error_logger import log_error
-    from pipeline.locking import is_running
-    from pipeline.progress import SearchProgress
-    from vlm.analyzer import embed_search_text, understand_query
-    from vlm.client import NotReady, check_ready, load_model, other_models_running
+    from imagent.pipeline.console import file_link, make_output_safe, run_cli
+    from imagent.pipeline.error_logger import log_error
+    from imagent.pipeline.locking import is_running
+    from imagent.pipeline.progress import SearchProgress
+    from imagent.vlm.analyzer import embed_search_text, understand_query
+    from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running
 except ModuleNotFoundError as exc:
     sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
              f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")

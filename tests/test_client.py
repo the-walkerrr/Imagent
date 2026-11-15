@@ -4,11 +4,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
-import config
-from db.operations import set_device_settings, set_model_settings
+from imagent import config
+from imagent.db.operations import set_device_settings, set_model_settings
 from tests.support import DEVICE, IsolatedHome
-from vlm import client as vlm_client
-from vlm.client import NotReady, _base_url, check_ready, load_model, other_models_running, server_version, start_server
+from imagent.vlm import client as vlm_client
+from imagent.vlm.client import NotReady, _base_url, check_ready, load_model, other_models_running, server_version, start_server
 
 
 def serve_version(version: str) -> HTTPServer:

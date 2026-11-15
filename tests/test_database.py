@@ -2,9 +2,9 @@ import sqlite3
 import unittest
 from unittest import mock
 
-import config
-from db import connection
-from db.connection import SCHEMA_VERSION, DatabaseProblem, describe_db_error, init_db
+from imagent import config
+from imagent.db import connection
+from imagent.db.connection import SCHEMA_VERSION, DatabaseProblem, describe_db_error, init_db
 from tests.support import IsolatedHome
 
 

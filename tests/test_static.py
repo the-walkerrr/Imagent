@@ -9,15 +9,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_DIRS = {".venv", ".git", "benchmark_results", "__pycache__", "sample_images"}
 MODULES = [
-    "config", "vlm.response_format", "install.install", "scan_and_index.scan_and_index", "search.search", "uninstall.uninstall",
-    "db.connection", "db.operations", "pipeline.console", "pipeline.discovery", "pipeline.locking",
-    "pipeline.progress", "pipeline.validation", "pipeline.error_logger", "pipeline.serialisation",
-    "image_processing.metadata", "image_processing.ocr", "image_processing.preprocess", "image_processing.features",
-    "text_processing.formatters", "vlm.analyzer", "vlm.client", "vlm.reply_validation",
-    "image_processing.memory", "image_processing.problems", "pipeline.failure", "pipeline.storage", "pipeline.versions",
-    "menu.menu", "show_failed.show_failed", "image_processing.convert",
-    "os_specific", "os_specific.convert", "os_specific.files", "os_specific.locking", "os_specific.memory", "os_specific.process",
-    "os_specific.storage",
+    "imagent.config", "imagent.vlm.response_format", "imagent.install.install", "imagent.scan_and_index.scan_and_index", "imagent.search.search", "imagent.uninstall.uninstall",
+    "imagent.db.connection", "imagent.db.operations", "imagent.pipeline.console", "imagent.pipeline.discovery", "imagent.pipeline.locking",
+    "imagent.pipeline.progress", "imagent.pipeline.validation", "imagent.pipeline.error_logger", "imagent.pipeline.serialisation",
+    "imagent.image_processing.metadata", "imagent.image_processing.ocr", "imagent.image_processing.preprocess", "imagent.image_processing.features",
+    "imagent.text_processing.formatters", "imagent.vlm.analyzer", "imagent.vlm.client", "imagent.vlm.reply_validation",
+    "imagent.image_processing.memory", "imagent.image_processing.problems", "imagent.pipeline.failure", "imagent.pipeline.storage", "imagent.pipeline.versions",
+    "imagent.menu.menu", "imagent.show_failed.show_failed", "imagent.image_processing.convert",
+    "imagent.os_specific", "imagent.os_specific.convert", "imagent.os_specific.files", "imagent.os_specific.locking", "imagent.os_specific.memory", "imagent.os_specific.process",
+    "imagent.os_specific.storage",
 ]
 
 

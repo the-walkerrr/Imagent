@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from pipeline.console import file_link
+from imagent.pipeline.console import file_link
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _REFRESH_SECONDS = 0.2

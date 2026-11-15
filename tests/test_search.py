@@ -5,9 +5,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from search import search
-from db.operations import get_or_add_root, upsert_text_embedding
-from pipeline.serialisation import serialize_embedding
+from imagent.search import search
+from imagent.db.operations import get_or_add_root, upsert_text_embedding
+from imagent.pipeline.serialisation import serialize_embedding
 from tests.support import IsolatedHome, add_indexed
 
 SETTINGS = {"judge_model": "j", "embedding_model": "e", "embedding_dim": 3}
@@ -184,7 +184,7 @@ class BatchedRankingTests(IsolatedHome):
         self.assertLess(peak, full_matrix / 3, f"peak {peak} bytes for a matrix of {full_matrix}")
 
     def test_the_batches_are_read_in_file_id_order_and_none_twice(self):
-        from db.operations import iter_embedding_batches
+        from imagent.db.operations import iter_embedding_batches
         conn, ids, _ = self.fill(23, 4)
         batches = list(iter_embedding_batches(conn, 5))
         self.assertEqual([len(batch) for batch in batches], [5, 5, 5, 5, 3])

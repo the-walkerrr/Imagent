@@ -27,16 +27,13 @@ if sys.version_info < (3, 9):  # before the project's own modules, which need 3.
              f"Install a newer one (for example: {_how}, or https://www.python.org/downloads/), "
              f"then run it again: {_installer}")
 
-# Make the project root importable when this file is run directly (``python install/install.py``).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from imagent import config as app_config
+from imagent.db.connection import init_db
+from imagent.db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
+from imagent.pipeline.console import make_output_safe, run_cli
+from imagent.pipeline.progress import SearchProgress
 
-import config as app_config
-from db.connection import init_db
-from db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
-from pipeline.console import make_output_safe, run_cli
-from pipeline.progress import SearchProgress
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = Path(__file__).resolve().parents[3]  # the repository root (src/imagent/<package>/<file>.py)
 VENV_DIR = PROJECT_DIR / ".venv"
 REQUIREMENTS = PROJECT_DIR / "requirements.txt"
 DEFAULT_HOST = "http://localhost:11434"
@@ -389,7 +386,7 @@ def ensure_packages() -> None:
         if RELAUNCH_FLAG in sys.argv:  # the relaunch did not end up inside .venv; stop rather than loop
             fail(f"Could not start inside .venv. Delete the .venv folder and run {app_config.INSTALL_COMMAND} again.")
         _prepare_venv()
-        result = subprocess.run([str(_venv_python()), str(Path(__file__).resolve()), RELAUNCH_FLAG, *sys.argv[1:]])
+        result = subprocess.run([str(_venv_python()), "-m", "imagent.install.install", RELAUNCH_FLAG, *sys.argv[1:]])
         sys.exit(result.returncode)
     try:
         import questionary as q
@@ -414,7 +411,7 @@ def prepare_ocr() -> None:
     """Load the OCR engine now. Its models come with the package, so nothing is downloaded, and Imagent never needs the internet once set up."""
     say("Loading the text-reading (OCR) engine…")
     try:
-        from image_processing.ocr import check_available
+        from imagent.image_processing.ocr import check_available
         check_available()
     except Exception as exc:
         fail(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
@@ -449,7 +446,7 @@ def _ollama_command_version():
 
 def ensure_ollama_current() -> None:
     """Offer to update a local Ollama older than Imagent needs. An Ollama on another computer is checked once its address is known."""
-    from vlm.client import MIN_OLLAMA_VERSION  # needs the packages that ensure_packages installed
+    from imagent.vlm.client import MIN_OLLAMA_VERSION  # needs the packages that ensure_packages installed
     version = _ollama_command_version()
     if version is None or version >= MIN_OLLAMA_VERSION:
         return
@@ -795,7 +792,7 @@ def ollama_client(host: str):
 
     Yields None (after printing the reason) when Ollama cannot be reached or started."""
     # needs the packages that ensure_packages installed
-    from vlm.client import MIN_OLLAMA_VERSION, is_local, is_reachable, make_client, server_version, start_server, stop_server
+    from imagent.vlm.client import MIN_OLLAMA_VERSION, is_local, is_reachable, make_client, server_version, start_server, stop_server
     client = make_client(host)
 
     started = None
@@ -905,7 +902,7 @@ def measure_computer(client, vlm_model: str, embedding_model: str):
     """Measure this computer with the vision model and the embedding model beside it (vlm/calibration.py), with no questions asked.
 
     Returns (device settings, None), or (None, what is wrong with the model) when it does not run on this computer."""
-    from vlm.calibration import NotPossible, calibrate
+    from imagent.vlm.calibration import NotPossible, calibrate
     say("Measuring this computer with the vision model. This runs by itself and can take a few minutes…")
     try:
         device = calibrate(client, vlm_model, embedding_model, lambda message: say(f"  {message}"))
@@ -932,7 +929,7 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
             print()
             say(f"✗ Download failed: {exc}", RED)
             return None, set()
-        from vlm.client import pin_model
+        from imagent.vlm.client import pin_model
         original = _normalize(embedding)
         try:
             embedding, _ = pin_model(client, original)
@@ -965,7 +962,7 @@ def choose_models(saved_host: str):
     """Input boxes -> verify on ollama.com -> specs -> download -> verify.
 
     Returns (settings, host). The caller locks the settings into the database."""
-    from vlm.client import is_local  # needs the packages that ensure_packages installed
+    from imagent.vlm.client import is_local  # needs the packages that ensure_packages installed
     step("Models")
     host = saved_host or DEFAULT_HOST
     vlm = embedding = text_model = ""
@@ -1000,7 +997,7 @@ def _reinstall(client, name: str) -> None:
 
     A pinned copy (see vlm.client.pin_model) is not on ollama.com: it is made again from the model it was copied from,
     if that is still the same version."""
-    from vlm.client import is_pinned, pinned_name
+    from imagent.vlm.client import is_pinned, pinned_name
     if is_pinned(name):
         base = (app_config.load_install_record().get("pinned_models") or {}).get(name, "")
         try:
@@ -1094,7 +1091,7 @@ def check_test_pictures() -> None:
     """Unpack the test pictures into Imagent's data folder and run the steps of indexing that need no model over them.
 
     Nothing is asked. A problem here is reported but does not stop setup: it is a check, and Imagent works without it."""
-    from image_processing import sample_pictures
+    from imagent.image_processing import sample_pictures
     folder = app_config.IMAGENT_HOME / "test_pictures"
     say("Preparing the test pictures and checking that this computer can read them…")
     findings: list[str] = []
@@ -1166,7 +1163,7 @@ def main() -> None:
     finally:
         conn.close()
     host = app_config.load_config().get("ollama_host", "")
-    from vlm.client import is_local
+    from imagent.vlm.client import is_local
     if host and not is_local(host):
         say(f"⚠ config.json points to an Ollama on another computer ({host}). Imagent only works with an Ollama on this "
             f"computer, so the address is set back to {DEFAULT_HOST}.", "fg:ansimagenta")

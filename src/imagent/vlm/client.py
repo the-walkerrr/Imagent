@@ -20,9 +20,9 @@ import httpx
 import ollama
 from PIL import Image
 
-import config
-from db.operations import get_device_settings, get_model_settings
-from os_specific.process import background_process_options
+from imagent import config
+from imagent.db.operations import get_device_settings, get_model_settings
+from imagent.os_specific.process import background_process_options
 
 
 _FIRST_POLL_PAUSE = 0.2  # seconds between the first questions to a server that was just started; it doubles up to one second

@@ -12,9 +12,9 @@ from unittest import mock
 
 from PIL import Image
 
-import config
-from image_processing import sample_pictures
-from install import install
+from imagent import config
+from imagent.image_processing import sample_pictures
+from imagent.install import install
 
 SMALL = 1_500_000  # bytes for the largest picture made, so these tests are quick
 
