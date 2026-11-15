@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from PIL import Image
@@ -61,3 +62,29 @@ def add_indexed(conn, root_id: int, path: Path) -> None:
             "INSERT INTO image_data(root_id, file_path, hash, vlm_metadata_json, modified_at) VALUES (?, ?, ?, ?, ?)",
             (root_id, str(path), compute_hash(str(path)), "{}", iso_utc(os.stat(path).st_mtime)),
         )
+
+
+SETTINGS = {"vlm_model": "v:latest", "embedding_model": "e:latest", "judge_model": "j:latest",
+            "vlm_digest": "vd", "embedding_digest": "ed", "judge_digest": "jd", "embedding_dim": 3}
+
+
+def models(**digests):
+    return SimpleNamespace(models=[SimpleNamespace(model=name, digest=digest) for name, digest in digests.items()])
+
+
+class ReadyClient:
+    """A stand-in client that lists the given models and says what the vision model can do."""
+
+    def __init__(self, listing, capabilities=("completion", "vision")):
+        self.listing, self.capabilities, self.copied = listing, list(capabilities), []
+
+    def list(self):
+        return self.listing
+
+    def show(self, name):
+        return SimpleNamespace(capabilities=self.capabilities)
+
+    def copy(self, source, destination):
+        self.copied.append((source, destination))
+        self.listing.models.append(SimpleNamespace(model=destination, digest=next(m.digest for m in self.listing.models if m.model == source)))
+

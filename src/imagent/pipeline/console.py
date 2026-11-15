@@ -1,4 +1,4 @@
-"""pipeline/console.py — Make printing safe on every terminal, and end a command-line program politely."""
+"""imagent/pipeline/console.py — Make printing safe on every terminal, and end a command-line program politely."""
 
 from __future__ import annotations
 

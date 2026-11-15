@@ -111,5 +111,14 @@ class CommandLineTests(unittest.TestCase):
             self.assertIn(command, result.stdout)
 
 
+class MenuTests(unittest.TestCase):
+    def test_the_choices_start_with_search_and_end_with_uninstall(self):
+        for failed in (0, 3):
+            values = [choice.value for choice in menu.choices(failed)]
+            self.assertEqual(values[0], menu.SEARCH[1])
+            self.assertEqual(values[-1], menu.UNINSTALL)
+            self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

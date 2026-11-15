@@ -1,4 +1,4 @@
-"""pipeline/discovery.py — Recursively discover supported image files under a root directory."""
+"""imagent/pipeline/discovery.py — Recursively discover supported image files under a root directory."""
 
 import os
 from pathlib import Path

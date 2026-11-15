@@ -44,6 +44,29 @@ def undefined_calls(source: str) -> set:
     return called - defined
 
 
+def missing_package_names(source: str) -> list:
+    """``module.name`` uses and ``from imagent.x import name`` lines where the package has no such name.
+
+    A name that was renamed or mistyped would otherwise show up only when a user reaches the line that uses it."""
+    tree = ast.parse(source)
+    rebound = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}  # a variable that shares a module's name
+    modules, problems = {}, []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "imagent":
+            parent = importlib.import_module(node.module)
+            for alias in node.names:
+                try:
+                    modules[alias.asname or alias.name] = importlib.import_module(f"{node.module}.{alias.name}")
+                except ImportError:
+                    if not hasattr(parent, alias.name):
+                        problems.append(f"from {node.module} import {alias.name}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules \
+                and node.value.id not in rebound and not hasattr(modules[node.value.id], node.attr):
+            problems.append(f"{node.value.id}.{node.attr}")
+    return problems
+
+
 class StaticTests(unittest.TestCase):
     def test_no_file_calls_an_undefined_function(self):
         for path in project_files():
@@ -52,6 +75,14 @@ class StaticTests(unittest.TestCase):
     def test_the_check_would_have_caught_a_function_lost_in_a_refactor(self):
         broken = "def pull(client):\n    _pull_with_progress(client)\n"
         self.assertEqual(undefined_calls(broken), {"_pull_with_progress"})
+
+    def test_no_file_uses_a_name_the_package_does_not_have(self):
+        for path in project_files():
+            self.assertEqual(missing_package_names(path.read_text(encoding="utf-8")), [], str(path.relative_to(ROOT)))
+
+    def test_the_check_would_have_caught_a_renamed_constant(self):
+        broken = "from imagent import config\nprint(config.INSTALL_COMMAND_THAT_WAS_RENAMED)\n"
+        self.assertEqual(missing_package_names(broken), ["config.INSTALL_COMMAND_THAT_WAS_RENAMED"])
 
     def test_every_module_imports(self):
         for name in MODULES:
