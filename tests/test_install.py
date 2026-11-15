@@ -178,6 +178,20 @@ class AiPromptTests(unittest.TestCase):
         self.assertIn("estimate them and leave a safety margin", self.prompt)
         self.assertIn("verified the tag and capabilities", self.prompt)
 
+    def test_memory_is_a_limit_and_not_a_reason_to_choose_big_models(self):
+        self.assertIn("not the largest that fit", self.prompt)
+        self.assertIn("only an upper limit, not a target", self.prompt)
+        self.assertIn("Do not choose a model because it is the largest that fits", self.prompt)
+
+    def test_the_text_model_is_the_vision_model_by_default(self):
+        self.assertIn("By default the text model is the same model as the vision model", self.prompt)
+        self.assertIn("do not give a larger text model than the vision model", self.prompt)
+
+    def test_a_set_with_the_same_model_twice_is_accepted_by_the_parser(self):
+        self.assertIn("write its name twice", self.prompt)
+        self.assertEqual(install.parse_model_set("qwen2.5vl:7b,qwen2.5vl:7b,bge-m3:567m"),
+                         ("qwen2.5vl:7b", "bge-m3:567m", "qwen2.5vl:7b"))
+
 
 class GpuMemoryDetailTests(unittest.TestCase):
     def details(self, metal_gb):

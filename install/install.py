@@ -194,35 +194,36 @@ def system_details() -> str:
 # --- AI prompt ----------------------------------------------------------------
 
 def build_ai_prompt() -> str:
-    return f"""I need to choose AI models for a local image search tool that runs on my computer through Ollama. Balance speed and accuracy, but prefer accuracy whenever the speed gain is small.
+    return f"""I need to choose AI models for a local image search tool that runs on my computer through Ollama. Choose the smallest and fastest models that are accurate enough for the tasks below, not the largest that fit: more memory is a limit, never a goal, and a computer with a lot of memory does not need big models for these tasks.
 
 ## My computer
 {system_details()}
 
 ## The three models
 - Vision model: looks at each image once and writes a JSON description (scene, objects, people, colors and mood, tags). A separate OCR step reads text in images. The descriptions must be accurate, and I may index thousands of images, so speed matters too.
-- Text model: fixes typos in my search query and writes a short description of the image I am looking for. It never sees images. One request per search.
+- Text model: fixes typos in my search query and writes a short description of the image I am looking for. It never sees images. One request per search. This is an easy task that a small model does well, and it can be the vision model itself.
 - Embedding model: turns the stored descriptions (about 500 tokens each) and my search queries (possibly in several languages) into vectors. Used when indexing and when searching.
 
 ## Rules
 1. Search the web now. Do not rely on your memory.
 2. Only models from https://ollama.com/library, each with an exact tag that you confirmed on its page so that `ollama pull <name>:<tag>` works. Never guess or invent a tag.
-3. Capabilities: the vision model needs "vision", the text model needs "completion", the embedding model needs "embedding" (context of at least 1024 tokens, strong multilingual retrieval). The vision and text models must follow a JSON schema reliably and must not be thinking-only (reasoning) models. The text model may be the same model as the vision model.
+3. Capabilities: the vision model needs "vision", the text model needs "completion", the embedding model needs "embedding" (context of at least 1024 tokens, strong multilingual retrieval). The vision and text models must follow a JSON schema reliably and must not be thinking-only (reasoning) models. By default the text model is the same model as the vision model: one download fewer, and it is already loaded after indexing. Give a separate text model only when it is clearly faster for a search (about twice as fast) and just as good at fixing typos and at not inventing details I did not ask for; do not give a larger text model than the vision model.
 4. Quantization of 4-bit or better, never lower.
-5. Speed: a vision reply within a few seconds per image (never more than about 30 seconds) and a text reply within about 10 seconds. If two models are within about 30% of each other in speed, choose the more accurate one. Choose the faster one only when it is clearly faster (about twice as fast) and only slightly less accurate. Judge by published benchmarks and the model's own page, not by size, popularity or release date; an older maintained model is fine if the balance is better.
-6. Memory: model weights are fully loaded (no memory-mapping). Every set must fit entirely on the GPU, with no CPU offload and no swapping, in about 85% of my VRAM (or RAM if there is no dedicated GPU). With shared (unified) memory the GPU cannot use all of the RAM: if "GPU memory usable" is listed above, it is the figure to use, so take 85% of that and do not look it up. Check both cases; the vision and text models are never loaded together:
+5. Speed: a vision reply within a few seconds per image (never more than about 30 seconds) and a text reply within about 10 seconds. Indexing thousands of images must take hours, not days, on my computer. If two models are within about 30% of each other in speed, choose the more accurate one. Choose the faster one only when it is clearly faster (about twice as fast) and only slightly less accurate. Judge by published benchmarks and the model's own page, not by size, popularity or release date; an older maintained model is fine if the balance is better.
+   Enough is enough: a bigger model is worth choosing only when it is clearly more accurate at these tasks (describing images in the JSON format above, and fixing typos in short queries), not merely higher on general benchmarks. When a smaller model of the same family is within a few percent on the tasks, choose the smaller one. Do not choose a model because it is the largest that fits.
+6. Memory: this is only an upper limit, not a target; a set that uses much less memory is better, not worse. Model weights are fully loaded (no memory-mapping). Every set must fit entirely on the GPU, with no CPU offload and no swapping, in about 85% of my VRAM (or RAM if there is no dedicated GPU). With shared (unified) memory the GPU cannot use all of the RAM: if "GPU memory usable" is listed above, it is the figure to use, so take 85% of that and do not look it up. Check both cases; the vision and text models are never loaded together:
    - indexing: the vision model AND the embedding model are loaded at the same time, so both must fit together. Count the vision model's weights, its KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens and its image-encoder working memory for images up to {app_config.IMAGE_MAX_LONG_EDGE} px on the long edge (reserved for a worst-case image), plus the embedding model's weights and its own KV cache and compute buffers at the context Ollama gives it by default; those buffers can make an embedding model several times larger in memory than its weight file. Ollama does not publish buffer sizes, so estimate them and leave a safety margin instead of declining a set for lack of an exact figure;
    - searching: the text model AND the embedding model are loaded at the same time. Count the text model's weights and its KV cache at a context of {app_config.OLLAMA_NUM_CTX} tokens, plus the embedding model in memory as above.
 7. Do the memory sums yourself and do not show the working.
 
 ## Answer
-Give three sets. A set is one complete choice: a vision model, a text model and an embedding model that work together. Set 1 is the best balance and the one you recommend; set 2 is a faster or lighter alternative; set 3 is a more accurate one that still fits. Only give a set if you verified the tag and capabilities of all three of its models (memory is estimated, rule 6); if there are fewer than three, give fewer and say so.
+Give three sets. A set is one complete choice: a vision model, a text model and an embedding model that work together. Set 1 is the smallest set that is accurate enough and the one you recommend; set 2 is a faster or lighter alternative; set 3 is a more accurate one that still fits, and the table must show how much accuracy it adds, so that I can judge whether it is worth the extra size and time. Only give a set if you verified the tag and capabilities of all three of its models (memory is estimated, rule 6); if there are fewer than three, give fewer and say so.
 
 Reply with exactly these three parts, in this order, and nothing else:
 1. A table with one row per set and the columns: Set, Vision model, Text model, Embedding model, Memory (indexing / searching), Speed, Accuracy (the scores you used).
 2. One or two sentences per set on the trade-offs against the other two sets: what I gain and what I give up.
 3. The heading "Copy one set", then one code block per set (plain, no language name). Each code block holds one line and nothing else: the three model names, in the order vision, text, embedding, separated by commas.
-   - Exact shape: visionname:7b,textname:8b,embeddingname:335m
+   - Exact shape: visionname:7b,textname:8b,embeddingname:335m (when the text model is the vision model, write its name twice: visionname:7b,visionname:7b,embeddingname:335m)
    - Forbidden in that line: spaces, labels, numbering, bullets, quotes, brackets, JSON and line breaks.
    - Before you reply, check that every such line has exactly two commas and three `name:tag` values.
 """
