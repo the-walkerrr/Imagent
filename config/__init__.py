@@ -165,7 +165,7 @@ RETRY_RATE_STOP: float = 0.5  # ... at least this share needed the model's reply
 ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 
 # --- Search ------------------------------------------------------------------
-DB_BATCH_ROWS: int = 1000  # rows read from the database at a time by search and re-embed: the memory they use is about this many rows, however many images are indexed
+DB_BATCH_ROWS: int = 1000  # rows read from the database at a time by search: the memory it uses is about this many rows, however many images are indexed
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
 

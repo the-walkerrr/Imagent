@@ -178,10 +178,10 @@ class FailedImagesReportTests(IsolatedHome):
 
     def test_the_menu_offers_the_list_only_when_there_is_something_to_show(self):
         for failed, offered in ((0, False), (2, True)):
-            scripts = [choice.value for choice in menu.choices(False, failed)]
+            scripts = [choice.value for choice in menu.choices(failed)]
             self.assertEqual(menu.SHOW_FAILED_SCRIPT in scripts, offered)
             self.assertEqual(scripts[-1], menu.UNINSTALL)
-        titles = [choice.title for choice in menu.choices(False, 2)]
+        titles = [choice.title for choice in menu.choices(2)]
         self.assertIn("Show the 2 image(s) that could not be indexed", titles)
 
     def test_the_menu_counts_what_the_report_lists(self):

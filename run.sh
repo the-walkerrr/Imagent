@@ -1,6 +1,6 @@
 #!/bin/sh
 # Imagent launcher for macOS and Linux: opens a menu (arrow keys and Enter) to search, scan and index, see the images that
-# could not be indexed, re-embed images (only offered when the embedding model changed), or uninstall.
+# could not be indexed, or uninstall.
 # The menu and the commands run inside .venv. The uninstaller does not: it deletes .venv, so it picks its own Python.
 # If Imagent is not installed yet, it offers to run the installer first.
 # Usage: sh run.sh

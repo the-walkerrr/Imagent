@@ -226,8 +226,8 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
             raise NotReady(
                 f"The embedding model '{name}' is not the same version it was when you set up Imagent. Vectors made by another "
                 "version cannot be compared with the ones already stored, so searches would miss images and new images "
-                f"would be indexed wrongly. Run: {config.RUN_COMMAND} and choose \"Re-embed images\" to rebuild the stored vectors "
-                "with the installed model (it shows how long that takes first), or put the original version of the model back.")
+                f"would be indexed wrongly. The models are locked and cannot be changed: put the original version of the model back "
+                f"(running {config.INSTALL_COMMAND} restores it when it can), or uninstall Imagent and set it up again, which clears the index.")
         if stored and digest != stored:
             say(f"Warning: '{name}' is not the same version it was when you set up Imagent. Results may be less accurate.")
         if role == "vlm":

@@ -330,66 +330,6 @@ def requeue_parked(conn: sqlite3.Connection, kind: str | None = None, paths: lis
     return requeued
 
 
-def update_embedding_settings(conn: sqlite3.Connection, model: str, digest: str | None, dim: int) -> None:
-    """Record the embedding model that the stored vectors now come from (only after every vector was made again with it)."""
-    conn.execute("UPDATE model_settings SET embedding_model = ?, embedding_digest = ?, embedding_dim = ? WHERE id = 1",
-                 (model, digest, dim))
-
-
-def count_records_for_embedding(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM image_data").fetchone()[0]
-
-
-def iter_records_for_embedding(conn: sqlite3.Connection, size: int) -> Iterator[list[sqlite3.Row]]:
-    """Every indexed image with what its search text is built from (file_id, vlm_metadata_json), ``size`` rows at a time, in file_id order.
-
-    Only one batch is in memory at a time, however many images are indexed."""
-    last = _BEFORE_EVERY_ID
-    while True:
-        rows = conn.execute("SELECT file_id, vlm_metadata_json FROM image_data WHERE file_id > ? ORDER BY file_id LIMIT ?", (last, size)).fetchall()
-        if not rows:
-            return
-        yield rows
-        last = rows[-1]["file_id"]
-
-
-def create_embedding_staging(conn: sqlite3.Connection) -> None:
-    """Make an empty temporary table for the vectors a re-embed makes, until all of them are made.
-
-    A temporary table lives in SQLite's own temporary file, not in the database and not in memory, and goes away when the
-    connection closes: a re-embed that is stopped leaves nothing behind."""
-    conn.execute("DROP TABLE IF EXISTS temp.embedding_staging")
-    conn.execute("CREATE TEMP TABLE embedding_staging (file_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL)")
-
-
-def stage_embedding(conn: sqlite3.Connection, file_id: int, embedding_bytes: bytes) -> None:
-    conn.execute("INSERT OR REPLACE INTO temp.embedding_staging (file_id, embedding) VALUES (?, ?)", (file_id, embedding_bytes))
-
-
-def replace_embeddings_from_staging(conn: sqlite3.Connection, model: str, digest: str | None, dim: int, search_text_version: int) -> int:
-    """Put the staged vectors in place of the stored ones, with the model that made them, and mark their images as made with
-    ``search_text_version``. Returns how many. The caller's transaction makes it all-or-nothing."""
-    conn.execute(
-        """
-        INSERT INTO text_embeddings (file_id, embedding, created_at, embedding_model, embedding_digest, embedding_dim)
-        SELECT file_id, embedding, ?, ?, ?, ? FROM temp.embedding_staging WHERE true
-        ON CONFLICT(file_id) DO UPDATE SET
-            embedding        = excluded.embedding,
-            created_at       = excluded.created_at,
-            embedding_model  = excluded.embedding_model,
-            embedding_digest = excluded.embedding_digest,
-            embedding_dim    = excluded.embedding_dim
-        """,
-        (_now(), model, digest, dim),
-    )
-    conn.execute("UPDATE image_data SET search_text_version = ? WHERE file_id IN (SELECT file_id FROM temp.embedding_staging)", (search_text_version,))
-    return conn.execute("SELECT COUNT(*) FROM temp.embedding_staging").fetchone()[0]
-
-
-def drop_embedding_staging(conn: sqlite3.Connection) -> None:
-    conn.execute("DROP TABLE IF EXISTS temp.embedding_staging")
-
-
 def add_failure_history(conn: sqlite3.Connection, file_path: str, attempts: list[dict]) -> None:
     """Record the requests made for one image, if any of them had a reply that had to be asked for again.
 

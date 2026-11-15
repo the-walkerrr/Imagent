@@ -1,8 +1,7 @@
-"""Versions, the embedding model that must not change, models that are local only, and the commands for set-aside and re-embedding."""
+"""Versions, the embedding model that must not change, models that are local only, and the commands for set-aside."""
 
 import contextlib
 import io
-import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,14 +9,12 @@ from unittest import mock
 
 import config
 from db.operations import (
-    add_failure_history, get_backlog, get_model_settings, get_or_add_root, list_parked, park_backlog, requeue_changed_parked,
-    requeue_parked, set_device_settings, set_model_settings, update_embedding_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
+    add_failure_history, get_backlog, get_or_add_root, list_parked, park_backlog, requeue_changed_parked,
+    requeue_parked, set_device_settings, set_model_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
 )
 from install import install
 from pipeline import versions as versions_module
-from pipeline.serialisation import serialize_embedding
 from menu import menu
-from reembed import reembed
 from tests.support import DEVICE, IsolatedHome
 from vlm import client as vlm_client
 from vlm.client import NotReady, check_ready, pin_model, pinned_name
@@ -64,7 +61,7 @@ class ReadinessTests(IsolatedHome):
             self.ready(client, ("embedding",))
         message = str(raised.exception)
         self.assertIn("not the same version", message)
-        self.assertIn("Re-embed images", message)
+        self.assertIn("locked and cannot be changed", message)
 
     def test_a_changed_vision_model_only_warns(self):
         client = ReadyClient(models(**{"v:latest": "NEW", "e:latest": "ed"}))
@@ -209,13 +206,6 @@ class DatabaseTests(IsolatedHome):
         row = self.conn.execute("SELECT embedding_model, embedding_digest, embedding_dim FROM text_embeddings").fetchone()
         self.assertEqual(tuple(row), ("e:latest", "ed", 3))
 
-    def test_the_locked_embedding_model_can_be_replaced_only_by_the_dedicated_call(self):
-        with self.conn:
-            set_model_settings(self.conn, SETTINGS)
-            update_embedding_settings(self.conn, "imagent-pin/e:123", "newdigest", 5)
-        found = get_model_settings(self.conn)
-        self.assertEqual((found["embedding_model"], found["embedding_digest"], found["embedding_dim"]), ("imagent-pin/e:123", "newdigest", 5))
-
 
 class IndexLoopVersionsTests(IsolatedHome):
     """A file parked for its model's replies is parked with the versions of the time, and queued again when they change."""
@@ -241,204 +231,6 @@ class IndexLoopVersionsTests(IsolatedHome):
             scan_and_index._index_backlog()  # the prompt changed: queued again and indexed
         self.assertEqual(list_parked(conn), [])
         self.assertIn("queued again", out.getvalue())
-
-
-class ReembedTests(IsolatedHome):
-    def make_database(self, with_old_format=False):
-        conn = self.connect()
-        with conn:
-            set_model_settings(conn, {**SETTINGS, "embedding_model": "imagent-pin/e:old", "embedding_digest": "olddigest"})
-            root = get_or_add_root(conn, str(self.work))
-            for number, reply in enumerate(({"short_description": "A cat.", "scene": "A cat on a sofa."}, {"short_description": "A dog.", "scene": "A dog."})):
-                upsert_image_data(conn, {
-                    "root_id": root, "file_path": f"/{number}.png", "hash": "h", "short_description": "s", "description": "d",
-                    "vlm_metadata_json": json.dumps({"vlm": reply, "ocr_text": ["EXIT"], "features": {}}), "width": 1, "height": 1,
-                    "file_size": 1, "mime_type": None, "created_at": None, "modified_at": "t", "indexed_at": "t",
-                    "processing_time_ms": 1, "metadata_version": 1, "vlm_model": "v", "taken_at": None, "camera_make": None,
-                    "camera_model": None, "gps_lat": None, "gps_lon": None})
-            if with_old_format:
-                upsert_image_data(conn, {
-                    "root_id": root, "file_path": "/old.png", "hash": "h", "short_description": "s", "description": "d",
-                    "vlm_metadata_json": "{}", "width": 1, "height": 1, "file_size": 1, "mime_type": None, "created_at": None,
-                    "modified_at": "t", "indexed_at": "t", "processing_time_ms": 1, "metadata_version": 1, "vlm_model": "v",
-                    "taken_at": None, "camera_make": None, "camera_model": None, "gps_lat": None, "gps_lon": None})
-        return conn
-
-    class Embedder(ReadyClient):
-        def __init__(self, dimension=4, fail_on=None):
-            super().__init__(models(**{"e:latest": "sha256:newdigest00000000"}))
-            self.dimension, self.fail_on, self.calls = dimension, fail_on, 0
-
-        def embed(self, **request):
-            self.calls += 1
-            if self.fail_on and self.calls == self.fail_on:
-                raise RuntimeError("Ollama stopped")
-            return SimpleNamespace(embeddings=[[float(len(request["input"][0]))] * self.dimension])
-
-    def run_reembed(self, client, answer="y", record=None, **kwargs):
-        settings = get_model_settings(self.connect())
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(reembed, "check_ready", return_value=(client, settings)), \
-                mock.patch("builtins.input", return_value=answer), \
-                mock.patch.object(config, "load_install_record", return_value={"pinned_models": {"imagent-pin/e:old": "e:latest"}}), \
-                mock.patch.object(config, "record_pinned_model") as recorded:
-            try:
-                reembed.reembed(**kwargs)
-                error = None
-            except SystemExit as exc:
-                error = exc
-        return out.getvalue(), recorded, error
-
-    def test_every_vector_is_made_again_with_the_installed_model_and_the_new_model_is_locked(self):
-        conn = self.make_database()
-        client = self.Embedder(dimension=4)
-        out, recorded, error = self.run_reembed(client)
-        self.assertIsNone(error)
-        self.assertIn("2 image(s) to embed again", out)
-        self.assertRegex(out, r"takes about \d+ s")
-        rows = conn.execute("SELECT embedding_model, embedding_digest, embedding_dim, length(embedding) FROM text_embeddings").fetchall()
-        self.assertEqual(len(rows), 2)
-        self.assertTrue(all(tuple(r) == ("imagent-pin/e:newdigest000", "sha256:newdigest00000000", 4, 16) for r in rows))
-        settings = get_model_settings(conn)
-        self.assertEqual((settings["embedding_model"], settings["embedding_dim"], settings["embedding_digest"]),
-                         ("imagent-pin/e:newdigest000", 4, "sha256:newdigest00000000"))
-        recorded.assert_called_once_with("imagent-pin/e:newdigest000", "e:latest")  # the new copy is known to the uninstaller
-        self.assertEqual(conn.execute("SELECT DISTINCT search_text_version FROM image_data").fetchall()[0][0], 1)
-
-    def test_it_says_how_long_it_will_take_and_changes_nothing_if_declined(self):
-        conn = self.make_database()
-        out, _, _ = self.run_reembed(self.Embedder(), answer="n")
-        self.assertIn("Nothing was changed", out)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 0)
-        self.assertEqual(get_model_settings(conn)["embedding_digest"], "olddigest")
-
-    def test_an_interrupted_run_changes_nothing(self):
-        conn = self.make_database()
-        _, _, error = self.run_reembed(self.Embedder(fail_on=4), assume_yes=True)  # 2 calls for the estimate, then the second image fails
-        self.assertIn("Nothing was changed", str(error))
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 0)
-        self.assertEqual(get_model_settings(conn)["embedding_digest"], "olddigest")
-
-    def test_images_without_a_stored_reply_are_reported_and_left_alone(self):
-        conn = self.make_database(with_old_format=True)
-        out, _, _ = self.run_reembed(self.Embedder(), assume_yes=True)
-        self.assertIn("1 image(s) have no stored reply", out)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 2)
-
-    def test_the_search_text_is_the_one_indexing_would_build(self):
-        from text_processing.formatters import build_search_text
-        good = {"file_id": 1, "vlm_metadata_json": json.dumps({"vlm": {"short_description": "A cat.", "scene": "x"}, "ocr_text": ["EXIT"]})}
-        self.assertEqual(reembed.search_text(good), build_search_text({"short_description": "A cat.", "scene": "x"}, ["EXIT"], config.SUMMARY_FIELD))
-        for bad in ("not json", "{}", json.dumps({"vlm": "not a dict"}), None):
-            self.assertIsNone(reembed.search_text({"file_id": 2, "vlm_metadata_json": bad}))
-
-    def test_a_missing_embedding_model_is_pointed_at_the_installer(self):
-        self.make_database()
-        client = self.Embedder()
-        client.listing = models()  # nothing installed
-        with mock.patch.object(config, "load_install_record", return_value={}), self.assertRaises(SystemExit) as raised:
-            reembed._model_to_use(client, get_model_settings(self.connect()))
-        self.assertIn(config.INSTALL_COMMAND, str(raised.exception))
-
-
-    def add_images(self, conn, count):
-        """Add ``count`` more indexed images, each with a stored reply."""
-        root = conn.execute("SELECT root_id FROM scan_roots").fetchone()[0]
-        with conn:
-            conn.executemany(
-                "INSERT INTO image_data(root_id, file_path, hash, vlm_metadata_json, modified_at) VALUES (?, ?, 'h', ?, 't')",
-                [(root, f"/extra{n}.png", json.dumps({"vlm": {"short_description": f"Picture {n}.", "scene": "A scene."}, "ocr_text": [], "features": {}}))
-                 for n in range(count)])
-
-    def staging_tables(self, conn):
-        return [row[0] for row in conn.execute("SELECT name FROM sqlite_temp_master WHERE type = 'table'")] + \
-               [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE name LIKE '%staging%'")]
-
-    def test_the_vectors_wait_in_a_temporary_table_that_is_gone_afterwards_and_never_in_the_database(self):
-        conn = self.make_database()
-        seen = []
-        original = reembed.stage_embedding
-
-        def stage(conn_, file_id, blob):
-            original(conn_, file_id, blob)
-            seen.append((self.staging_tables(conn_), conn_.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0]))
-        with mock.patch.object(reembed, "stage_embedding", stage):
-            self.run_reembed(self.Embedder(), assume_yes=True)
-        self.assertTrue(all(tables == ["embedding_staging"] for tables, _ in seen))  # a temporary table, not one of the database's own
-        self.assertEqual([stored for _, stored in seen], [0, 0])  # nothing in the database until all are made
-        self.assertEqual(self.staging_tables(conn), [])
-
-    def test_an_interrupted_run_leaves_no_temporary_table_behind(self):
-        conn = self.make_database()
-        self.run_reembed(self.Embedder(fail_on=4), assume_yes=True)
-        self.assertEqual(self.staging_tables(conn), [])
-
-    def embed_in_batches_of(self, batch):
-        conn = self.make_database()
-        self.add_images(conn, 5)
-        with mock.patch.object(config, "DB_BATCH_ROWS", batch):
-            out, _, error = self.run_reembed(self.Embedder(dimension=4), assume_yes=True)
-        self.assertIsNone(error)
-        self.assertIn("7 image(s) to embed again", out)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 7)
-        self.assertEqual(conn.execute("SELECT COUNT(DISTINCT file_id) FROM text_embeddings").fetchone()[0], 7)  # none twice, none missed
-
-    def test_one_row_at_a_time_gives_every_image_its_vector(self):
-        self.embed_in_batches_of(1)
-
-    def test_a_batch_that_does_not_divide_the_images_evenly_gives_every_image_its_vector(self):
-        self.embed_in_batches_of(3)
-
-    def test_a_batch_larger_than_the_images_gives_every_image_its_vector(self):
-        self.embed_in_batches_of(1000)
-
-    def test_vectors_of_different_sizes_change_nothing(self):
-        conn = self.make_database()
-        sizes = iter([4, 4, 4, 3])  # the estimate takes two, then the first image, then the second comes back shorter
-        embedder = self.Embedder()
-        original = embedder.embed
-        embedder.embed = lambda **request: SimpleNamespace(embeddings=[[1.0] * next(sizes)])
-        _, _, error = self.run_reembed(embedder, assume_yes=True)
-        self.assertIn("different sizes", str(error))
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 0)
-        self.assertEqual(self.staging_tables(conn), [])
-
-    def test_the_first_embedding_only_starts_the_model_and_is_not_what_the_estimate_is_made_of(self):
-        conn = self.make_database()
-        self.add_images(conn, 8)  # 10 images: the estimate embeds SAMPLE_SIZE of them, then every one is embedded
-        client = self.Embedder()
-        self.run_reembed(client, assume_yes=True)
-        self.assertEqual(client.calls, reembed.SAMPLE_SIZE + 10)
-
-    def test_a_single_image_is_embedded_to_warm_up_then_again_to_be_timed_and_then_for_real(self):
-        conn = self.make_database()
-        conn.execute("DELETE FROM image_data WHERE file_path = '/1.png'")
-        conn.commit()
-        client = self.Embedder()
-        out, _, error = self.run_reembed(client, assume_yes=True)
-        self.assertIsNone(error)
-        self.assertEqual(client.calls, 3)  # the model's start is never what is timed, even when there is only one image to time
-        self.assertIn("1 image(s) to embed again", out)
-
-    def test_memory_does_not_grow_with_the_number_of_images(self):
-        import random
-        import tracemalloc
-        conn = self.make_database()
-        self.add_images(conn, 1500)
-        dimension = 1024
-
-        class Embedder(self.Embedder):
-            def embed(self, **request):
-                self.calls += 1
-                return SimpleNamespace(embeddings=[[random.random() for _ in range(dimension)]])  # distinct floats, as a real model gives
-        tracemalloc.start()
-        _, _, error = self.run_reembed(Embedder(dimension=dimension), assume_yes=True)
-        peak = tracemalloc.get_traced_memory()[1]
-        tracemalloc.stop()
-        self.assertIsNone(error)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 1502)
-        held_as_python_floats = 1502 * dimension * (8 + 24)  # what a list of lists of floats would take
-        self.assertLess(peak, held_as_python_floats / 4, f"peak {peak} bytes")
 
 
 class SetupPinTests(IsolatedHome):
@@ -470,50 +262,29 @@ class SetupPinTests(IsolatedHome):
             install._reinstall(client, "imagent-pin/e:abc123abc123")
         self.assertEqual(client.copied, [("e:latest", "imagent-pin/e:abc123abc123")])
 
-    def test_a_pinned_copy_whose_original_changed_points_to_re_embedding(self):
+    def test_a_pinned_copy_whose_original_changed_cannot_be_restored(self):
         config.save_install_record({"pinned_models": {"imagent-pin/e:abc123abc123": "e:latest"}})
         client = ReadyClient(models(**{"e:latest": "sha256:ffffffffffff"}))
         with mock.patch.object(install, "say") as say:
             install._reinstall(client, "imagent-pin/e:abc123abc123")
         self.assertEqual(client.copied, [])
-        self.assertIn("Re-embed images", say.call_args[0][0])
+        self.assertIn("cannot be restored", say.call_args[0][0])
 
 
-class MenuTests(IsolatedHome):
-    def changed(self, listing, settings=SETTINGS, ready=True):
-        """What embedding_model_changed says with the models in ``listing`` installed and ``settings`` stored."""
-        conn = self.connect()
-        with conn:
-            set_model_settings(conn, settings)
-        outcome = (ReadyClient(listing), settings) if ready else NotReady("Cannot reach Ollama")
-        with mock.patch.object(menu, "check_ready", **({"return_value": outcome} if ready else {"side_effect": outcome})):
-            return menu.embedding_model_changed()
-
-    def test_re_embed_is_offered_when_the_embedding_model_is_another_version(self):
-        self.assertTrue(self.changed(models(**{"v:latest": "vd", "e:latest": "NEW"})))
-
-    def test_re_embed_is_offered_when_the_embedding_model_was_deleted(self):
-        self.assertTrue(self.changed(models(**{"v:latest": "vd"})))
-
-    def test_re_embed_is_not_offered_when_the_embedding_model_is_unchanged(self):
-        self.assertFalse(self.changed(models(**{"v:latest": "vd", "e:latest": "ed"})))
-
-    def test_re_embed_is_not_offered_when_the_models_cannot_be_checked(self):
-        self.assertFalse(self.changed(None, ready=False))
-
-    def test_re_embed_is_in_the_choices_only_when_asked_for_and_uninstall_is_always_last(self):
-        for with_reembed in (False, True):
-            values = [choice.value for choice in menu.choices(with_reembed)]
-            self.assertEqual(menu.REEMBED[1] in values, with_reembed)
+class MenuTests(unittest.TestCase):
+    def test_the_choices_start_with_search_and_end_with_uninstall(self):
+        for failed in (0, 3):
+            values = [choice.value for choice in menu.choices(failed)]
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
+            self.assertEqual(menu.SHOW_FAILED_SCRIPT in values, failed > 0)
 
 
 class LaunchersTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
     def test_every_menu_entry_runs_a_script_that_exists(self):
-        for script in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT, menu.REEMBED[1]):
+        for script in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT):
             self.assertTrue((self.ROOT / script).is_file(), script)
 
     def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):

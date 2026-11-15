@@ -50,7 +50,6 @@ run.bat
 | Search your images | `search/search.py` |
 | Scan folders and index images | `scan_and_index/scan_and_index.py` |
 | Show the images that could not be indexed (only when there are some) | `show_failed/show_failed.py` |
-| Re-embed images (only when the embedding model changed) | `reembed/reembed.py` |
 | Uninstall Imagent | `uninstall/uninstall.sh` / `uninstall\uninstall.bat` |
 
 To index: choose **Scan folders and index images**, give it a folder, then choose **Search your images**.
@@ -71,5 +70,5 @@ Holds `imagent.db`, `config.json`, the logs and `last_error.log`.
 | --- | --- |
 | `Imagent is not set up yet` | Run `sh install.sh` (or `install.bat`). |
 | `No indexed images found` | Scan and index a folder first. |
-| `The embedding model ... is not the same version` | Choose **Re-embed images**. |
+| `The embedding model ... is not the same version` | The models are locked. Put the original version back (run the installer again to restore it), or uninstall and set up again, which clears the index. |
 | `...is on a network drive` / `...external or removable drive` | Copy the pictures to your computer's own disk. |

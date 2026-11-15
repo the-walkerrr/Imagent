@@ -1013,8 +1013,8 @@ def _reinstall(client, name: str) -> None:
             say(f"✗ Could not make {name} again ({type(exc).__name__}: {exc}).", RED)
             return
         say(f"✗ {name} was removed from Ollama, and {base or 'the model it was copied from'} is not the same version any more, "
-            f"so the original cannot be restored. Run {app_config.RUN_COMMAND} and choose \"Re-embed images\" to rebuild the index "
-            "with the model that is installed.", RED)
+            "so the original cannot be restored. Uninstall Imagent and set it up again to use the models that are installed "
+            "(this clears the index).", RED)
         return
     try:
         needed = fetch_model_specs(name)["bytes"]
