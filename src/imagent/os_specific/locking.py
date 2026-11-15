@@ -1,5 +1,5 @@
 """
-os_specific/locking.py — Lock an open file so that no other process can lock it too, the way each operating system does it.
+imagent/os_specific/locking.py — Lock an open file so that no other process can lock it too, the way each operating system does it.
 """
 
 from __future__ import annotations

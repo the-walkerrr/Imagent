@@ -1,5 +1,5 @@
 """
-image_processing/memory.py — Decide whether an image fits in the memory this computer has free right now.
+imagent/image_processing/memory.py — Decide whether an image fits in the memory this computer has free right now.
 
 No pixel count is fixed in advance: what an image may be depends on the machine, and on what else is using it. Before an
 image is opened its size is read from the file's header; if the memory it needs at its peak is more than the share of the

@@ -13,7 +13,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from imagent.db.operations import get_device_settings, set_device_settings
-from imagent.install import install
+from imagent.commands import setup
 from tests.support import DEVICE, IsolatedHome
 
 EXPECTED = ("qwen2.5vl:7b", "bge-m3:567m", "qwen3:8b")  # (vlm, embedding, text), the order ask_models uses
@@ -23,10 +23,10 @@ PASTED = "qwen2.5vl:7b,qwen3:8b,bge-m3:567m"  # the order the AI is asked for: v
 class PipInstallTests(unittest.TestCase):
     def run_install(self, result=None, error=None):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(install.subprocess, "run", return_value=result, side_effect=error), \
+        with mock.patch.object(setup.subprocess, "run", return_value=result, side_effect=error), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                install._pip_install("python")
+                setup._pip_install("python")
                 failure = None
             except SystemExit as exc:
                 failure = exc
@@ -52,7 +52,7 @@ class PipInstallTests(unittest.TestCase):
 
 class ParseModelSetTests(unittest.TestCase):
     def test_one_line_comma_separated(self):
-        self.assertEqual(install.parse_model_set(PASTED), EXPECTED)
+        self.assertEqual(setup.parse_model_set(PASTED), EXPECTED)
 
     def test_decoration_spaces_and_other_separators_are_ignored(self):
         for raw in (
@@ -64,23 +64,23 @@ class ParseModelSetTests(unittest.TestCase):
             "qwen2.5vl:7b\nqwen3:8b\nbge-m3:567m",
             "[qwen2.5vl:7b, qwen3:8b, bge-m3:567m]",
         ):
-            self.assertEqual(install.parse_model_set(raw), EXPECTED, repr(raw))
+            self.assertEqual(setup.parse_model_set(raw), EXPECTED, repr(raw))
 
     def test_a_model_from_another_registry_or_a_user(self):
         raw = "hf.co/org/model-GGUF:Q4_K_M,user/chat:7b,nomic-embed-text"
-        self.assertEqual(install.parse_model_set(raw), ("hf.co/org/model-GGUF:Q4_K_M", "nomic-embed-text", "user/chat:7b"))
+        self.assertEqual(setup.parse_model_set(raw), ("hf.co/org/model-GGUF:Q4_K_M", "nomic-embed-text", "user/chat:7b"))
 
     def test_the_wrong_number_of_names_is_not_readable(self):
-        self.assertIsNone(install.parse_model_set("qwen2.5vl:7b,qwen3:8b"))
-        self.assertIsNone(install.parse_model_set(PASTED + ",extra:1b"))
-        self.assertIsNone(install.parse_model_set("qwen2.5vl:7b"))
-        self.assertIsNone(install.parse_model_set(""))
+        self.assertIsNone(setup.parse_model_set("qwen2.5vl:7b,qwen3:8b"))
+        self.assertIsNone(setup.parse_model_set(PASTED + ",extra:1b"))
+        self.assertIsNone(setup.parse_model_set("qwen2.5vl:7b"))
+        self.assertIsNone(setup.parse_model_set(""))
 
     def test_none_or_a_bad_name_is_not_readable(self):
-        self.assertIsNone(install.parse_model_set("NONE,qwen3:8b,bge-m3:567m"))
-        self.assertIsNone(install.parse_model_set("<vision model name>:<tag>,qwen3:8b,bge-m3:567m"))
-        self.assertIsNone(install.parse_model_set("qwen2.5vl:7b,,bge-m3:567m"))
-        self.assertIsNone(install.parse_model_set("Set 1: qwen2.5vl:7b,qwen3:8b,bge-m3:567m"))  # text around it
+        self.assertIsNone(setup.parse_model_set("NONE,qwen3:8b,bge-m3:567m"))
+        self.assertIsNone(setup.parse_model_set("<vision model name>:<tag>,qwen3:8b,bge-m3:567m"))
+        self.assertIsNone(setup.parse_model_set("qwen2.5vl:7b,,bge-m3:567m"))
+        self.assertIsNone(setup.parse_model_set("Set 1: qwen2.5vl:7b,qwen3:8b,bge-m3:567m"))  # text around it
 
 
 class ModelScreenTests(unittest.TestCase):
@@ -97,13 +97,13 @@ class ModelScreenTests(unittest.TestCase):
             watchdog = threading.Timer(10, lambda: pipe.send_text("\x03"))
             watchdog.start()
             try:
-                with mock.patch.object(install, "say"), \
-                        mock.patch.object(install, "build_ai_prompt", return_value="prompt"), \
-                        mock.patch.object(install, "copy_to_clipboard", return_value=copied), \
-                        mock.patch.object(install, "offer_prompt_copy", side_effect=offer) as offer_copy:
+                with mock.patch.object(setup, "say"), \
+                        mock.patch.object(setup, "build_ai_prompt", return_value="prompt"), \
+                        mock.patch.object(setup, "copy_to_clipboard", return_value=copied), \
+                        mock.patch.object(setup, "offer_prompt_copy", side_effect=offer) as offer_copy:
                     pipe.send_text(keys)
                     self.offer_copy = offer_copy
-                    return install.ask_models(*args)
+                    return setup.ask_models(*args)
             finally:
                 watchdog.cancel()
 
@@ -158,8 +158,8 @@ class AiPromptTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with mock.patch.object(install, "system_details", return_value="- RAM: 8 GB"):
-            cls.prompt = install.build_ai_prompt()
+        with mock.patch.object(setup, "system_details", return_value="- RAM: 8 GB"):
+            cls.prompt = setup.build_ai_prompt()
 
     def test_the_embedding_model_is_counted_with_the_vision_model_when_indexing(self):
         indexing = next(line for line in self.prompt.splitlines() if line.strip().startswith("- indexing:"))
@@ -189,14 +189,14 @@ class AiPromptTests(unittest.TestCase):
 
     def test_a_set_with_the_same_model_twice_is_accepted_by_the_parser(self):
         self.assertIn("write its name twice", self.prompt)
-        self.assertEqual(install.parse_model_set("qwen2.5vl:7b,qwen2.5vl:7b,bge-m3:567m"),
+        self.assertEqual(setup.parse_model_set("qwen2.5vl:7b,qwen2.5vl:7b,bge-m3:567m"),
                          ("qwen2.5vl:7b", "bge-m3:567m", "qwen2.5vl:7b"))
 
 
 class GpuMemoryDetailTests(unittest.TestCase):
     def details(self, metal_gb):
-        with mock.patch.object(install, "_metal_gpu_memory_gb", return_value=metal_gb):
-            return install.system_details()
+        with mock.patch.object(setup, "_metal_gpu_memory_gb", return_value=metal_gb):
+            return setup.system_details()
 
     def test_the_gpu_memory_metal_reports_is_listed(self):
         self.assertIn("- GPU memory usable (reported by Metal for this computer): 5.3 GB", self.details(5.33))
@@ -205,8 +205,8 @@ class GpuMemoryDetailTests(unittest.TestCase):
         self.assertNotIn("GPU memory usable", self.details(None))
 
     def test_metal_is_not_asked_outside_macos(self):
-        with mock.patch.object(install.platform, "system", return_value="Linux"):
-            self.assertIsNone(install._metal_gpu_memory_gb())
+        with mock.patch.object(setup.platform, "system", return_value="Linux"):
+            self.assertIsNone(setup._metal_gpu_memory_gb())
 
 
 class MeasureAgainTests(IsolatedHome):
@@ -218,8 +218,8 @@ class MeasureAgainTests(IsolatedHome):
         self.conn = self.connect()
         self.client = SimpleNamespace(list=lambda: SimpleNamespace(models=[SimpleNamespace(model="vlm", digest="d1")]))
         self.measured = {**DEVICE, "num_ctx": 4096, "one_model_at_a_time": True}
-        patchers = (mock.patch.object(install, "ollama_client", return_value=contextlib.nullcontext(self.client)),
-                    mock.patch.object(install, "measure_computer", return_value=(self.measured, None)))
+        patchers = (mock.patch.object(setup, "ollama_client", return_value=contextlib.nullcontext(self.client)),
+                    mock.patch.object(setup, "measure_computer", return_value=(self.measured, None)))
         self.measure = [patcher.start() for patcher in patchers][1]
         for patcher in patchers:
             self.addCleanup(patcher.stop)
@@ -229,7 +229,7 @@ class MeasureAgainTests(IsolatedHome):
             set_device_settings(self.conn, {**DEVICE, "one_model_at_a_time": apart}, digest)
 
     def run_it(self):
-        install.measure_again_if_needed(self.settings, "http://localhost:11434")
+        setup.measure_again_if_needed(self.settings, "http://localhost:11434")
 
     def test_a_computer_measured_with_this_vision_model_and_both_models_together_is_not_measured_again(self):
         for apart in (False, True):

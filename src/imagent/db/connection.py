@@ -1,5 +1,5 @@
 """
-db/connection.py — Database initialisation and connection factory.
+imagent/db/connection.py — Database initialisation and connection factory.
 
 Opens (or creates) the SQLite database, brings its schema up to date, and configures
 per-connection PRAGMAs required by the pipeline.

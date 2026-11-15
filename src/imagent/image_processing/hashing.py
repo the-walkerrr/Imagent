@@ -1,5 +1,5 @@
 """
-image_processing/hashing.py — Content hash computation for change and move detection.
+imagent/image_processing/hashing.py — Content hash computation for change and move detection.
 
 Always SHA-256 (stdlib): the stored hashes must be identical on every machine and install.
 """

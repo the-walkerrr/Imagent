@@ -1,5 +1,5 @@
 """
-os_specific/convert.py — The command that turns a picture Pillow cannot open into a PNG, with what the operating system has.
+imagent/os_specific/convert.py — The command that turns a picture Pillow cannot open into a PNG, with what the operating system has.
 
 macOS has ``sips``; Windows can convert with the imaging components built into it (through PowerShell); Linux has no such
 tool, so there nothing is converted.

@@ -11,7 +11,7 @@ import httpx
 import ollama
 
 from imagent import config
-from imagent.scan_and_index import scan_and_index
+from imagent.commands import scan
 from imagent.db.operations import get_backlog, get_exhausted_backlog, get_or_add_root, upsert_backlog
 from tests.support import IsolatedHome
 from imagent.image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, ImageProblem, problem
@@ -33,7 +33,7 @@ class ClassifyFailureTests(unittest.TestCase):
             (OSError("cannot read the file"), (True, False)),
         ]
         for exc, expected in cases:
-            self.assertEqual(scan_and_index.classify_failure(exc), expected, repr(exc))
+            self.assertEqual(scan.classify_failure(exc), expected, repr(exc))
 
 
 class ModelMemoryTests(IsolatedHome):
@@ -61,13 +61,13 @@ class ModelMemoryTests(IsolatedHome):
         self.patch("unload_model", step("unload"))
 
     def patch(self, name, replacement):
-        patcher = mock.patch.object(scan_and_index, name, side_effect=replacement)
+        patcher = mock.patch.object(scan, name, side_effect=replacement)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def index(self):
         image = self.make_image(self.work / "a.png")
-        return scan_and_index.index_image(self.conn, object(), self.settings, self.root_id, image)
+        return scan.index_image(self.conn, object(), self.settings, self.root_id, image)
 
     def test_models_that_fit_together_are_left_to_share_the_memory(self):
         with mock.patch.object(config, "ONE_MODEL_AT_A_TIME", False):
@@ -112,10 +112,10 @@ class RunTests(IsolatedHome):
             ("collect_versions", mock.Mock(return_value={})),
             ("Progress", mock.MagicMock()),
         ):
-            patcher = mock.patch.object(scan_and_index, target, replacement)
+            patcher = mock.patch.object(scan, target, replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(scan_and_index.ocr, "check_available")
+        patcher = mock.patch.object(scan.ocr, "check_available")
         self.ocr_check = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -125,9 +125,9 @@ class RunTests(IsolatedHome):
 
     def test_a_full_disk_stops_the_run_and_blames_no_file(self):
         full = sqlite3.OperationalError("database or disk is full")
-        with mock.patch.object(scan_and_index, "index_image", side_effect=full) as index_image:
+        with mock.patch.object(scan, "index_image", side_effect=full) as index_image:
             with self.assertRaises(SystemExit) as stop:
-                scan_and_index._index_backlog()
+                scan._index_backlog()
         self.assertEqual(stop.exception.code, 1)
         self.assertEqual(index_image.call_count, 1)  # it did not go on to fail the other three
         self.assertEqual(len(get_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS)), 4)
@@ -135,9 +135,9 @@ class RunTests(IsolatedHome):
 
     def test_ollama_down_stops_after_a_few_files_without_using_their_attempts(self):
         refused = httpx.ConnectError("refused", request=httpx.Request("POST", "http://localhost"))
-        with mock.patch.object(scan_and_index, "index_image", side_effect=refused):
+        with mock.patch.object(scan, "index_image", side_effect=refused):
             with self.assertRaises(SystemExit):
-                scan_and_index._index_backlog()
+                scan._index_backlog()
         attempts = self._attempts()
         self.assertEqual(len(attempts), 4)  # all still queued
         self.assertTrue(all(count == 0 for count, _ in attempts.values()))
@@ -148,8 +148,8 @@ class RunTests(IsolatedHome):
             if path.name == "b.png":
                 raise ValueError("cannot be decoded")
             return "indexed", "ok"
-        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
-            scan_and_index._index_backlog()
+        with mock.patch.object(scan, "index_image", side_effect=index_image):
+            scan._index_backlog()
         self.assertEqual(self._attempts(), {"b.png": (1, "ValueError: cannot be decoded")})
 
     def test_a_file_deleted_since_the_scan_is_dropped_from_the_queue_and_the_run_goes_on(self):
@@ -157,15 +157,15 @@ class RunTests(IsolatedHome):
             if path.name == "b.png":
                 raise FileNotFoundError(str(path))  # the folder is still there, the file is not
             return "indexed", "ok"
-        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
-            scan_and_index._index_backlog()
+        with mock.patch.object(scan, "index_image", side_effect=index_image):
+            scan._index_backlog()
         self.assertEqual(self._attempts(), {})  # b.png is no longer queued, and nothing was held against it
 
     def test_files_missing_together_with_their_folder_stop_the_run_and_keep_their_attempts(self):
         shutil.rmtree(self.work)  # the drive went away
-        with mock.patch.object(scan_and_index, "index_image", side_effect=FileNotFoundError("gone")):
+        with mock.patch.object(scan, "index_image", side_effect=FileNotFoundError("gone")):
             with self.assertRaises(SystemExit) as stop:
-                scan_and_index._index_backlog()
+                scan._index_backlog()
         self.assertEqual(stop.exception.code, 1)
         attempts = self._attempts()
         self.assertEqual(len(attempts), 4)  # none was dropped from the queue
@@ -179,8 +179,8 @@ class RunTests(IsolatedHome):
             if path.name == "b.png":
                 raise AnalysisFailed("cut_off", "cut off at 5 tokens", [attempt])
             return "indexed", "ok"
-        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
-            scan_and_index._index_backlog()
+        with mock.patch.object(scan, "index_image", side_effect=index_image):
+            scan._index_backlog()
         row = self.conn.execute("SELECT * FROM backlog").fetchall()
         self.assertEqual([r["file_path"].rsplit("/", 1)[-1] for r in row], ["b.png"])
         self.assertEqual((row[0]["status"], row[0]["park_kind"], row[0]["attempts"]), ("parked", "cut_off", 0))
@@ -189,8 +189,8 @@ class RunTests(IsolatedHome):
         self.assertEqual([tuple(h) for h in history], [("cut_off", "first try", "{")])
 
     def test_a_file_that_changes_is_queued_again_after_being_parked(self):
-        with mock.patch.object(scan_and_index, "index_image", side_effect=AnalysisFailed("cut_off", "x", [])):
-            scan_and_index._index_backlog()
+        with mock.patch.object(scan, "index_image", side_effect=AnalysisFailed("cut_off", "x", [])):
+            scan._index_backlog()
         self.assertEqual(len(get_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS)), 0)
         with self.conn:
             for name in ("a.png", "b.png", "c.png", "d.png"):
@@ -201,9 +201,9 @@ class RunTests(IsolatedHome):
         def index_image(conn, client, settings, root_id, path, on_stage, on_retry):
             on_retry("cut_off")
             return "indexed", "ok"
-        with mock.patch.object(config, "RETRY_RATE_WINDOW", 3), mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
+        with mock.patch.object(config, "RETRY_RATE_WINDOW", 3), mock.patch.object(scan, "index_image", side_effect=index_image):
             with self.assertRaises(SystemExit) as stop:
-                scan_and_index._index_backlog()
+                scan._index_backlog()
         self.assertEqual(stop.exception.code, 1)
         self.assertEqual(len(self._attempts()), 1)  # three were indexed before it stopped; the fourth is still queued
 
@@ -216,9 +216,9 @@ class RunTests(IsolatedHome):
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
+        with mock.patch.object(scan, "index_image", side_effect=index_image):
             try:
-                scan_and_index._index_backlog()
+                scan._index_backlog()
                 return None
             except SystemExit as stop:
                 return stop
@@ -303,8 +303,8 @@ class RunTests(IsolatedHome):
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        with mock.patch.object(scan_and_index, "index_image", side_effect=index_image):
-            scan_and_index._index_with_tries(self.conn, object(), {}, 1, self.work / "a.png", stages.append, lambda kind: None)
+        with mock.patch.object(scan, "index_image", side_effect=index_image):
+            scan._index_with_tries(self.conn, object(), {}, 1, self.work / "a.png", stages.append, lambda kind: None)
         self.assertEqual(stages[0], "analysing image")
         self.assertTrue(stages[1].startswith("timeout: trying again, 2 of "), stages)
         self.assertTrue(stages[2].startswith("timeout: trying again, 2 of ") and stages[2].endswith("analysing image"), stages)
@@ -348,16 +348,16 @@ class RunTests(IsolatedHome):
 
     def test_missing_ocr_models_stop_the_run_before_any_image(self):
         self.ocr_check.side_effect = OSError("no internet")
-        with mock.patch.object(scan_and_index, "index_image") as index_image:
+        with mock.patch.object(scan, "index_image") as index_image:
             with self.assertRaisesRegex(SystemExit, "text-reading"):
-                scan_and_index._index_backlog()
+                scan._index_backlog()
         index_image.assert_not_called()
         self.assertEqual(len(self._attempts()), 4)
 
     def test_a_second_run_at_the_same_time_is_refused(self):
-        with scan_and_index.single_instance("indexing", "Indexing"):
+        with scan.single_instance("indexing", "Indexing"):
             with self.assertRaisesRegex(SystemExit, "already running"):
-                scan_and_index.run()
+                scan.run()
 
 
 if __name__ == "__main__":

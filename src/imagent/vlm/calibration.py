@@ -1,5 +1,5 @@
 """
-vlm/calibration.py — Measure this computer with the vision model, so the settings that depend on it are measured, not guessed.
+imagent/vlm/calibration.py — Measure this computer with the vision model, so the settings that depend on it are measured, not guessed.
 
 Run once by setup (and again when the vision model changed). It sends the model the real prompt and schema with a picture
 made here (a scene drawn with Pillow, so nothing is downloaded or shipped), at smaller and smaller sizes, until one works:

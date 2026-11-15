@@ -1,5 +1,5 @@
 """
-os_specific/files.py — What each operating system says about a file or a folder that Python's ``os`` module does not.
+imagent/os_specific/files.py — What each operating system says about a file or a folder that Python's ``os`` module does not.
 
   * a folder the user hid (Windows' hidden attribute, macOS's hidden flag): it holds the system's own caches, not pictures;
   * a file whose content is in cloud storage and not on this computer (an iCloud or OneDrive placeholder): reading it makes

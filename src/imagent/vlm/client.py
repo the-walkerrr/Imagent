@@ -1,5 +1,5 @@
 """
-vlm/client.py — The Ollama client (with timeouts) and the readiness check run before every
+imagent/vlm/client.py — The Ollama client (with timeouts) and the readiness check run before every
 indexing or search session.
 """
 

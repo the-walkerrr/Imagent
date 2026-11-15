@@ -208,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_image_data_modified_at ON image_data(modified_at)
 --
 -- What: Stores files that need to be indexed or re-indexed after a filesystem scan.
 -- Why:  Decouples cheap filesystem scanning from expensive VLM processing.
--- When: Populated by scan_and_index.py for new or modified files.
+-- When: Populated by commands/scan.py for new or modified files.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS backlog (
     -- Keyed by path: a new file has no image_data row (and so no file_id) yet.

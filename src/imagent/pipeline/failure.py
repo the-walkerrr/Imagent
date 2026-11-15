@@ -1,5 +1,5 @@
 """
-pipeline/failure.py — What the indexing loop is told when one image cannot be indexed, or the whole run cannot go on.
+imagent/pipeline/failure.py — What the indexing loop is told when one image cannot be indexed, or the whole run cannot go on.
 
 Each kind of trouble does its own retrying where it happens (reading the image, reading its text, asking the model).
 When that is not enough, it raises one of these, and the loop only has to know what to do with the file:

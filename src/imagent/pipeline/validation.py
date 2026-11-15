@@ -1,5 +1,5 @@
 """
-pipeline/validation.py — Validate the user-supplied root folder before indexing begins.
+imagent/pipeline/validation.py — Validate the user-supplied root folder before indexing begins.
 
 Exits the process immediately with a clear error message if the path is unusable,
 so downstream code can assume the root is valid and readable.

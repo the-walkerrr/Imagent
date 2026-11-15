@@ -29,7 +29,7 @@ _HANDLING = {
     CUT_OFF: {"retry_when": "model_changed", "model_trouble": True},
     INVALID_REPLY: {"retry_when": "model_changed", "model_trouble": True},
     # The machine's trouble, not the file's: the file stays queued and is tried again by the next run (the loop in
-    # scan_and_index tries it config.SERVICE_TRIES times first, and tells the user when that was not enough).
+    # imagent/commands/scan.py tries it config.SERVICE_TRIES times first, and tells the user when that was not enough).
     TIMEOUT: {"park": False, "service": True},
     SERVER_CRASH: {"park": False, "service": True},
     OUT_OF_MEMORY: {"park": False, "service": True},

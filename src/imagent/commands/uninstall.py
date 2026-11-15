@@ -1,5 +1,5 @@
 """
-uninstall/uninstall.py — Take Imagent off this computer: show what will be lost, ask three times, then delete.
+imagent/commands/uninstall.py — Take Imagent off this computer: show what will be lost, ask three times, then delete.
 
 Started by uninstall.sh / uninstall.bat with a Python that is not the one in .venv, because it deletes .venv.
 Standard library only. It removes:

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from imagent.scan_and_index import scan_and_index
+from imagent.commands import scan
 from imagent.db.operations import get_backlog, get_or_add_root, images_by_path
 from imagent.pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed
@@ -17,7 +17,7 @@ class ScanBase(IsolatedHome):
         """Create the images, scan them in, and mark them as indexed."""
         for number, name in enumerate(names):
             self.make_image(root / name, shade=number)
-        scan_and_index.scan(root)
+        scan.scan(root)
         conn = self.connect()
         root_id = get_or_add_root(conn, str(root))
         for item in get_backlog(conn, 99):
@@ -39,7 +39,7 @@ class ScanSafetyTests(ScanBase):
         self._index(root, ["a/1.png", "a/2.png", "b/3.png"])
         (root / "a").chmod(0)
         try:
-            counts = scan_and_index.scan(root)
+            counts = scan.scan(root)
         finally:
             (root / "a").chmod(0o755)
         self.assertEqual(counts["deleted"], 0)
@@ -52,10 +52,10 @@ class ScanSafetyTests(ScanBase):
         self._index(root, names)
         for name in names[:10]:
             (root / name).unlink()
-        counts = scan_and_index.scan(root)
+        counts = scan.scan(root)
         self.assertEqual((counts["deleted"], counts["delete_blocked"]), (0, 10))
         self.assertEqual(self._stored(root), 12)
-        counts = scan_and_index.scan(root, allow_mass_delete=True)
+        counts = scan.scan(root, allow_mass_delete=True)
         self.assertEqual(counts["deleted"], 10)
         self.assertEqual(self._stored(root), 2)
 
@@ -65,14 +65,14 @@ class ScanSafetyTests(ScanBase):
         self._index(root, names)
         (root / names[0]).unlink()
         (root / names[1]).unlink()
-        counts = scan_and_index.scan(root)
+        counts = scan.scan(root)
         self.assertEqual((counts["deleted"], counts["delete_blocked"]), (2, 0))
 
     def test_a_folder_that_shows_nothing_is_never_wiped_unasked(self):
         root = self.work / "pictures"
         self._index(root, ["only.png"])
         (root / "only.png").unlink()
-        counts = scan_and_index.scan(root)
+        counts = scan.scan(root)
         self.assertEqual((counts["deleted"], counts["delete_blocked"]), (0, 1))
 
     def test_a_moved_file_keeps_its_record(self):
@@ -80,14 +80,14 @@ class ScanSafetyTests(ScanBase):
         self._index(root, ["old/1.png", "2.png"])
         (root / "new").mkdir()
         shutil.move(root / "old" / "1.png", root / "new" / "renamed.png")
-        counts = scan_and_index.scan(root)
+        counts = scan.scan(root)
         self.assertEqual((counts["moved"], counts["deleted"], counts["queued_new"]), (1, 0, 0))
 
     def test_empty_files_are_left_out_and_counted(self):
         root = self.work / "pictures"
         self.make_image(root / "ok.png")
         (root / "empty.png").write_bytes(b"")
-        counts = scan_and_index.scan(root)
+        counts = scan.scan(root)
         self.assertEqual((counts["queued_new"], counts["empty"]), (1, 1))
 
 
@@ -134,15 +134,15 @@ class CloudAndHiddenTests(ScanBase):
     def _scan_with_away(self, root, away_names):
         """``is_not_downloaded`` says yes for the files with these names, as the operating system would for an evicted file."""
         away_inodes = {os.stat(root / name).st_ino for name in away_names}
-        return mock.patch.object(scan_and_index, "is_not_downloaded", side_effect=lambda status: status.st_ino in away_inodes)
+        return mock.patch.object(scan, "is_not_downloaded", side_effect=lambda status: status.st_ino in away_inodes)
 
     def test_a_file_that_is_only_in_the_cloud_is_not_read_and_is_not_queued(self):
         root = self.work / "pictures"
         self.make_image(root / "here.png", 1)
         self.make_image(root / "cloud.png", 2)
         opened = []
-        with self._scan_with_away(root, ["cloud.png"]), mock.patch.object(scan_and_index, "compute_hash", side_effect=opened.append):
-            counts = scan_and_index.scan(root)
+        with self._scan_with_away(root, ["cloud.png"]), mock.patch.object(scan, "compute_hash", side_effect=opened.append):
+            counts = scan.scan(root)
         self.assertNotIn("cloud.png", [Path(path).name for path in opened])  # a new file is hashed only to tell a move from a new file
         self.assertEqual((counts["scanned"], counts["queued_new"], counts["not_downloaded"]), (1, 1, 1))
         self.assertEqual([Path(item["file_path"]).name for item in get_backlog(self.connect(), 99)], ["here.png"])
@@ -151,16 +151,16 @@ class CloudAndHiddenTests(ScanBase):
         root = self.work / "pictures"
         self._index(root, ["a.png", "b.png", "c.png"])
         with self._scan_with_away(root, ["a.png", "b.png", "c.png"]):  # all of them: the folder looks empty, like an unmounted drive
-            counts = scan_and_index.scan(root)
+            counts = scan.scan(root)
         self.assertEqual((counts["deleted"], counts["delete_blocked"], counts["not_downloaded"]), (0, 0, 3))
         self.assertEqual(self._stored(root), 3)
 
     def test_a_queued_file_that_goes_to_the_cloud_stays_queued(self):
         root = self.work / "pictures"
         self.make_image(root / "a.png", 1)
-        scan_and_index.scan(root)
+        scan.scan(root)
         with self._scan_with_away(root, ["a.png"]):
-            scan_and_index.scan(root)
+            scan.scan(root)
         self.assertEqual(len(get_backlog(self.connect(), 99)), 1)
 
     def test_the_user_is_told_how_many_files_were_left_alone(self):
@@ -170,7 +170,7 @@ class CloudAndHiddenTests(ScanBase):
         self.make_image(root / "a.png", 1)
         out = io.StringIO()
         with self._scan_with_away(root, ["a.png"]), contextlib.redirect_stdout(out):
-            scan_and_index._scan_and_report(root)
+            scan._scan_and_report(root)
         self.assertIn("cloud storage and not downloaded", out.getvalue())
         self.assertIn("1 image(s) in cloud storage", out.getvalue())
 
@@ -181,10 +181,10 @@ class CloudAndHiddenTests(ScanBase):
             root_id = get_or_add_root(conn, str(self.work))
         path = self.make_image(self.work / "a.png")
         settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 2, "versions": {}}
-        with mock.patch.object(scan_and_index, "is_not_downloaded", return_value=True), \
-                mock.patch.object(scan_and_index, "compute_hash", side_effect=AssertionError("downloaded it")), \
+        with mock.patch.object(scan, "is_not_downloaded", return_value=True), \
+                mock.patch.object(scan, "compute_hash", side_effect=AssertionError("downloaded it")), \
                 self.assertRaises(ImageProblem) as raised:
-            scan_and_index.index_image(conn, object(), settings, root_id, path)
+            scan.index_image(conn, object(), settings, root_id, path)
         self.assertEqual((raised.exception.kind, raised.exception.park, raised.exception.report), (NOT_DOWNLOADED, False, True))
         self.assertIn("available offline", str(raised.exception))
 

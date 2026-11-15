@@ -1,5 +1,5 @@
 """
-pipeline/storage.py — Tell whether a folder is on this computer's own disk.
+imagent/pipeline/storage.py — Tell whether a folder is on this computer's own disk.
 
 Imagent works with pictures stored on the computer it runs on. A network drive can disappear in the middle of a run and
 an external drive can be unplugged, so folders on them are refused with a clear message instead of failing image by image.

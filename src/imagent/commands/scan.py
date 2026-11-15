@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scan_and_index/scan_and_index.py — Imagent: scan folders for images, then index them.
+imagent/commands/scan.py — Imagent: scan folders for images, then index them.
 
 Scanning compares a folder with the index and queues the new or modified images (an image that moved or
 was renamed keeps its record, and one that disappeared is forgotten). Indexing then takes every file queued

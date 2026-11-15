@@ -1,5 +1,5 @@
 """
-vlm/reply_validation.py — Check the vision model's reply against the JSON schema, without knowing any field.
+imagent/vlm/reply_validation.py — Check the vision model's reply against the JSON schema, without knowing any field.
 
 The schema (``config.ANALYSIS_SCHEMA``) is sent to Ollama, which already holds the reply to it while it is being
 written, so what is checked here is what can still go wrong: a reply that was cut off, is not an object, lacks a

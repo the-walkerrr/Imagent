@@ -1,5 +1,5 @@
 """
-db/operations.py — Low-level SQL helpers for model_settings, scan_roots, image_data, backlog,
+imagent/db/operations.py — Low-level SQL helpers for model_settings, scan_roots, image_data, backlog,
 text_embeddings, error_logs and failure_history.
 
 All functions accept an open ``sqlite3.Connection`` and operate on a single row

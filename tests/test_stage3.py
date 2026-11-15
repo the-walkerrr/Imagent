@@ -13,9 +13,9 @@ from imagent.db.operations import (
     add_failure_history, get_backlog, get_or_add_root, list_parked, park_backlog, requeue_changed_parked,
     requeue_parked, set_device_settings, set_model_settings, upsert_backlog, upsert_image_data, upsert_text_embedding,
 )
-from imagent.install import install
+from imagent.commands import setup
 from imagent.pipeline import versions as versions_module
-from imagent.menu import menu
+from imagent.commands import menu
 from tests.support import DEVICE, IsolatedHome
 from imagent.vlm import client as vlm_client
 from imagent.vlm.client import NotReady, check_ready, pin_model, pinned_name
@@ -212,7 +212,7 @@ class IndexLoopVersionsTests(IsolatedHome):
     """A file parked for its model's replies is parked with the versions of the time, and queued again when they change."""
 
     def test_a_changed_prompt_queues_the_parked_file_again(self):
-        from imagent.scan_and_index import scan_and_index
+        from imagent.commands import scan
         from imagent.vlm.analyzer import AnalysisFailed
         conn = self.connect()
         with conn:
@@ -220,16 +220,16 @@ class IndexLoopVersionsTests(IsolatedHome):
             upsert_backlog(conn, "/a.png", root, "t")
         versions = {"vlm_digest": "1", "prompt_hash": "p1", "schema_hash": "s", "embedding_digest": "e"}
         settings = {"vlm_model": "v", "judge_model": "j", "embedding_model": "e", "embedding_dim": 3}
-        with contextlib.redirect_stdout(io.StringIO()) as out, mock.patch.object(scan_and_index, "check_ready", return_value=(object(), settings)), \
-                mock.patch.object(scan_and_index, "unload_model"), mock.patch.object(scan_and_index, "Progress"), \
-                mock.patch.object(scan_and_index.ocr, "check_available"), \
-                mock.patch.object(scan_and_index, "collect_versions", side_effect=[versions, versions, {**versions, "prompt_hash": "p2"}]), \
-                mock.patch.object(scan_and_index, "index_image", side_effect=[AnalysisFailed("cut_off", "cut", []), ("indexed", "ok")]):
-            scan_and_index._index_backlog()  # parks the file
+        with contextlib.redirect_stdout(io.StringIO()) as out, mock.patch.object(scan, "check_ready", return_value=(object(), settings)), \
+                mock.patch.object(scan, "unload_model"), mock.patch.object(scan, "Progress"), \
+                mock.patch.object(scan.ocr, "check_available"), \
+                mock.patch.object(scan, "collect_versions", side_effect=[versions, versions, {**versions, "prompt_hash": "p2"}]), \
+                mock.patch.object(scan, "index_image", side_effect=[AnalysisFailed("cut_off", "cut", []), ("indexed", "ok")]):
+            scan._index_backlog()  # parks the file
             self.assertEqual([p["park_kind"] for p in list_parked(conn)], ["cut_off"])
-            scan_and_index._index_backlog()  # same versions: nothing is queued
+            scan._index_backlog()  # same versions: nothing is queued
             self.assertEqual(len(list_parked(conn)), 1)
-            scan_and_index._index_backlog()  # the prompt changed: queued again and indexed
+            scan._index_backlog()  # the prompt changed: queued again and indexed
         self.assertEqual(list_parked(conn), [])
         self.assertIn("queued again", out.getvalue())
 
@@ -246,10 +246,10 @@ class SetupPinTests(IsolatedHome):
         @contextlib.contextmanager
         def fake_ollama(host):
             yield client
-        with mock.patch.object(install, "ollama_client", fake_ollama), mock.patch.object(install, "_pull_models"), \
-                mock.patch.object(install, "verify_models", verify), mock.patch.object(install, "say"), \
-                mock.patch.object(install, "measure_computer", return_value=(DEVICE, None)):
-            settings, rejected = install.download_and_verify("http://localhost:11434", "v", "e", "j")
+        with mock.patch.object(setup, "ollama_client", fake_ollama), mock.patch.object(setup, "_pull_models"), \
+                mock.patch.object(setup, "verify_models", verify), mock.patch.object(setup, "say"), \
+                mock.patch.object(setup, "measure_computer", return_value=(DEVICE, None)):
+            settings, rejected = setup.download_and_verify("http://localhost:11434", "v", "e", "j")
         self.assertEqual(captured["embedding"], "imagent-pin/e:abc123abc123")
         self.assertEqual(settings["embedding_model"], "imagent-pin/e:abc123abc123")
         record = config.load_install_record()
@@ -259,15 +259,15 @@ class SetupPinTests(IsolatedHome):
     def test_a_pinned_copy_that_was_removed_is_made_again_from_the_same_version(self):
         config.save_install_record({"pinned_models": {"imagent-pin/e:abc123abc123": "e:latest"}})
         client = ReadyClient(models(**{"e:latest": "sha256:abc123abc123xx"}))
-        with mock.patch.object(install, "say") as say:
-            install._reinstall(client, "imagent-pin/e:abc123abc123")
+        with mock.patch.object(setup, "say") as say:
+            setup._reinstall(client, "imagent-pin/e:abc123abc123")
         self.assertEqual(client.copied, [("e:latest", "imagent-pin/e:abc123abc123")])
 
     def test_a_pinned_copy_whose_original_changed_cannot_be_restored(self):
         config.save_install_record({"pinned_models": {"imagent-pin/e:abc123abc123": "e:latest"}})
         client = ReadyClient(models(**{"e:latest": "sha256:ffffffffffff"}))
-        with mock.patch.object(install, "say") as say:
-            install._reinstall(client, "imagent-pin/e:abc123abc123")
+        with mock.patch.object(setup, "say") as say:
+            setup._reinstall(client, "imagent-pin/e:abc123abc123")
         self.assertEqual(client.copied, [])
         self.assertIn("cannot be restored", say.call_args[0][0])
 
@@ -278,14 +278,14 @@ class MenuTests(unittest.TestCase):
             values = [choice.value for choice in menu.choices(failed)]
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
-            self.assertEqual(menu.SHOW_FAILED_SCRIPT in values, failed > 0)
+            self.assertEqual(menu.FAILED_MODULE in values, failed > 0)
 
 
 class LaunchersTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
     def test_every_menu_entry_runs_a_script_that_exists(self):
-        for module in (menu.SEARCH[1], menu.SCAN[1], menu.SHOW_FAILED_SCRIPT):
+        for module in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_MODULE):
             self.assertIsNotNone(importlib.util.find_spec(module), module)
 
     def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):

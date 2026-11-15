@@ -1,5 +1,5 @@
 """
-pipeline/versions.py — The versions of everything that produces an indexed record.
+imagent/pipeline/versions.py — The versions of everything that produces an indexed record.
 
 Stored with each record (see db/schema.sql), they show which records were made with something older than what is
 installed now, and decide when a file set aside for its model's replies is worth another try.

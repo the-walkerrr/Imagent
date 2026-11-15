@@ -21,13 +21,13 @@ goto finish
 
 :use_py
 set "PYTHONPATH=%~dp0src"
-py -3 -B -m imagent.uninstall.uninstall %*
+py -3 -B -m imagent.commands.uninstall %*
 set "CODE=%errorlevel%"
 goto finish
 
 :use_python
 set "PYTHONPATH=%~dp0src"
-python -B -m imagent.uninstall.uninstall %*
+python -B -m imagent.commands.uninstall %*
 set "CODE=%errorlevel%"
 
 :finish

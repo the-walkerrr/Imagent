@@ -1,5 +1,5 @@
 @echo off
-rem Imagent launcher for Windows: finds Python 3.9 or newer and runs the installer (imagent.install.install) with it.
+rem Imagent launcher for Windows: finds Python 3.9 or newer and runs the installer (imagent.commands.setup) with it.
 rem It installs nothing; if Python is missing it says how to get it.
 rem Usage: install.bat   (double-click it, or run it in a terminal)
 setlocal
@@ -23,12 +23,12 @@ set "CODE=1"
 goto finish
 
 :use_py
-py -3 -m imagent.install.install %*
+py -3 -m imagent.commands.setup %*
 set "CODE=%errorlevel%"
 goto finish
 
 :use_python
-python -m imagent.install.install %*
+python -m imagent.commands.setup %*
 set "CODE=%errorlevel%"
 
 :finish

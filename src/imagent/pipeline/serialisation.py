@@ -1,5 +1,5 @@
 """
-pipeline/serialisation.py — Pack embedding vectors for BLOB storage.
+imagent/pipeline/serialisation.py — Pack embedding vectors for BLOB storage.
 
 Vectors are stored as little-endian float32 (4 bytes per dimension) on every platform,
 so a database copied between computers reads back the same. Search decodes them with

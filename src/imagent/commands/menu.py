@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-menu/menu.py — Imagent: the menu that run.sh and run.bat open. Pick an entry with the arrow keys and Enter.
+imagent/commands/menu.py — Imagent: the menu that run.sh and run.bat open. Pick an entry with the arrow keys and Enter.
 
 It runs the chosen command and ends with that command's exit code. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
@@ -28,9 +28,9 @@ except ModuleNotFoundError as exc:
 UNINSTALL_EXIT_CODE = 75  # tells run.sh / run.bat to start the uninstaller (they compare with this number)
 UNINSTALL = "uninstall"
 
-SEARCH = ("Search your images", "imagent.search.search")
-SCAN = ("Scan folders and index images", "imagent.scan_and_index.scan_and_index")
-SHOW_FAILED_SCRIPT = "imagent.show_failed.show_failed"
+SEARCH = ("Search your images", "imagent.commands.search")
+SCAN = ("Scan folders and index images", "imagent.commands.scan")
+FAILED_MODULE = "imagent.commands.failed"
 
 STYLE = questionary.Style([
     ("qmark", "fg:ansidefault bold"),
@@ -55,7 +55,7 @@ def failed_count() -> int:
 
 
 def choices(failed: int = 0) -> list:
-    shown = [(f"Show the {failed} image(s) that could not be indexed", SHOW_FAILED_SCRIPT)] if failed else []
+    shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_MODULE)] if failed else []
     entries = [SEARCH, SCAN] + shown
     return [questionary.Choice(title, value=script) for title, script in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]

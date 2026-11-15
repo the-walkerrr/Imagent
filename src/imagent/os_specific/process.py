@@ -1,5 +1,5 @@
 """
-os_specific/process.py — Start a background process that outlives the terminal's own signals, the way each operating system does it.
+imagent/os_specific/process.py — Start a background process that outlives the terminal's own signals, the way each operating system does it.
 """
 
 from __future__ import annotations

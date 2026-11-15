@@ -1,5 +1,5 @@
 """
-os_specific/memory.py — How much memory a program can use right now, as each operating system tells it.
+imagent/os_specific/memory.py — How much memory a program can use right now, as each operating system tells it.
 
 Linux counts what the kernel says is available (``MemAvailable``), and, when the program runs in a container or under a
 memory limit (a cgroup), also what is left of that limit: ``/proc/meminfo`` shows the whole computer, so without this a

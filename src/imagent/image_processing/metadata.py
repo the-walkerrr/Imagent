@@ -1,5 +1,5 @@
 """
-image_processing/metadata.py — Extract file-level metadata from an image path.
+imagent/image_processing/metadata.py — Extract file-level metadata from an image path.
 
 Reads OS-level stat data (size, timestamps) and opens the image with Pillow to
 determine pixel dimensions and MIME type.  Does not call the VLM.
@@ -118,5 +118,5 @@ def _gps_degrees(dms, ref) -> float | None:
 
 
 def iso_utc(timestamp: float) -> str:
-    """Convert a POSIX timestamp to an ISO 8601 UTC string (also used by scan_and_index.py, so both agree on the format)."""
+    """Convert a POSIX timestamp to an ISO 8601 UTC string (also used by commands/scan.py, so both agree on the format)."""
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()

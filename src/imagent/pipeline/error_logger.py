@@ -1,5 +1,5 @@
 """
-pipeline/error_logger.py — Insert structured error records into the ``error_logs`` table.
+imagent/pipeline/error_logger.py — Insert structured error records into the ``error_logs`` table.
 
 Designed to be called inside ``except`` blocks throughout the pipeline.  This
 function is intentionally silent: it never raises an exception of its own, because

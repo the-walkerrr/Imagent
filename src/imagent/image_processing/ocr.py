@@ -1,5 +1,5 @@
 """
-image_processing/ocr.py — Read the text in an image with a local OCR engine.
+imagent/image_processing/ocr.py — Read the text in an image with a local OCR engine.
 
 Runs on the original full-size image: the VLM only sees a downscaled copy, which loses small text.
 Does not call Ollama.

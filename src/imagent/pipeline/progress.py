@@ -1,5 +1,5 @@
 """
-pipeline/progress.py — The progress displays of an indexing run (``Progress``) and of a search (``SearchProgress``).
+imagent/pipeline/progress.py — The progress displays of an indexing run (``Progress``) and of a search (``SearchProgress``).
 
 Indexing:
 

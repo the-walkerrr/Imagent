@@ -178,7 +178,7 @@ INSTALL_COMMAND: str = "install.bat" if platform.system() == "Windows" else "sh 
 RUN_COMMAND: str = "run.bat" if platform.system() == "Windows" else "sh run.sh"
 
 # --- Prompts -----------------------------------------------------------------
-PROMPTS_DIR: Path = Path(__file__).parent.parent / "prompts"
+PROMPTS_DIR: Path = Path(__file__).parent / "prompts"
 ANALYSIS_PROMPT: str = (PROMPTS_DIR / "analysis_prompt.txt").read_text(encoding="utf-8")
 # The shape of the vision model's reply: a JSON schema sent to Ollama and used to check the reply. The fields live in this
 # file and in the prompt only; no code names them, except the one below.

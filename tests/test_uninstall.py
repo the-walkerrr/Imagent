@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 from imagent import config
-from imagent.install import install
+from imagent.commands import setup
 from imagent.db.operations import get_or_add_root
-from imagent.uninstall import uninstall
+from imagent.commands import uninstall
 from tests.support import IsolatedHome, add_indexed
 
 
@@ -19,8 +19,8 @@ def _model(name):
 
 class InstallRecordTests(IsolatedHome):
     def test_a_model_is_recorded_once(self):
-        install._remember_pulled("vision")
-        install._remember_pulled("vision:latest")
+        setup._remember_pulled("vision")
+        setup._remember_pulled("vision:latest")
         self.assertEqual(config.load_install_record(), {"ollama_models": ["vision:latest"]})
 
     def test_only_models_that_were_downloaded_are_recorded(self):
@@ -28,7 +28,7 @@ class InstallRecordTests(IsolatedHome):
         client.list.return_value = SimpleNamespace(models=[_model("had-before:latest")])
         client.pull.return_value = iter([SimpleNamespace(status="done", total=None, completed=None)])
         with contextlib.redirect_stdout(io.StringIO()):
-            install._pull_models(client, ["had-before", "new-one:1b"])
+            setup._pull_models(client, ["had-before", "new-one:1b"])
         self.assertEqual(config.load_install_record(), {"ollama_models": ["new-one:1b"]})
 
     def test_a_missing_or_damaged_record_reads_as_empty(self):

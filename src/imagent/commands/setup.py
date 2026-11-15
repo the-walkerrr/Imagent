@@ -386,7 +386,7 @@ def ensure_packages() -> None:
         if RELAUNCH_FLAG in sys.argv:  # the relaunch did not end up inside .venv; stop rather than loop
             fail(f"Could not start inside .venv. Delete the .venv folder and run {app_config.INSTALL_COMMAND} again.")
         _prepare_venv()
-        result = subprocess.run([str(_venv_python()), "-m", "imagent.install.install", RELAUNCH_FLAG, *sys.argv[1:]])
+        result = subprocess.run([str(_venv_python()), "-m", "imagent.commands.setup", RELAUNCH_FLAG, *sys.argv[1:]])
         sys.exit(result.returncode)
     try:
         import questionary as q

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-search/search.py — Imagent natural-language image search.
+imagent/commands/search.py — Imagent natural-language image search.
 
 Given a natural language query, returns the three indexed images whose descriptions are
 closest to it, best first.

@@ -11,7 +11,7 @@ import ollama
 from imagent import config
 from imagent.db.operations import add_failure_history, get_or_add_root, park_backlog, upsert_backlog
 from imagent.pipeline.failure import RunStopped
-from imagent.scan_and_index import scan_and_index
+from imagent.commands import scan
 from tests.support import IsolatedHome
 from imagent.text_processing.formatters import build_description, build_search_text
 from imagent.vlm import analyzer
@@ -438,7 +438,7 @@ class IndexImageTests(IsolatedHome):
         client.embed = lambda **request: SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]])
         settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 3}
         with mock.patch.object(analyzer, "extract_text_blocks", return_value=["EXIT"]):
-            result = scan_and_index.index_image(conn, client, settings, root_id, image)
+            result = scan.index_image(conn, client, settings, root_id, image)
         self.assertEqual(result, ("indexed", "A cat."))
         row = conn.execute("SELECT short_description, description, vlm_metadata_json FROM image_data").fetchone()
         stored = json.loads(row["vlm_metadata_json"])
@@ -461,7 +461,7 @@ class IndexImageTests(IsolatedHome):
         client.embed = lambda **request: SimpleNamespace(embeddings=[[0.1, 0.2]])
         settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 3}
         with mock.patch.object(analyzer, "extract_text_blocks", return_value=[]), self.assertRaises(RunStopped):
-            scan_and_index.index_image(conn, client, settings, root_id, image)
+            scan.index_image(conn, client, settings, root_id, image)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM image_data").fetchone()[0], 0)
 
 

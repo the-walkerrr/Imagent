@@ -1,5 +1,5 @@
 """
-image_processing/problems.py — Tell what is wrong with an image that cannot be opened, from the error Pillow raised.
+imagent/image_processing/problems.py — Tell what is wrong with an image that cannot be opened, from the error Pillow raised.
 
 A damaged file, a format without a decoder, a file that is still being copied and an image too big for the memory
 at hand each need a different answer, and none of them gets better by trying the same thing again.
@@ -18,7 +18,7 @@ UNSUPPORTED = "unsupported"  # no decoder for its format on this computer
 TOO_LARGE = "too_large"  # more pixels than the memory free right now can hold
 NOT_DOWNLOADED = "not_downloaded"  # kept in cloud storage and not on this computer: reading it would download it
 OCR_FAILED = "ocr_failed"  # the text in the image could not be read, by any of the ways tried
-BUSY = "busy"  # changed since it was scanned, so perhaps still being written: tried again later, nothing is held against the file (see scan_and_index)
+BUSY = "busy"  # changed since it was scanned, so perhaps still being written: tried again later, nothing is held against the file (see commands/scan.py)
 
 
 class ImageProblem(IndexingFailure):

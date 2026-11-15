@@ -1,5 +1,5 @@
 """
-os_specific/storage.py — Tell what kind of drive a folder is on, from what each operating system says about its mounts and disks.
+imagent/os_specific/storage.py — Tell what kind of drive a folder is on, from what each operating system says about its mounts and disks.
 
 Each system says it differently, and none says it perfectly, so this only names what it is sure of: it returns None when the
 answer cannot be found, and the caller decides what that means.

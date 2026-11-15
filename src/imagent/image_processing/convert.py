@@ -1,5 +1,5 @@
 """
-image_processing/convert.py — Make a PNG copy of a picture Pillow cannot open, with the tool the operating system has.
+imagent/image_processing/convert.py — Make a PNG copy of a picture Pillow cannot open, with the tool the operating system has.
 
 The tool is the operating system's own (os_specific/convert.py): macOS has ``sips``, Windows has its imaging components, and
 Linux has none, so there nothing is converted. The copy is lossless, lives in a temporary folder and is deleted as soon as the picture

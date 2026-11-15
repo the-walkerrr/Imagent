@@ -6,7 +6,7 @@
 # Usage: sh run.sh
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-UNINSTALL_EXIT_CODE=75  # the same number as in src/imagent/menu/menu.py
+UNINSTALL_EXIT_CODE=75  # the same number as in src/imagent/commands/menu.py
 
 if [ ! -f "$DIR/.venv/bin/activate" ]; then
     echo "Imagent is not installed yet (the .venv folder was not found)."
@@ -29,7 +29,7 @@ if [ ! -f "$DIR/.venv/bin/activate" ]; then
     fi
 fi
 
-( . "$DIR/.venv/bin/activate" && PYTHONPATH="$DIR/src" python -m imagent.menu.menu )  # a subshell, so .venv is not active when the uninstaller starts
+( . "$DIR/.venv/bin/activate" && PYTHONPATH="$DIR/src" python -m imagent.commands.menu )  # a subshell, so .venv is not active when the uninstaller starts
 code=$?
 if [ "$code" -eq "$UNINSTALL_EXIT_CODE" ]; then
     exec sh "$DIR/uninstall.sh"

@@ -1,5 +1,5 @@
 """
-image_processing/features.py — Facts read straight from the pixels, not from the VLM.
+imagent/image_processing/features.py — Facts read straight from the pixels, not from the VLM.
 
 Orientation and dominant colors are cheap to compute and more reliable than
 asking a small model to guess them.

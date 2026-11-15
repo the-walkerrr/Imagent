@@ -1,5 +1,5 @@
 """
-image_processing/sample_pictures.py — The pictures setup checks this computer with.
+imagent/image_processing/sample_pictures.py — The pictures setup checks this computer with.
 
 Real photos of many kinds and sizes ship as one zip (image_processing/data/images.zip, with a manifest of where each came from and
 its licence). What no zip should hold is made here instead: pictures far larger than anyone would commit, and files that are

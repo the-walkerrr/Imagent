@@ -9,13 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKIPPED_DIRS = {".venv", ".git", "benchmark_results", "__pycache__", "sample_images"}
 MODULES = [
-    "imagent.config", "imagent.vlm.response_format", "imagent.install.install", "imagent.scan_and_index.scan_and_index", "imagent.search.search", "imagent.uninstall.uninstall",
+    "imagent.config", "imagent.vlm.response_format", "imagent.commands.setup", "imagent.commands.scan", "imagent.commands.search", "imagent.commands.uninstall",
     "imagent.db.connection", "imagent.db.operations", "imagent.pipeline.console", "imagent.pipeline.discovery", "imagent.pipeline.locking",
     "imagent.pipeline.progress", "imagent.pipeline.validation", "imagent.pipeline.error_logger", "imagent.pipeline.serialisation",
     "imagent.image_processing.metadata", "imagent.image_processing.ocr", "imagent.image_processing.preprocess", "imagent.image_processing.features",
     "imagent.text_processing.formatters", "imagent.vlm.analyzer", "imagent.vlm.client", "imagent.vlm.reply_validation",
     "imagent.image_processing.memory", "imagent.image_processing.problems", "imagent.pipeline.failure", "imagent.pipeline.storage", "imagent.pipeline.versions",
-    "imagent.menu.menu", "imagent.show_failed.show_failed", "imagent.image_processing.convert",
+    "imagent.commands.menu", "imagent.commands.failed", "imagent.image_processing.convert",
     "imagent.os_specific", "imagent.os_specific.convert", "imagent.os_specific.files", "imagent.os_specific.locking", "imagent.os_specific.memory", "imagent.os_specific.process",
     "imagent.os_specific.storage",
 ]

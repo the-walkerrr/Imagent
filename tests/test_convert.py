@@ -12,9 +12,9 @@ from imagent.db.operations import get_or_add_root, park_backlog, record_backlog_
 from imagent.image_processing import convert
 from imagent.image_processing.convert import ConversionFailed, converted_copy
 from imagent.image_processing.problems import UNSUPPORTED, ImageProblem, problem
-from imagent.menu import menu
+from imagent.commands import menu
 from imagent.os_specific import convert as os_convert
-from imagent.scan_and_index import scan_and_index
+from imagent.commands import scan
 from tests.support import IsolatedHome
 from imagent.vlm import analyzer
 
@@ -129,7 +129,7 @@ class WhatTheUserIsToldTests(unittest.TestCase):
     def test_no_message_suggests_changing_the_model(self):
         import inspect
         from imagent.image_processing import memory, problems
-        for module in (analyzer, memory, problems, scan_and_index):
+        for module in (analyzer, memory, problems, scan):
             self.assertNotRegex(inspect.getsource(module).lower(), r"another (vision )?model|different (vision )?model|change the model")
 
 
@@ -145,7 +145,7 @@ class FailedImagesReportTests(IsolatedHome):
     def report(self, limit=10):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            count = scan_and_index.print_failed(self.conn, limit)
+            count = scan.print_failed(self.conn, limit)
         return count, out.getvalue()
 
     def test_nothing_is_said_when_nothing_failed(self):
@@ -179,7 +179,7 @@ class FailedImagesReportTests(IsolatedHome):
     def test_the_menu_offers_the_list_only_when_there_is_something_to_show(self):
         for failed, offered in ((0, False), (2, True)):
             scripts = [choice.value for choice in menu.choices(failed)]
-            self.assertEqual(menu.SHOW_FAILED_SCRIPT in scripts, offered)
+            self.assertEqual(menu.FAILED_MODULE in scripts, offered)
             self.assertEqual(scripts[-1], menu.UNINSTALL)
         titles = [choice.title for choice in menu.choices(2)]
         self.assertIn("Show the 2 image(s) that could not be indexed", titles)

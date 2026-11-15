@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from imagent.search import search
+from imagent.commands import search
 from imagent.db.operations import get_or_add_root, upsert_text_embedding
 from imagent.pipeline.serialisation import serialize_embedding
 from tests.support import IsolatedHome, add_indexed

@@ -1,5 +1,5 @@
 """
-pipeline/locking.py — Keep two copies of the same Imagent job from running at once.
+imagent/pipeline/locking.py — Keep two copies of the same Imagent job from running at once.
 
 The lock is held by the operating system on an open file, so it is released the moment the program
 ends, however it ends (a crash, a power cut, a killed terminal). There is no stale lock to clean up.
