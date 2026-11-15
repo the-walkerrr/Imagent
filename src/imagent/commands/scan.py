@@ -64,7 +64,7 @@ try:
     from imagent.image_processing.metadata import extract_file_metadata, iso_utc
     from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
     from imagent.os_specific.files import is_not_downloaded
-    from imagent.pipeline.console import file_link, make_output_safe, run_cli
+    from imagent.pipeline.console import file_link, make_output_safe
     from imagent.pipeline.discovery import discover
     from imagent.pipeline.error_logger import log_error
     from imagent.pipeline.failure import IndexingFailure, RunStopped
@@ -884,10 +884,11 @@ def _scan_and_report(root: Path) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(folder: str | None = None) -> None:
+    """Scan ``folder``, or the folders the user chooses when none is given, then offer to index what was found."""
     make_output_safe()
-    if len(sys.argv) > 1:
-        roots = [validate_folder(sys.argv[1])]
+    if folder is not None:
+        roots = [validate_folder(folder)]
     else:
         try:
             roots = _choose_roots()
@@ -913,6 +914,3 @@ def main() -> None:
     else:
         print(f"Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
 
-
-if __name__ == "__main__":
-    run_cli(main)

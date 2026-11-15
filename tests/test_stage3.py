@@ -1,7 +1,6 @@
 """Versions, the embedding model that must not change, models that are local only, and the commands for set-aside."""
 
 import contextlib
-import importlib.util
 import io
 import unittest
 from pathlib import Path
@@ -278,15 +277,11 @@ class MenuTests(unittest.TestCase):
             values = [choice.value for choice in menu.choices(failed)]
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
-            self.assertEqual(menu.FAILED_MODULE in values, failed > 0)
+            self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
 
 
 class LaunchersTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
-
-    def test_every_menu_entry_runs_a_script_that_exists(self):
-        for module in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_MODULE):
-            self.assertIsNotNone(importlib.util.find_spec(module), module)
 
     def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):
         shell = (self.ROOT / "run.sh").read_text()

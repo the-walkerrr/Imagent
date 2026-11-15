@@ -34,7 +34,7 @@ rem Its own scope, so .venv is not active when the uninstaller starts
 setlocal
 call "%~dp0.venv\Scripts\activate.bat"
 set "PYTHONPATH=%~dp0src"
-python -m imagent.commands.menu
+python -m imagent
 set "CODE=%errorlevel%"
 endlocal & set "CODE=%CODE%"
 if not "%CODE%"=="%UNINSTALL_EXIT_CODE%" goto finish

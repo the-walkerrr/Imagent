@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "imagent"
-version = "0.1.0"
 description = "Local image indexing and search tool: private, offline, and cross-platform."
 readme = "README.md"
 requires-python = ">=3.9"
-dynamic = ["dependencies"]
+dynamic = ["version", "dependencies"]
+
+[project.scripts]
+imagent = "imagent.cli:main"
 
 [tool.setuptools.dynamic]
+version = { attr = "imagent.config.APP_VERSION" }
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]

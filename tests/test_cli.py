@@ -1,8 +1,14 @@
 import contextlib
 import io
+import os
 import sqlite3
+import subprocess
+import sys
 import unittest
+from unittest import mock
 
+from imagent import cli
+from imagent.commands import failed, menu, scan, search
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
 from tests.support import IsolatedHome
@@ -43,6 +49,58 @@ class RunCliTests(IsolatedHome):
         with self.assertRaises(SystemExit) as stop:
             run_cli(lambda: (_ for _ in ()).throw(SystemExit(0)))
         self.assertEqual(stop.exception.code, 0)
+
+
+class CommandLineTests(unittest.TestCase):
+    def run_command(self, *argv):
+        with mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
+                mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu:
+            cli.main(list(argv))
+        return {"search": run_search, "scan": run_scan, "failed": run_failed, "menu": run_menu}
+
+    def test_search_gets_the_words_typed_as_one_query(self):
+        runs = self.run_command("search", "red", "car", "at", "night")
+        runs["search"].assert_called_once_with("red car at night")
+        self.assertEqual([name for name, run in runs.items() if run.called], ["search"])
+
+    def test_search_with_no_words_gets_an_empty_query(self):
+        self.run_command("search")["search"].assert_called_once_with("")
+
+    def test_scan_gets_the_folder_or_none(self):
+        self.run_command("scan", "/pictures")["scan"].assert_called_once_with("/pictures")
+        self.run_command("scan")["scan"].assert_called_once_with(None)
+
+    def test_failed_takes_no_arguments(self):
+        runs = self.run_command("failed")
+        runs["failed"].assert_called_once_with()
+        self.assertEqual([name for name, run in runs.items() if run.called], ["failed"])
+
+    def test_no_command_opens_the_menu(self):
+        runs = self.run_command()
+        runs["menu"].assert_called_once_with()
+        self.assertEqual([name for name, run in runs.items() if run.called], ["menu"])
+
+    def test_a_command_that_does_not_exist_is_refused_and_nothing_runs(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
+            self.run_command("reembed")
+        self.assertEqual(stop.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_a_command_ends_politely_when_it_is_cancelled(self):
+        with mock.patch.object(search, "main", side_effect=KeyboardInterrupt), self.assertRaises(SystemExit) as stop:
+            cli.main(["search", "x"])
+        self.assertIn("Search cancelled.", str(stop.exception.code))
+
+    def test_every_menu_entry_is_a_command(self):
+        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND):
+            self.assertEqual(cli.build_parser().parse_args([command]).command, command)
+
+    def test_python_dash_m_imagent_is_the_same_command(self):
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        result = subprocess.run([sys.executable, "-m", "imagent", "--help"], capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for command in ("search", "scan", "failed"):
+            self.assertIn(command, result.stdout)
 
 
 if __name__ == "__main__":

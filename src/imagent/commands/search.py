@@ -18,8 +18,8 @@ Pipeline:
 
 All activity reads from the user-level database (``config.DB_PATH``).
 
-Run from the command line it starts Ollama and loads the models once, then keeps asking for
-queries until the user types ``exit`` (or presses Ctrl+C), so later searches start at once.
+``main`` is what ``imagent search`` runs. Given a query it answers it and ends. Without one it starts Ollama and loads
+the models once, then keeps asking for queries until the user types ``exit`` (or presses Ctrl+C), so later searches start at once.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ try:
         get_image_summary,
         iter_embedding_batches,
     )
-    from imagent.pipeline.console import file_link, make_output_safe, run_cli
+    from imagent.pipeline.console import file_link, make_output_safe
     from imagent.pipeline.error_logger import log_error
     from imagent.pipeline.locking import is_running
     from imagent.pipeline.progress import SearchProgress
@@ -252,26 +252,24 @@ def _show(query: str, results: list[dict]) -> None:
         print()
 
 
-def main() -> None:
+def main(query: str = "") -> None:
+    """Answer ``query`` and end; with no query, keep asking for queries until the user types ``exit``."""
     make_output_safe()
-    query = " ".join(sys.argv[1:]).strip()
+    query = query.strip()
     session = start_session()
     if session is None:
         return
-    while True:
-        if not query:
-            try:
-                query = input("Enter your search query (type exit to quit): ").strip()
-            except EOFError:  # Ctrl+D, or no terminal to type in
-                return
-            if query.lower() in ("exit", "quit"):
-                return
-            if not query:
-                print('Type what you are looking for, for example: red car at night')
-                continue
+    if query:
         _show(query, search(query, session))
-        query = ""
-
-
-if __name__ == "__main__":
-    run_cli(main, cancelled="Search cancelled.")
+        return
+    while True:
+        try:
+            query = input("Enter your search query (type exit to quit): ").strip()
+        except EOFError:  # Ctrl+D, or no terminal to type in
+            return
+        if query.lower() in ("exit", "quit"):
+            return
+        if not query:
+            print('Type what you are looking for, for example: red car at night')
+            continue
+        _show(query, search(query, session))

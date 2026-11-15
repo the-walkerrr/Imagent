@@ -1,6 +1,5 @@
 import contextlib
 import io
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -56,30 +55,35 @@ class SearchTests(IsolatedHome):
 
     def test_an_empty_query_is_turned_down_with_an_example_and_asked_again(self):
         out = io.StringIO()
-        with mock.patch.object(sys, "argv", ["search.py", "   "]), \
-                mock.patch("builtins.input", side_effect=["  ", "exit"]) as ask, contextlib.redirect_stdout(out):
-            search.main()
+        with mock.patch("builtins.input", side_effect=["  ", "exit"]) as ask, contextlib.redirect_stdout(out):
+            search.main("   ")
         self.assertIn("Type what you are looking for", out.getvalue())
         self.assertEqual(ask.call_count, 2)
 
     def test_the_session_stays_open_for_more_searches_until_exit(self):
         out = io.StringIO()
-        with mock.patch.object(sys, "argv", ["search.py", "first"]), \
-                mock.patch("builtins.input", side_effect=["second", "exit"]) as ask, \
+        with mock.patch("builtins.input", side_effect=["first", "second", "exit"]) as ask, \
                 mock.patch.object(search, "search", wraps=search.search) as run, contextlib.redirect_stdout(out):
             search.main()
         self.assertEqual([call.args[0] for call in run.call_args_list], ["first", "second"])
-        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(ask.call_count, 3)
         self.assertEqual(search.check_ready.call_count, 1)  # Ollama is started once, not per search
 
+    def test_a_query_given_on_the_command_line_is_answered_once_and_the_command_ends(self):
+        out = io.StringIO()
+        with mock.patch("builtins.input") as ask, mock.patch.object(search, "search", wraps=search.search) as run, contextlib.redirect_stdout(out):
+            search.main("  red car  ")
+        self.assertEqual([call.args[0] for call in run.call_args_list], ["red car"])
+        ask.assert_not_called()
+
     def test_no_terminal_ends_the_session_quietly(self):
-        with mock.patch.object(sys, "argv", ["search.py"]), mock.patch("builtins.input", side_effect=EOFError):
+        with mock.patch("builtins.input", side_effect=EOFError):
             search.main()
 
     def test_a_search_that_cannot_start_ends_the_session(self):
         with mock.patch.object(search, "check_ready", side_effect=search.NotReady("Run the installer")), \
-                mock.patch.object(sys, "argv", ["search.py", "anything"]), mock.patch("builtins.input") as ask:
-            search.main()
+                mock.patch("builtins.input") as ask:
+            search.main("anything")
         ask.assert_not_called()
 
     def _busy(self, others):
@@ -102,7 +106,7 @@ class SearchTests(IsolatedHome):
 
     def test_the_session_ends_instead_of_asking_for_a_query(self):
         with self._busy(["vision"]), mock.patch.object(search, "is_running", return_value=False), \
-                mock.patch.object(sys, "argv", ["search.py"]), mock.patch("builtins.input") as ask:
+                mock.patch("builtins.input") as ask:
             search.main()
         ask.assert_not_called()
 

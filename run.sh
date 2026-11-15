@@ -29,7 +29,7 @@ if [ ! -f "$DIR/.venv/bin/activate" ]; then
     fi
 fi
 
-( . "$DIR/.venv/bin/activate" && PYTHONPATH="$DIR/src" python -m imagent.commands.menu )  # a subshell, so .venv is not active when the uninstaller starts
+( . "$DIR/.venv/bin/activate" && PYTHONPATH="$DIR/src" python -m imagent )  # a subshell, so .venv is not active when the uninstaller starts
 code=$?
 if [ "$code" -eq "$UNINSTALL_EXIT_CODE" ]; then
     exec sh "$DIR/uninstall.sh"

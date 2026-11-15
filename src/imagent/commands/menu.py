@@ -20,7 +20,7 @@ try:
     from imagent import config
     from imagent.db.connection import init_db
     from imagent.db.operations import get_exhausted_backlog
-    from imagent.pipeline.console import make_output_safe, run_cli
+    from imagent.pipeline.console import make_output_safe
 except ModuleNotFoundError as exc:
     sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
              f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
@@ -28,9 +28,9 @@ except ModuleNotFoundError as exc:
 UNINSTALL_EXIT_CODE = 75  # tells run.sh / run.bat to start the uninstaller (they compare with this number)
 UNINSTALL = "uninstall"
 
-SEARCH = ("Search your images", "imagent.commands.search")
-SCAN = ("Scan folders and index images", "imagent.commands.scan")
-FAILED_MODULE = "imagent.commands.failed"
+SEARCH = ("Search your images", "search")
+SCAN = ("Scan folders and index images", "scan")
+FAILED_COMMAND = "failed"
 
 STYLE = questionary.Style([
     ("qmark", "fg:ansidefault bold"),
@@ -55,9 +55,9 @@ def failed_count() -> int:
 
 
 def choices(failed: int = 0) -> list:
-    shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_MODULE)] if failed else []
+    shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
     entries = [SEARCH, SCAN] + shown
-    return [questionary.Choice(title, value=script) for title, script in entries] + [
+    return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
 
@@ -69,13 +69,10 @@ def main() -> None:
         sys.exit(1)
     if choice == UNINSTALL:
         sys.exit(UNINSTALL_EXIT_CODE)
-    process = subprocess.Popen([sys.executable, "-m", choice])
+    process = subprocess.Popen([sys.executable, "-m", "imagent", choice])
     while True:
         try:
             sys.exit(process.wait())
         except KeyboardInterrupt:
             continue  # the command got the same Ctrl+C and is ending by itself: wait for it, do not cut it short
 
-
-if __name__ == "__main__":
-    run_cli(main)
