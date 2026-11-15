@@ -8,7 +8,7 @@
 -- What: The models this database was built with (a single row).
 -- Why:  Embedding vectors from different models cannot be compared, so the
 --       models are locked together with the vectors they produced. The row is
---       inserted once by install.py and never updated; the CHECK keeps it to one row.
+--       inserted once by imagent setup and never updated; the CHECK keeps it to one row.
 -- When: Written as the last step of setup, once all models are downloaded and verified.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS model_settings (

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKIPPED_DIRS = {".venv", ".git", "benchmark_results", "__pycache__", "sample_images"}
+SKIPPED_DIRS = {".venv", ".git", "build", "benchmark_results", "__pycache__", "sample_images"}
 MODULES = [
     "imagent.config", "imagent.vlm.response_format", "imagent.commands.setup", "imagent.commands.scan", "imagent.commands.search", "imagent.commands.uninstall",
     "imagent.db.connection", "imagent.db.operations", "imagent.pipeline.console", "imagent.pipeline.discovery", "imagent.pipeline.locking",

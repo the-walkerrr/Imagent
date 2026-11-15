@@ -9,50 +9,38 @@
 
 ## Requirements
 
-[Git](https://git-scm.com) and Python 3.9 or newer. The installer sets up everything else.
+Python 3.9 or newer, [pipx](https://pipx.pypa.io) (or `uv`) and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
 
-## Install and run
+## Install
 
-**macOS / Linux**
-
-Clone and set up (once):
+Install the `imagent` command (once):
 
 ```bash
-git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && sh install.sh
+pipx install git+https://github.com/the-walkerrr/Imagent.git
 ```
 
-Open the menu:
+Then set it up (once). It checks Ollama, downloads the three models, locks them and measures your computer:
 
 ```bash
-sh run.sh
+imagent setup
 ```
 
-**Windows** (Command Prompt)
+## Use
 
-Clone and set up (once):
-
-```bat
-git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent && install.bat
+```bash
+imagent search "red car at night"   # show the pictures that best match a description
+imagent search                      # keep searching until you type exit
+imagent scan ~/Pictures             # find new or changed pictures in a folder, then index them
+imagent scan                        # the same, choosing the folder when asked
+imagent failed                      # list the pictures that could not be indexed, and why
+imagent                             # open a menu (arrow keys and Enter) with the same choices
 ```
 
-Open the menu:
+`imagent --help` lists the commands. To index: run `imagent scan` with a folder, then `imagent search`.
 
-```bat
-run.bat
-```
+## The models are locked
 
-## Menu
-
-`run` opens a menu (arrow keys and Enter):
-
-| Choice | Script |
-| --- | --- |
-| Search your images | `imagent/commands/search.py` |
-| Scan folders and index images | `imagent/commands/scan.py` |
-| Show the images that could not be indexed (only when there are some) | `imagent/commands/failed.py` |
-| Uninstall Imagent | `uninstall.sh` / `uninstall.bat` |
-
-To index: choose **Scan folders and index images**, give it a folder, then choose **Search your images**.
+`imagent setup` saves a private copy of each of the three models (vision, text and embedding), so a later `ollama pull` cannot change them. Different embedding models give different vectors for the same text, so changing a model would break every search of what is already indexed. To use other models, uninstall Imagent and set it up again (this clears the index).
 
 ## Where your data lives
 
@@ -64,11 +52,38 @@ To index: choose **Scan folders and index images**, give it a folder, then choos
 
 Holds `imagent.db`, `config.json`, the logs and `last_error.log`.
 
+## Uninstall
+
+```bash
+imagent uninstall      # deletes the index, the data folder and the models Imagent downloaded (three confirmations)
+pipx uninstall imagent # removes the program itself
+```
+
+Your pictures, Ollama itself and any model you had before Imagent are never touched.
+
 ## Troubleshooting
 
 | Message | What to do |
 | --- | --- |
-| `Imagent is not set up yet` | Run `sh install.sh` (or `install.bat`). |
-| `No indexed images found` | Scan and index a folder first. |
-| `The embedding model ... is not the same version` | The models are locked. Put the original version back (run the installer again to restore it), or uninstall and set up again, which clears the index. |
+| `Imagent is not set up yet` | Run `imagent setup`. |
+| `No indexed images found` | Run `imagent scan` with a folder first. |
+| `The ... model ... is not the same version` | The models are locked. Put the original version back (`imagent setup` restores it when it can), or uninstall and set up again, which clears the index. |
 | `...is on a network drive` / `...external or removable drive` | Copy the pictures to your computer's own disk. |
+
+## Development
+
+```bash
+git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
+python3 -m venv .venv && .venv/bin/python -m pip install -e .   # pip 21.3 or newer
+.venv/bin/python -m unittest                                    # run the tests
+git config core.hooksPath .githooks                             # run the tests before every commit
+```
+
+```
+src/imagent/
+  cli.py  __main__.py   the `imagent` command
+  commands/             one module per command: search, scan, failed, setup, uninstall, menu
+  config.py             every setting
+  db/  vlm/  pipeline/  image_processing/  text_processing/  os_specific/  prompts/
+tests/
+```

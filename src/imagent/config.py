@@ -61,7 +61,7 @@ def _install_record_path() -> Path:
 
 
 def load_install_record() -> dict:
-    """Return what install.py added to this computer ({"ollama_models": [...]}), or {} if nothing is recorded.
+    """Return what imagent setup added to this computer ({"ollama_models": [...]}), or {} if nothing is recorded.
 
     The uninstaller removes only what is listed here, so a model you already had before Imagent is never touched.
     """
@@ -86,7 +86,7 @@ def record_pinned_model(pinned: str, base: str) -> None:
     save_install_record({**record, "ollama_models": models, "pinned_models": {**pins, pinned: base}})
 
 
-# User preferences written by install.py.
+# User preferences written by imagent setup.
 OLLAMA_HOST: str = load_config().get("ollama_host", "")
 
 # --- Ollama ------------------------------------------------------------------

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-imagent/commands/menu.py — Imagent: the menu that run.sh and run.bat open. Pick an entry with the arrow keys and Enter.
+imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is run with no command. Pick an entry with the arrow keys and Enter.
 
 It runs the chosen command and ends with that command's exit code. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
