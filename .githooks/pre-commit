@@ -11,7 +11,7 @@ if [ -x ".venv/bin/python" ]; then
 elif [ -x ".venv/Scripts/python.exe" ]; then
     PYTHON=".venv/Scripts/python.exe"
 else
-    echo "pre-commit: .venv was not found, so the tests cannot run. Create it with: python3 -m venv .venv && .venv/bin/python -m pip install -e ." >&2
+    echo "pre-commit: .venv was not found, so the tests cannot run. Create it as the README's Development section says." >&2
     exit 1
 fi
 

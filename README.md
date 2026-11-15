@@ -74,9 +74,11 @@ Your pictures, Ollama itself and any model you had before Imagent are never touc
 
 ```bash
 git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
-python3 -m venv .venv && .venv/bin/python -m pip install -e .   # pip 21.3 or newer
-.venv/bin/python -m unittest                                    # run the tests
-git config core.hooksPath .githooks                             # run the tests before every commit
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip   # editable installs need pip 21.3 or newer
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m unittest                    # run the tests
+git config core.hooksPath .githooks             # run the tests before every commit
 ```
 
 ```
