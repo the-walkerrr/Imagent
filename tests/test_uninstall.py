@@ -2,7 +2,6 @@ import contextlib
 import io
 import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -105,17 +104,10 @@ class ConfirmationTests(unittest.TestCase):
 class DeleteTests(IsolatedHome):
     def setUp(self):
         super().setUp()
-        self.project = self.work / "project"
-        (self.project / "pkg" / "__pycache__").mkdir(parents=True)
-        (self.project / "pkg" / "__pycache__" / "a.pyc").write_bytes(b"x")
-        (self.project / "pkg" / "code.py").write_text("print(1)")
-        (self.project / ".venv" / "lib").mkdir(parents=True)
-        (self.project / ".venv" / "lib" / "pkg.py").write_text("x")
         self.data = self.work / "Imagent"
         self.data.mkdir()
         (self.data / "imagent.db").write_bytes(b"db")
-        for target, name, value in ((uninstall, "PROJECT_DIR", self.project), (uninstall, "VENV_DIR", self.project / ".venv"),
-                                    (config, "IMAGENT_HOME", self.data), (config, "DB_PATH", self.data / "imagent.db"),
+        for target, name, value in ((config, "IMAGENT_HOME", self.data), (config, "DB_PATH", self.data / "imagent.db"),
                                     (config, "CONFIG_PATH", self.data / "config.json")):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
@@ -128,13 +120,10 @@ class DeleteTests(IsolatedHome):
             problems = uninstall.delete_everything(plan, "http://x")
         return problems, call
 
-    def test_everything_added_goes_and_the_source_stays(self):
+    def test_the_data_folder_and_the_models_go(self):
         problems, call = self.run_delete(models=[("ours:latest", 5)])
         self.assertEqual(problems, [])
         self.assertFalse(self.data.exists())
-        self.assertFalse((self.project / ".venv").exists())
-        self.assertFalse((self.project / "pkg" / "__pycache__").exists())
-        self.assertTrue((self.project / "pkg" / "code.py").exists())
         call.assert_called_once_with("http://x", "DELETE", "/api/delete", {"model": "ours:latest"}, timeout=120)
 
     def test_a_failed_model_removal_is_reported_and_the_rest_continues(self):
@@ -171,21 +160,35 @@ class MainTests(IsolatedHome):
         with mock.patch.object(sys, "stdin", stdin), self.assertRaisesRegex(SystemExit, "interactive terminal"):
             uninstall.main()
 
-    def test_it_refuses_to_delete_the_environment_it_is_running_in(self):
-        venv = Path(sys.prefix)
-        with mock.patch.object(uninstall, "VENV_DIR", venv), mock.patch.object(sys, "stdin") as stdin:
-            stdin.isatty.return_value = True
-            with self.assertRaisesRegex(SystemExit, "deactivate"):
-                uninstall.main()
-
     def test_declining_deletes_nothing(self):
         self.home.mkdir(parents=True)
         config.DB_PATH.write_bytes(b"db")
-        with mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)), \
-                mock.patch.object(uninstall, "VENV_DIR", self.work / "no-venv"):
+        with mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)):
             code, _ = self.run_main(["no"])
         self.assertNotEqual(code, 0)
         self.assertTrue(config.DB_PATH.exists())
+
+    def test_when_it_is_done_it_says_how_to_remove_the_program_itself(self):
+        data = self.work / "Imagent"
+        data.mkdir()
+        (data / "imagent.db").write_bytes(b"db")
+        with mock.patch.object(config, "IMAGENT_HOME", data), mock.patch.object(config, "DB_PATH", data / "imagent.db"), \
+                mock.patch.object(config, "CONFIG_PATH", data / "config.json"), \
+                mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)), \
+                mock.patch.object(uninstall, "make_final_code", return_value=CODE):
+            code, out = self.run_main(["yes", "0", CODE])
+        self.assertEqual(code, 0)
+        self.assertFalse(data.exists())
+        self.assertIn("pipx uninstall imagent", out)
+
+    def test_with_nothing_to_remove_it_still_says_how_to_remove_the_program(self):
+        with mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)):
+            stdin = mock.Mock()
+            stdin.isatty.return_value = True
+            with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(io.StringIO()) as out:
+                uninstall.main()
+        self.assertIn("Nothing to uninstall", out.getvalue())
+        self.assertIn("pipx uninstall imagent", out.getvalue())
 
 
 if __name__ == "__main__":

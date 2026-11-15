@@ -13,7 +13,6 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -46,7 +45,7 @@ def check_pictures_readable() -> None:
         Image.open(buffer).load()
     except Exception as exc:
         raise NotReady(f"Pillow, the library Imagent reads pictures with, does not work on this computer ({type(exc).__name__}: {exc}). "
-                       f"Run: {config.INSTALL_COMMAND}. It installs the packages Imagent needs again.") from exc
+                       "Reinstall Imagent: pipx reinstall imagent.") from exc
 
 
 def make_client(host: str | None = None, timeout: float | None = None) -> ollama.Client:
@@ -171,31 +170,31 @@ def _stop_started_server(process: subprocess.Popen) -> None:
     print("Stopped the Ollama server this run started.")
 
 
-def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print) -> tuple[ollama.Client, dict]:
+def check_ready(conn, roles: tuple[str, ...]) -> tuple[ollama.Client, dict]:
     """Confirm setup is done and Ollama is reachable with the locked models for ``roles`` installed.
 
     ``roles`` are the models this run uses: ("vlm", "embedding") to index, ("judge", "embedding") to search.
     Returns the client and the locked model settings (names, digests, embedding_dim).
-    Raises NotReady otherwise, so a run stops at once instead of failing on every image.
+    Raises NotReady otherwise, so a run stops at once instead of failing on every image. Every model is locked: one that is
+    not exactly the version set up (its digest changed) stops the run too.
 
     If Ollama is not running and the host is this machine, it is started here and stopped
-    again when the program exits. Its notices go through ``say``, so a caller with a live
-    progress line can print them without breaking it.
+    again when the program exits.
     """
     check_pictures_readable()
     settings = get_model_settings(conn)
     if settings is None:
-        raise NotReady(f"Imagent is not set up yet. Run: {config.INSTALL_COMMAND}")
+        raise NotReady(f"Imagent is not set up yet. Run: {config.SETUP_COMMAND}")
     device = get_device_settings(conn)
     if device is None:
-        raise NotReady(f"Imagent has not measured this computer yet. Run: {config.INSTALL_COMMAND}; it does that by itself.")
+        raise NotReady(f"Imagent has not measured this computer yet. Run: {config.SETUP_COMMAND}; it does that by itself.")
     config.apply_device_settings(device)
     if not config.OLLAMA_HOST:
         raise NotReady("Imagent's settings file (config.json) is missing or damaged, so it does not know where Ollama is. "
-                       f"Run: {config.INSTALL_COMMAND}. It restores the address; your models and index are kept.")
+                       f"Run: {config.SETUP_COMMAND}. It restores the address; your models and index are kept.")
     if not is_local(config.OLLAMA_HOST):
         raise NotReady(f"Imagent only works with an Ollama that runs on this computer, but config.json points to {config.OLLAMA_HOST}. "
-                       f"Run: {config.INSTALL_COMMAND}. It restores the local address; your models and index are kept.")
+                       f"Run: {config.SETUP_COMMAND}. It restores the local address; your models and index are kept.")
 
     client = make_client()
     if not is_reachable(client) and is_local(config.OLLAMA_HOST) and shutil.which("ollama"):
@@ -220,16 +219,16 @@ def check_ready(conn, roles: tuple[str, ...], say: Callable[[str], None] = print
         name = settings[f"{role}_model"]
         digest = installed.get(name)
         if digest is None:
-            raise NotReady(f"The {role} model '{name}' is not installed in Ollama. Run: {config.INSTALL_COMMAND}")
+            raise NotReady(f"The {role} model '{name}' is not installed in Ollama. Run: {config.SETUP_COMMAND}")
         stored = settings[f"{role}_digest"]
-        if stored and digest != stored and role == "embedding":
-            raise NotReady(
-                f"The embedding model '{name}' is not the same version it was when you set up Imagent. Vectors made by another "
-                "version cannot be compared with the ones already stored, so searches would miss images and new images "
-                f"would be indexed wrongly. The models are locked and cannot be changed: put the original version of the model back "
-                f"(running {config.INSTALL_COMMAND} restores it when it can), or uninstall Imagent and set it up again, which clears the index.")
         if stored and digest != stored:
-            say(f"Warning: '{name}' is not the same version it was when you set up Imagent. Results may be less accurate.")
+            effect = ("Vectors made by another version cannot be compared with the ones already stored, so searches would miss "
+                      "images and new images would be indexed wrongly." if role == "embedding" else
+                      "Imagent's results depend on the exact models it was set up with.")
+            raise NotReady(
+                f"The {role} model '{name}' is not the same version it was when you set up Imagent. {effect} "
+                "The models are locked and cannot be changed: put the original version of the model back "
+                f"(running {config.SETUP_COMMAND} restores it when it can), or uninstall Imagent and set it up again, which clears the index.")
         if role == "vlm":
             try:
                 abilities = client.show(name).capabilities

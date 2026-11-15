@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("failed", help="list the pictures that could not be indexed",
                         description="List the pictures that could not be indexed, with the reason for each.")
+    commands.add_parser("setup", help="choose the models and prepare this computer (once)",
+                        description="Check Ollama, download and lock the three models, and measure this computer. "
+                                    "Run it once after installing. Run again, it shows the models and restores a missing one.")
+    commands.add_parser("uninstall", help="remove Imagent's data and models",
+                        description="Delete the index, Imagent's data folder and the models it downloaded, after three confirmations.")
     return parser
 
 
@@ -44,6 +49,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "failed":
         from imagent.commands import failed
         run_cli(failed.main)
+    elif args.command == "setup":
+        from imagent.commands import setup
+        run_cli(setup.main, cancelled="Setup cancelled. Run it again any time.")
+    elif args.command == "uninstall":
+        from imagent.commands import uninstall
+        run_cli(uninstall.main, cancelled=uninstall.CANCELLED)
     else:
         from imagent.commands import menu
         run_cli(menu.main)

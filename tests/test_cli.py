@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from imagent import cli
-from imagent.commands import failed, menu, scan, search
+from imagent.commands import failed, menu, scan, search, setup, uninstall
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
 from tests.support import IsolatedHome
@@ -54,9 +54,11 @@ class RunCliTests(IsolatedHome):
 class CommandLineTests(unittest.TestCase):
     def run_command(self, *argv):
         with mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
-                mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu:
+                mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu, \
+                mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall:
             cli.main(list(argv))
-        return {"search": run_search, "scan": run_scan, "failed": run_failed, "menu": run_menu}
+        return {"search": run_search, "scan": run_scan, "failed": run_failed, "menu": run_menu, "setup": run_setup,
+                "uninstall": run_uninstall}
 
     def test_search_gets_the_words_typed_as_one_query(self):
         runs = self.run_command("search", "red", "car", "at", "night")
@@ -75,6 +77,16 @@ class CommandLineTests(unittest.TestCase):
         runs["failed"].assert_called_once_with()
         self.assertEqual([name for name, run in runs.items() if run.called], ["failed"])
 
+    def test_setup_and_uninstall_take_no_arguments(self):
+        for command in ("setup", "uninstall"):
+            runs = self.run_command(command)
+            runs[command].assert_called_once_with()
+            self.assertEqual([name for name, run in runs.items() if run.called], [command])
+
+    def test_every_command_the_menu_offers_exists(self):
+        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.UNINSTALL):
+            self.assertEqual(cli.build_parser().parse_args([command]).command, command)
+
     def test_no_command_opens_the_menu(self):
         runs = self.run_command()
         runs["menu"].assert_called_once_with()
@@ -91,15 +103,11 @@ class CommandLineTests(unittest.TestCase):
             cli.main(["search", "x"])
         self.assertIn("Search cancelled.", str(stop.exception.code))
 
-    def test_every_menu_entry_is_a_command(self):
-        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND):
-            self.assertEqual(cli.build_parser().parse_args([command]).command, command)
-
     def test_python_dash_m_imagent_is_the_same_command(self):
         env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
         result = subprocess.run([sys.executable, "-m", "imagent", "--help"], capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ("search", "scan", "failed"):
+        for command in ("search", "scan", "failed", "setup", "uninstall"):
             self.assertIn(command, result.stdout)
 
 

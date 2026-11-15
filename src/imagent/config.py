@@ -174,8 +174,8 @@ APP_VERSION: str = "0.1.0"  # stored with every indexed record (pipeline/version
 
 # --- Launchers ---------------------------------------------------------------
 # What messages tell the user to run, for the OS they are on.
-INSTALL_COMMAND: str = "install.bat" if platform.system() == "Windows" else "sh install.sh"
-RUN_COMMAND: str = "run.bat" if platform.system() == "Windows" else "sh run.sh"
+SETUP_COMMAND: str = "imagent setup"
+SCAN_COMMAND: str = "imagent scan"
 
 # --- Prompts -----------------------------------------------------------------
 PROMPTS_DIR: Path = Path(__file__).parent / "prompts"

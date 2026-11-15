@@ -3,7 +3,6 @@
 import contextlib
 import io
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -50,10 +49,9 @@ class ReadinessTests(IsolatedHome):
         with conn:
             set_model_settings(conn, settings)
             set_device_settings(conn, DEVICE, "vd")
-        said = []
         with mock.patch.object(config, "OLLAMA_HOST", host), mock.patch.object(vlm_client, "make_client", return_value=client), \
                 mock.patch.object(vlm_client, "server_version", return_value=(0, 9, 0)):
-            return check_ready(conn, roles, say=said.append), said
+            return check_ready(conn, roles)
 
     def test_a_changed_embedding_model_blocks_with_the_way_out(self):
         client = ReadyClient(models(**{"v:latest": "vd", "e:latest": "NEW"}))
@@ -63,15 +61,24 @@ class ReadinessTests(IsolatedHome):
         self.assertIn("not the same version", message)
         self.assertIn("locked and cannot be changed", message)
 
-    def test_a_changed_vision_model_only_warns(self):
-        client = ReadyClient(models(**{"v:latest": "NEW", "e:latest": "ed"}))
-        _, said = self.ready(client, ("vlm",))
-        self.assertTrue(any("not the same version" in line for line in said))
+    def blocked(self, role, name):
+        client = ReadyClient(models(**{"v:latest": "vd", "j:latest": "jd", "e:latest": "ed", name: "NEW"}))
+        with self.assertRaises(NotReady) as raised:
+            self.ready(client, (role,))
+        message = str(raised.exception)
+        self.assertIn(f"The {role} model '{name}' is not the same version", message)
+        self.assertIn("locked and cannot be changed", message)
 
-    def test_an_unchanged_model_says_nothing(self):
-        client = ReadyClient(models(**{"v:latest": "vd", "e:latest": "ed"}))
-        _, said = self.ready(client, ("vlm", "embedding"))
-        self.assertEqual(said, [])
+    def test_a_changed_vision_model_blocks_too(self):
+        self.blocked("vlm", "v:latest")
+
+    def test_a_changed_text_model_blocks_too(self):
+        self.blocked("judge", "j:latest")
+
+    def test_models_that_are_exactly_the_ones_set_up_are_ready(self):
+        client = ReadyClient(models(**{"v:latest": "vd", "e:latest": "ed", "j:latest": "jd"}))
+        _, settings = self.ready(client, ("vlm", "embedding", "judge"))
+        self.assertEqual(settings["vlm_model"], "v:latest")
 
     def test_a_model_that_cannot_see_images_is_refused(self):
         client = ReadyClient(models(**{"v:latest": "vd"}), capabilities=["completion"])
@@ -234,26 +241,61 @@ class IndexLoopVersionsTests(IsolatedHome):
 
 
 class SetupPinTests(IsolatedHome):
-    def test_setup_locks_the_embedding_model_as_a_copy_of_its_own_and_records_it(self):
-        client = ReadyClient(models(**{"v:latest": "vd", "e:latest": "sha256:abc123abc123xx", "j:latest": "jd"}))
+    LISTING = {"v:latest": "vd", "e:latest": "sha256:abc123abc123xx", "j:latest": "jd"}
+
+    def download(self, vlm="v", embedding="e", text_model="j", client=None, problems=None):
+        """Run the download step with a stand-in Ollama; returns (settings, rejected, what verify_models was given, client, say)."""
+        client = client or ReadyClient(models(**self.LISTING))
         captured = {}
 
-        def verify(c, vlm, embedding, text_model):
-            captured["embedding"] = embedding
-            return {"vlm_model": "v:latest", "embedding_model": embedding}, {}
+        def verify(c, vlm_used, embedding_used, text_used):
+            captured.update(vlm=vlm_used, embedding=embedding_used, text=text_used)
+            if problems:
+                return None, problems
+            return {"vlm_model": vlm_used, "embedding_model": embedding_used, "judge_model": text_used}, {}
 
         @contextlib.contextmanager
         def fake_ollama(host):
             yield client
         with mock.patch.object(setup, "ollama_client", fake_ollama), mock.patch.object(setup, "_pull_models"), \
-                mock.patch.object(setup, "verify_models", verify), mock.patch.object(setup, "say"), \
+                mock.patch.object(setup, "verify_models", verify), mock.patch.object(setup, "say") as say, \
                 mock.patch.object(setup, "measure_computer", return_value=(DEVICE, None)):
-            settings, rejected = setup.download_and_verify("http://localhost:11434", "v", "e", "j")
-        self.assertEqual(captured["embedding"], "imagent-pin/e:abc123abc123")
-        self.assertEqual(settings["embedding_model"], "imagent-pin/e:abc123abc123")
+            settings, rejected = setup.download_and_verify("http://localhost:11434", vlm, embedding, text_model)
+        return settings, rejected, captured, client, say
+
+    def test_setup_locks_every_model_as_a_copy_of_its_own_and_records_them(self):
+        settings, rejected, captured, client, _ = self.download()
+        pinned = {"v:latest": "imagent-pin/v:vd", "e:latest": "imagent-pin/e:abc123abc123", "j:latest": "imagent-pin/j:jd"}
+        self.assertEqual(captured, {"vlm": pinned["v:latest"], "embedding": pinned["e:latest"], "text": pinned["j:latest"]})
+        self.assertEqual((settings["vlm_model"], settings["embedding_model"], settings["judge_model"]), tuple(pinned.values()))
         record = config.load_install_record()
-        self.assertIn("imagent-pin/e:abc123abc123", record["ollama_models"])  # the uninstaller removes it
-        self.assertEqual(record["pinned_models"], {"imagent-pin/e:abc123abc123": "e:latest"})
+        self.assertEqual(set(record["ollama_models"]) & set(pinned.values()), set(pinned.values()))  # the uninstaller removes them
+        self.assertEqual(record["pinned_models"], {used: original for original, used in pinned.items()})
+
+    def test_a_model_used_for_two_roles_is_copied_once(self):
+        settings, _, captured, client, _ = self.download(text_model="v")
+        self.assertEqual(captured["vlm"], captured["text"])
+        self.assertEqual(sorted(original for original, _ in client.copied), ["e:latest", "v:latest"])
+        self.assertEqual(settings["vlm_model"], settings["judge_model"])
+
+    def test_a_model_that_cannot_be_copied_is_used_as_it_is_with_a_warning(self):
+        client = ReadyClient(models(**self.LISTING))
+        copy = client.copy
+
+        def copy_unless_vision(source, destination):
+            if source == "v:latest":
+                raise RuntimeError("no space")
+            copy(source, destination)
+        client.copy = copy_unless_vision
+        settings, _, captured, _, say = self.download(client=client)
+        self.assertEqual(captured["vlm"], "v:latest")
+        self.assertEqual(captured["embedding"], "imagent-pin/e:abc123abc123")
+        self.assertTrue(any("Could not save a fixed copy of v:latest" in call.args[0] for call in say.call_args_list))
+
+    def test_a_problem_with_a_copied_model_is_reported_under_the_name_the_user_typed(self):
+        settings, rejected, _, _, _ = self.download(problems={"imagent-pin/v:vd": "is not a vision model."})
+        self.assertIsNone(settings)
+        self.assertEqual(rejected, {"v"})
 
     def test_a_pinned_copy_that_was_removed_is_made_again_from_the_same_version(self):
         config.save_install_record({"pinned_models": {"imagent-pin/e:abc123abc123": "e:latest"}})
@@ -278,23 +320,6 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
             self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
-
-
-class LaunchersTests(unittest.TestCase):
-    ROOT = Path(__file__).resolve().parent.parent
-
-    def test_the_launchers_start_the_uninstaller_on_the_code_the_menu_ends_with(self):
-        shell = (self.ROOT / "run.sh").read_text()
-        batch = (self.ROOT / "run.bat").read_bytes().decode()
-        self.assertIn(f"UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE} ", shell)
-        self.assertIn(f'set "UNINSTALL_EXIT_CODE={menu.UNINSTALL_EXIT_CODE}"', batch)
-        self.assertTrue((self.ROOT / "uninstall.sh").is_file())
-        self.assertTrue((self.ROOT / "uninstall.bat").is_file())
-
-    def test_batch_files_keep_their_windows_line_endings(self):
-        for name in ("run.bat", "install.bat", "uninstall.bat"):
-            data = (self.ROOT / name).read_bytes()
-            self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), name)  # a batch file with bare LF can misbehave
 
 
 if __name__ == "__main__":

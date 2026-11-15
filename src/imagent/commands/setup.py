@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
-"""One-command installer and first-run setup: show system details, create .venv and check its
-packages, check Python and Ollama versions, collect and verify the model names, then lock them in the
-Imagent database. Missing or outdated packages are installed automatically (only into .venv); Ollama
-and a broken .venv are only fixed after you agree. The models cannot be changed afterwards; running this again only
-shows their status and reinstalls a missing one. Starts Ollama only temporarily, to download the models."""
+"""
+imagent/commands/setup.py — First-run setup (``imagent setup``): show system details, load the text-reading engine, check
+Ollama, collect and verify the model names, save a fixed copy of each model, then lock them in the Imagent database.
+Ollama is only fixed after you agree. The models cannot be changed afterwards; running this again only shows their status and
+reinstalls a missing one. Starts Ollama only temporarily, to download the models.
+"""
 
 import json
 import os
@@ -15,30 +15,18 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-import venv
 from contextlib import contextmanager
 from pathlib import Path
 
-if sys.version_info < (3, 9):  # before the project's own modules, which need 3.9 just to be imported
-    _how = {"Darwin": "brew install python", "Windows": "winget install Python.Python.3.12"}.get(
-        platform.system(), "sudo apt install python3 python3-venv (or your package manager)")
-    _installer = "install.bat" if platform.system() == "Windows" else "sh install.sh"
-    sys.exit(f"Imagent needs Python 3.9 or newer, and this is Python {platform.python_version()}. "
-             f"Install a newer one (for example: {_how}, or https://www.python.org/downloads/), "
-             f"then run it again: {_installer}")
+import questionary
 
 from imagent import config as app_config
 from imagent.db.connection import init_db
 from imagent.db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
-from imagent.pipeline.console import make_output_safe, run_cli
-from imagent.pipeline.progress import SearchProgress
+from imagent.pipeline.console import make_output_safe
 
-PROJECT_DIR = Path(__file__).resolve().parents[3]  # the repository root (src/imagent/<package>/<file>.py)
-VENV_DIR = PROJECT_DIR / ".venv"
-REQUIREMENTS = PROJECT_DIR / "requirements.txt"
 DEFAULT_HOST = "http://localhost:11434"
-RELAUNCH_FLAG = "--relaunched"  # passed to the copy of this script that runs inside .venv
-INSTALL_TIMEOUT = 1800  # seconds allowed for pip and for installing Ollama
+INSTALL_TIMEOUT = 1800  # seconds allowed for installing Ollama
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
@@ -51,18 +39,23 @@ ASK_AI = "Not sure? Ask AI. Copy the prompt and give it to your favorite LLM."
 COPIED = "✓ Prompt copied to clipboard. Paste it into your favorite LLM. (Select again to copy once more)"
 PASTE_SET = "Paste the AI's answer: one set of three models (vision, text, embedding)."
 
-questionary = None  # imported in step 2, once the packages are available
-STYLE = None  # prompt colours, built together with the questionary import
+STYLE = questionary.Style([
+    ("qmark", "fg:ansidefault bold"),
+    ("question", "fg:ansidefault bold"),
+    ("pointer", "fg:ansidefault bold"),
+    ("highlighted", "fg:ansidefault bold underline"),
+    ("selected", "noreverse fg:ansidefault bold underline"),
+    ("answer", "fg:ansidefault bold"),
+    ("instruction", "fg:ansibrightblack"),
+    ("disabled", "fg:ansibrightblack italic"),
+])
 
 
 # --- Output helpers -----------------------------------------------------------
 
 def say(message: str = "", style: str = "") -> None:
     message = "\n".join(INDENT + line if line else line for line in message.split("\n"))
-    if questionary is not None:
-        questionary.print(message, style=style)
-    else:
-        print(message)
+    questionary.print(message, style=style)
 
 
 def step(title: str) -> None:
@@ -255,156 +248,13 @@ def offer_prompt_copy() -> bool:
     return False
 
 
-# --- Step 2: packages ---------------------------------------------------------
-
-def _in_project_venv() -> bool:
-    """True only inside this project's .venv; another virtual environment (or conda) the user has active does not count."""
-    return Path(sys.prefix).resolve() == VENV_DIR.resolve()
-
-
-def _venv_python() -> Path:
-    return VENV_DIR / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
-
-
-def _confirm(question: str) -> bool:
-    """Plain yes/no question for the steps that run before the packages (and so questionary) exist."""
-    return input(f"{INDENT}{question} [Y/n] ").strip().lower() in ("", "y", "yes")
-
+# --- Helpers ------------------------------------------------------------------
 
 def _succeeds(cmd: list[str]) -> bool:
     try:
         return subprocess.run(cmd, timeout=INSTALL_TIMEOUT).returncode == 0
     except subprocess.TimeoutExpired:
         return False
-
-
-def _venv_works(python: Path) -> bool:
-    """False when .venv exists but its Python is gone, broken or older than 3.9."""
-    try:
-        out = subprocess.run([str(python), "-c", "import sys; print(sys.version_info >= (3, 9))"],
-                             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return out.stdout.strip() == "True"
-
-
-def _requirements() -> list:
-    """(package name, minimum version or None) for each line of requirements.txt."""
-    found = []
-    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:>=\s*([0-9][0-9.]*))?", line)
-        if match:
-            found.append((match.group(1), match.group(2)))
-    return found
-
-
-def _version_tuple(text: str) -> tuple:
-    numbers = [int(part) for part in re.findall(r"\d+", text.split("+")[0])[:3]]
-    return tuple(numbers + [0] * (3 - len(numbers)))
-
-
-def _installed_versions(python: str, names: list):
-    """{name: installed version or None} as seen by ``python``; None when it cannot be told."""
-    code = ("import json, sys\nfrom importlib import metadata\nfound = {}\nfor name in sys.argv[1:]:\n"
-            "    try:\n        found[name] = metadata.version(name)\n    except metadata.PackageNotFoundError:\n"
-            "        found[name] = None\nprint(json.dumps(found))")
-    try:
-        out = subprocess.run([python, "-I", "-c", code, *names], capture_output=True, text=True, timeout=60)
-        return json.loads(out.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
-
-
-def _pip_install(python: str) -> None:
-    """Install requirements.txt with a live line (spinner and time so far). pip's own output is held back so it cannot
-    break that line, and shown only if pip fails."""
-    cmd = [python, "-m", "pip", "install", "--quiet", "-r", str(REQUIREMENTS)]
-    progress = SearchProgress()
-    progress.step("Installing the required packages")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=INSTALL_TIMEOUT)
-        installed, details = result.returncode == 0, (result.stderr or result.stdout).strip()
-    except subprocess.TimeoutExpired:
-        installed, details = False, "pip did not finish in time."
-    if installed:
-        progress.close()
-        return
-    progress.fail("failed")
-    progress.close()
-    if details:
-        print(details, file=sys.stderr)
-    fail("Could not install the required packages (the messages above say which one). Check your internet connection and "
-         f"run {app_config.INSTALL_COMMAND} again. If a package has no version for your Python ({platform.python_version()}), try another Python, "
-         "such as 3.11 or 3.12.")
-
-
-def _sync_packages(python: str) -> None:
-    """Install into .venv what requirements.txt needs and it lacks or has too old, without asking. Nothing outside .venv changes."""
-    wanted = _requirements()
-    installed = _installed_versions(python, [name for name, _ in wanted])
-    todo = []
-    for name, minimum in wanted:
-        have = (installed or {}).get(name)
-        if have is None:
-            todo.append(f"{name} (not installed)")
-        elif minimum and _version_tuple(have) < _version_tuple(minimum):
-            todo.append(f"{name} {have} is older than {minimum}")
-    if installed is not None and not todo:
-        return
-    if installed is None:
-        say("Could not read the installed packages, so every required package will be checked and installed.")
-    else:
-        say("These packages are needed in .venv:")
-        for item in todo:
-            say(f"  - {item}")
-    say("Installing them now (this can take a minute). They go into .venv only; Python and the packages elsewhere on your computer are not touched.")
-    _pip_install(python)
-
-
-def _prepare_venv() -> None:
-    """Create .venv if needed (or recreate a broken one, after asking) and bring its packages up to date."""
-    python = _venv_python()
-    if python.exists() and not _venv_works(python):
-        say(".venv exists but its Python does not work (it was probably made by a Python that has since been removed or updated).")
-        if not _confirm("Delete .venv and create it again?"):
-            fail(f"Delete the .venv folder yourself, then run {app_config.INSTALL_COMMAND} again.")
-        shutil.rmtree(VENV_DIR, ignore_errors=True)
-    if not python.exists():
-        say("Creating a private Python environment in .venv (one time only)…")
-        try:
-            venv.create(VENV_DIR, with_pip=True)
-        except Exception as exc:
-            hint = "  On Ubuntu/Debian try: sudo apt install python3-venv" if platform.system() == "Linux" else ""
-            fail(f"Could not create the .venv environment ({exc}).\n{hint}")
-    _sync_packages(str(python))
-
-
-def ensure_packages() -> None:
-    """Make sure packages live in the project's virtual environment; relaunch inside .venv if needed."""
-    global questionary, STYLE
-    if not _in_project_venv():
-        if RELAUNCH_FLAG in sys.argv:  # the relaunch did not end up inside .venv; stop rather than loop
-            fail(f"Could not start inside .venv. Delete the .venv folder and run {app_config.INSTALL_COMMAND} again.")
-        _prepare_venv()
-        result = subprocess.run([str(_venv_python()), "-m", "imagent.commands.setup", RELAUNCH_FLAG, *sys.argv[1:]])
-        sys.exit(result.returncode)
-    try:
-        import questionary as q
-    except ImportError:
-        _sync_packages(sys.executable)
-        import questionary as q
-    questionary = q
-    STYLE = q.Style([
-        ("qmark", "fg:ansidefault bold"),
-        ("question", "fg:ansidefault bold"),
-        ("pointer", "fg:ansidefault bold"),
-        ("highlighted", "fg:ansidefault bold underline"),
-        ("selected", "noreverse fg:ansidefault bold underline"),
-        ("answer", "fg:ansidefault bold"),
-        ("instruction", "fg:ansibrightblack"),
-        ("disabled", "fg:ansibrightblack italic"),
-    ])
-    say("✓ Required packages are installed.", "fg:green")
 
 
 def prepare_ocr() -> None:
@@ -415,11 +265,11 @@ def prepare_ocr() -> None:
         check_available()
     except Exception as exc:
         fail(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
-             f"Run {app_config.INSTALL_COMMAND} again; if it keeps failing, delete the .venv folder first so the packages are installed afresh.")
+             f"Run {app_config.SETUP_COMMAND} again; if it keeps failing, reinstall Imagent (pipx reinstall imagent).")
     say("✓ Text reading is ready.", "fg:green")
 
 
-# --- Step 3: Ollama -----------------------------------------------------------
+# --- Step 2: Ollama -----------------------------------------------------------
 
 def install_command(upgrade: bool = False):
     system = platform.system()
@@ -454,12 +304,12 @@ def ensure_ollama_current() -> None:
     say(f"Your Ollama is version {'.'.join(map(str, version))}, but Imagent needs {needed} or newer.", "fg:ansimagenta")
     cmd = install_command(upgrade=True)
     if cmd is None:
-        fail(f"Please update Ollama from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"Please update Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     say(f"Update command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
     if not ask(questionary.confirm("Update Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail(f"Imagent needs Ollama {needed} or newer. Update it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"Imagent needs Ollama {needed} or newer. Update it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     if not _succeeds(cmd):
-        fail(f"The Ollama update did not finish. Update it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"The Ollama update did not finish. Update it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     say("✓ Ollama updated. If the Ollama app is open, quit and reopen it so it uses the new version.", "fg:green")
 
 
@@ -471,19 +321,19 @@ def ensure_ollama_installed() -> None:
     say("Ollama is the program that runs the AI models on your computer. It is not installed yet.", "fg:ansimagenta")
     cmd = install_command()
     if cmd is None:
-        fail(f"Please install Ollama from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"Please install Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     say(f"Install command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
     if not ask(questionary.confirm("Install Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail(f"Ollama is required. Install it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"Ollama is required. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     if not _succeeds(cmd):
-        fail(f"The Ollama install did not finish. Install it from https://ollama.com/download, then run {app_config.INSTALL_COMMAND} again.")
+        fail(f"The Ollama install did not finish. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     if shutil.which("ollama"):
         say("✓ Ollama installed.", "fg:green")
     else:
         say("✓ Ollama installed. Open a new terminal window afterwards so the `ollama` command works.", "fg:green")
 
 
-# --- Step 4: models -----------------------------------------------------------
+# --- Step 3: models -----------------------------------------------------------
 
 def _clean_model_name(raw: str) -> str:
     """Accept pasted 'VLM_1=name:tag' lines as well as plain names; drop markdown decoration."""
@@ -784,7 +634,7 @@ def review_models(vlm: str, embedding: str, text_model: str, local: bool):
     return choice == "go", missing
 
 
-# --- Step 5: download ---------------------------------------------------------
+# --- Step 4: download ---------------------------------------------------------
 
 @contextmanager
 def ollama_client(host: str):
@@ -803,7 +653,7 @@ def ollama_client(host: str):
                 yield None
                 return
             if not shutil.which("ollama"):
-                say(f"✗ The `ollama` command was not found. Open a new terminal window and run {app_config.INSTALL_COMMAND} again.", RED)
+                say(f"✗ The `ollama` command was not found. Open a new terminal window and run {app_config.SETUP_COMMAND} again.", RED)
                 yield None
                 return
             say("Starting Ollama in the background…")
@@ -816,7 +666,7 @@ def ollama_client(host: str):
         if version is not None and version < MIN_OLLAMA_VERSION:
             say(f"✗ The Ollama at {host} is version {'.'.join(map(str, version))}, but Imagent needs "
                 f"{'.'.join(map(str, MIN_OLLAMA_VERSION))} or newer. Update it (on that computer, if it is another one), "
-                f"then run {app_config.INSTALL_COMMAND} again.", RED)
+                f"then run {app_config.SETUP_COMMAND} again.", RED)
             yield None
             return
         yield client
@@ -877,7 +727,7 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
             problems[name] = f"could not be inspected ({type(exc).__name__}: {exc})."
             continue
         if capabilities is None:
-            problems[name] = f"cannot be checked because your Ollama is too old. Update Ollama, then run {app_config.INSTALL_COMMAND} again."
+            problems[name] = f"cannot be checked because your Ollama is too old. Update Ollama, then run {app_config.SETUP_COMMAND} again."
         elif needed not in capabilities:
             problems[name] = f"is not {what}. Ollama lists its abilities as: {', '.join(capabilities) or 'none'}."
     if problems:
@@ -930,23 +780,25 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
             say(f"✗ Download failed: {exc}", RED)
             return None, set()
         from imagent.vlm.client import pin_model
-        original = _normalize(embedding)
-        try:
-            embedding, _ = pin_model(client, original)
-            app_config.record_pinned_model(embedding, original)
-            say(f"✓ Saved a copy of {original} that stays exactly as it is now, even if the model is updated later.", "fg:ansigreen")
-        except Exception as exc:
-            embedding = original
-            say(f"⚠ Could not save a fixed copy of {original} ({type(exc).__name__}: {exc}). Imagent will use it as it is "
-                "and stop if it ever changes.", "fg:ansimagenta")
+        fixed = {}  # each model as the user typed it -> the name Imagent will use; one copy when two roles share a model
+        for typed in dict.fromkeys((vlm, embedding, text_model)):
+            original = _normalize(typed)
+            try:
+                fixed[typed], _ = pin_model(client, original)
+                app_config.record_pinned_model(fixed[typed], original)
+                say(f"✓ Saved a copy of {original} that stays exactly as it is now, even if the model is updated later.", "fg:ansigreen")
+            except Exception as exc:
+                fixed[typed] = original
+                say(f"⚠ Could not save a fixed copy of {original} ({type(exc).__name__}: {exc}). Imagent will use it as it is "
+                    "and stop if it ever changes.", "fg:ansimagenta")
         say("Checking that the models work…")
         try:
-            settings, problems = verify_models(client, vlm, embedding, text_model)
+            settings, problems = verify_models(client, fixed[vlm], fixed[embedding], fixed[text_model])
         except Exception as exc:
             say(f"✗ Could not check the models: {exc}", RED)
             return None, set()
-        if embedding in problems and embedding != original:
-            problems[original] = problems.pop(embedding)
+        typed_as = {used: typed for typed, used in fixed.items()}
+        problems = {typed_as.get(name, name): reason for name, reason in problems.items()}
         if settings is not None:
             settings["device"], reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
             if reason:
@@ -1056,16 +908,17 @@ def manage_models(settings: dict, host: str) -> None:
             for role, name, digest in in_use:
                 say(f"✓ {name:<{width}}  {_fmt_bytes(installed[name][0]):>8}  {role} (in use)", "fg:ansigreen")
                 if digest and installed[name][1] != digest:
-                    say("    ⚠ This is not the same version it was when you set up Imagent.", "fg:ansimagenta")
+                    say("    ⚠ This is not the same version it was when you set up Imagent, so Imagent will not run until the original is back.", "fg:ansimagenta")
             for name in others:
                 say(f"  {name:<{width}}  {_fmt_bytes(installed[name][0]):>8}")
             if not installed:
                 say("  (no models installed)")
             say("")
-            say("Note: the models cannot be changed once set. Each embedding model produces different",
+            say("Note: the models are locked once set. Each embedding model produces different vectors for",
                 "fg:ansibrightblack")
-            say("vectors for the same text, so switching models would break all existing image searches.",
+            say("the same text, so switching models would break all existing image searches. To use other",
                 "fg:ansibrightblack")
+            say("models, uninstall Imagent and set it up again (this clears the index).", "fg:ansibrightblack")
             say("")
 
             choices = [
@@ -1109,7 +962,7 @@ def check_test_pictures() -> None:
 
 
 def measure_again_if_needed(settings: dict, host: str) -> None:
-    """Setup was run before: measure this computer if it never was, or if the vision model is not the one it was measured with."""
+    """Setup was run before: measure this computer if it never was (the models are locked, so they never change and need no new measurement)."""
     conn = init_db(str(app_config.DB_PATH))
     try:
         device = get_device_settings(conn)
@@ -1122,8 +975,8 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
             digest = {m.model: m.digest for m in client.list().models}.get(settings["vlm_model"])
         except Exception as exc:
             fail(f"Could not read the model list from Ollama: {exc}")
-        if digest is None or (device is not None and device["vlm_digest"] == digest and device["one_model_at_a_time"] is not None):
-            return  # a missing model was offered for reinstall above; a measured one is still right
+        if digest is None or (device is not None and device["one_model_at_a_time"] is not None):
+            return  # a missing model was offered for reinstall above; a measured computer stays measured
         device, reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
     if reason:
         fail(f"'{settings['vlm_model']}' {reason}")
@@ -1140,13 +993,10 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        fail(f"Setup needs an interactive terminal. Run it directly: {app_config.INSTALL_COMMAND}")
+        fail(f"Setup needs an interactive terminal. Run it directly: {app_config.SETUP_COMMAND}")
 
-    if RELAUNCH_FLAG not in sys.argv:
-        step("Your computer")
-        say(system_details())
-        step("Required packages")
-    ensure_packages()
+    step("Your computer")
+    say(system_details())
 
     step("Text reading")
     prepare_ocr()
@@ -1197,5 +1047,3 @@ def main() -> None:
     say(f"\n✓ Setup complete. Your models are locked in {app_config.DB_PATH}", "fg:green")
 
 
-if __name__ == "__main__":
-    run_cli(main, cancelled="Setup cancelled. Run it again any time.")

@@ -1,13 +1,12 @@
 """
 imagent/commands/uninstall.py — Take Imagent off this computer: show what will be lost, ask three times, then delete.
 
-Started by uninstall.sh / uninstall.bat with a Python that is not the one in .venv, because it deletes .venv.
-Standard library only. It removes:
-  * the Ollama models that install.py downloaded (listed in install_record.json); a model you already had
+Run by ``imagent uninstall``. It removes:
+  * the Ollama models that setup downloaded or copied (listed in install_record.json); a model you already had
     before Imagent is never removed;
-  * Imagent's data folder (the index database, config.json, logs);
-  * the .venv folder and every __pycache__ folder in the project.
-It never touches your image files, this project's source files, Ollama itself or any other Ollama model.
+  * Imagent's data folder (the index database, config.json, logs).
+It never touches your image files, Ollama itself or any other Ollama model. The program itself is removed afterwards
+with ``pipx uninstall imagent`` (a running program cannot remove itself), and the last message says so.
 """
 
 from __future__ import annotations
@@ -29,15 +28,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from imagent import config
-from imagent.pipeline.console import make_output_safe, run_cli
+from imagent.pipeline.console import make_output_safe
 from imagent.os_specific.process import background_process_options
 from imagent.pipeline.locking import AlreadyRunning, single_instance
 
-PROJECT_DIR = Path(__file__).resolve().parents[3]  # the repository root (src/imagent/<package>/<file>.py)
-VENV_DIR = PROJECT_DIR / ".venv"
 DEFAULT_HOST = "http://localhost:11434"
 FINAL_CODE_LENGTH = 10
 CANCELLED = "Uninstall cancelled. Nothing was deleted."
+REMOVE_PROGRAM = "To finish, remove the program itself with: pipx uninstall imagent   (or: pip uninstall imagent, if you used pip)"
 
 
 # --- Sizes and numbers --------------------------------------------------------
@@ -186,7 +184,6 @@ def make_plan(base: str | None, stats: dict) -> dict:
         "models": [], "models_unreachable": [], "models_gone": [],
         "not_recorded": [m for m in stats["locked_models"] if m not in recorded],
         "data_dir": config.IMAGENT_HOME if config.IMAGENT_HOME.exists() else None,
-        "venv": VENV_DIR if VENV_DIR.exists() else None,
     }
     for name in recorded:
         if present is None:
@@ -196,7 +193,6 @@ def make_plan(base: str | None, stats: dict) -> dict:
         else:
             plan["models_gone"].append(name)
     plan["data_size"] = _folder_size(plan["data_dir"]) if plan["data_dir"] else 0
-    plan["venv_size"] = _folder_size(plan["venv"]) if plan["venv"] else 0
     plan["db_size"] = sum(config.DB_PATH.with_name(config.DB_PATH.name + suffix).stat().st_size
                           for suffix in ("", "-wal", "-shm")
                           if config.DB_PATH.with_name(config.DB_PATH.name + suffix).exists())
@@ -205,7 +201,7 @@ def make_plan(base: str | None, stats: dict) -> dict:
 
 
 def nothing_to_remove(plan: dict) -> bool:
-    return not (plan["data_dir"] or plan["venv"] or plan["models"])
+    return not (plan["data_dir"] or plan["models"])
 
 
 def show_plan(stats: dict, plan: dict) -> None:
@@ -229,16 +225,14 @@ def show_plan(stats: dict, plan: dict) -> None:
     print("  " + "-" * 62)
     row("Index database", _fmt_bytes(plan["db_size"]), str(config.DB_PATH))
     row("Imagent data folder", _fmt_bytes(plan["data_size"]), str(plan["data_dir"] or "(none)"))
-    row("Python environment", _fmt_bytes(plan["venv_size"]), f"{plan['venv'] or '.venv (none)'}  packages and text-reading models")
     row("Ollama models", _fmt_bytes(plan["models_size"]), "downloaded by Imagent" if plan["models"] else "(none to remove)")
     for name, size in plan["models"]:
         print(f"{'':<26}{name}  ({_fmt_bytes(size)})")
-    total = plan["data_size"] + plan["venv_size"] + plan["models_size"]
+    total = plan["data_size"] + plan["models_size"]
     print("  " + "-" * 62)
     row("Disk space freed", _fmt_bytes(total))
     print("=" * 64)
-    print("  Not touched: your image files, this project's source files, Ollama itself and")
-    print("  every Ollama model that Imagent did not download.")
+    print("  Not touched: your image files, Ollama itself and every Ollama model that Imagent did not download.")
     if plan["models_unreachable"]:
         print("\n  Could not reach Ollama, so these models will NOT be removed (remove them yourself with")
         print("  `ollama rm <name>` on the computer where Ollama runs): " + ", ".join(plan["models_unreachable"]))
@@ -302,13 +296,6 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
             print(f"  ✓ Deleted the data folder {config.IMAGENT_HOME}")
         else:
             problems.append(f"Could not delete everything in {config.IMAGENT_HOME}. Delete the folder yourself.")
-    if plan["venv"]:
-        if _remove_tree(VENV_DIR):
-            print(f"  ✓ Deleted {VENV_DIR}")
-        else:
-            problems.append(f"Could not delete everything in {VENV_DIR}. Delete the folder yourself.")
-    for cache in PROJECT_DIR.rglob("__pycache__"):
-        _remove_tree(cache)
     return problems
 
 
@@ -317,10 +304,7 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
 def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
-        sys.exit("Uninstalling needs an interactive terminal. Run: sh uninstall.sh (or uninstall.bat on Windows)")
-    if VENV_DIR.exists() and Path(sys.prefix).resolve() == VENV_DIR.resolve():
-        sys.exit("This is running inside Imagent's own .venv, which it needs to delete. "
-                 "Run `deactivate` (or open a new terminal) and start the uninstaller again.")
+        sys.exit("Uninstalling needs an interactive terminal. Run: imagent uninstall")
 
     stats = read_stats()
     host = config.load_config().get("ollama_host") or DEFAULT_HOST
@@ -329,6 +313,7 @@ def main() -> None:
         plan = make_plan(base, stats)
         if nothing_to_remove(plan):
             print("\n  Nothing to uninstall: Imagent has not added anything to this computer (or it was already removed).")
+            print(f"  {REMOVE_PROGRAM}")
             return
         show_plan(stats, plan)
         if not confirm_three_times(stats):
@@ -349,9 +334,6 @@ def main() -> None:
             print(f"  ✗ {problem}")
     else:
         print("  ✓ Imagent is uninstalled.")
-    print(f"  To finish, delete this project folder if you no longer want it: {PROJECT_DIR}")
+    print(f"  {REMOVE_PROGRAM}")
     sys.exit(1 if problems else 0)
 
-
-if __name__ == "__main__":
-    run_cli(main, cancelled=CANCELLED)

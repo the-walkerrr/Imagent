@@ -7,16 +7,10 @@ An image is listed only after every try for its kind of failure is over. It leav
 
 from __future__ import annotations
 
-import sys
-
-try:
-    from imagent import config
-    from imagent.db.connection import init_db
-    from imagent.pipeline.console import make_output_safe
-    from imagent.commands.scan import print_failed
-except ModuleNotFoundError as exc:
-    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
-             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
+from imagent import config
+from imagent.db.connection import init_db
+from imagent.pipeline.console import make_output_safe
+from imagent.commands.scan import print_failed
 
 
 def main() -> None:

@@ -1,8 +1,6 @@
 """Reading one pasted model set from the AI's answer: tolerant of how it is written, strict about what it holds."""
 
 import contextlib
-import io
-import subprocess
 import threading
 import unittest
 from types import SimpleNamespace
@@ -18,36 +16,6 @@ from tests.support import DEVICE, IsolatedHome
 
 EXPECTED = ("qwen2.5vl:7b", "bge-m3:567m", "qwen3:8b")  # (vlm, embedding, text), the order ask_models uses
 PASTED = "qwen2.5vl:7b,qwen3:8b,bge-m3:567m"  # the order the AI is asked for: vision, text, embedding
-
-
-class PipInstallTests(unittest.TestCase):
-    def run_install(self, result=None, error=None):
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(setup.subprocess, "run", return_value=result, side_effect=error), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                setup._pip_install("python")
-                failure = None
-            except SystemExit as exc:
-                failure = exc
-        return out.getvalue(), err.getvalue(), failure
-
-    def test_a_finished_install_shows_the_step_as_done_and_keeps_pip_quiet(self):
-        out, err, failure = self.run_install(SimpleNamespace(returncode=0, stdout="noise", stderr=""))
-        self.assertIsNone(failure)
-        self.assertIn("✓ Installing the required packages", out)
-        self.assertNotIn("noise", out + err)
-
-    def test_a_failed_install_shows_the_step_as_failed_then_pips_messages_then_the_way_out(self):
-        out, err, failure = self.run_install(SimpleNamespace(returncode=1, stdout="", stderr="No matching distribution for x"))
-        self.assertIn("✗ Installing the required packages", out)
-        self.assertIn("No matching distribution for x", err)
-        self.assertIn("Could not install the required packages", str(failure))
-
-    def test_an_install_that_never_finishes_is_a_failure_too(self):
-        out, _, failure = self.run_install(error=subprocess.TimeoutExpired("pip", 1))
-        self.assertIn("✗ Installing the required packages", out)
-        self.assertIn("Could not install the required packages", str(failure))
 
 
 class ParseModelSetTests(unittest.TestCase):
@@ -244,7 +212,7 @@ class MeasureAgainTests(IsolatedHome):
         found = get_device_settings(self.conn)
         self.assertEqual((found["num_ctx"], found["one_model_at_a_time"]), (4096, True))
 
-    def test_a_changed_vision_model_is_measured_again(self):
+    def test_a_changed_vision_model_is_not_measured_again_because_the_models_are_locked(self):
         self.store(digest="old")
         self.run_it()
-        self.measure.assert_called_once()
+        self.measure.assert_not_called()

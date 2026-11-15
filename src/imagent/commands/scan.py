@@ -29,56 +29,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-try:
-    import httpx
-    import ollama
+import httpx
+import ollama
 
-    from imagent import config
-    from imagent.db.connection import describe_db_error, init_db
-    from imagent.db.operations import (
-        VERSION_COLUMNS,
-        add_failure_history,
-        delete_backlog,
-        delete_backlog_paths,
-        delete_images,
-        get_backlog,
-        get_backlog_paths_for_root,
-        get_exhausted_backlog,
-        get_or_add_root,
-        images_by_path,
-        list_roots,
-        lookup_by_path,
-        mark_root_scanned,
-        park_backlog,
-        record_backlog_failure,
-        refund_backlog_attempts,
-        requeue_changed_parked,
-        update_image_location,
-        update_image_modified_at,
-        upsert_backlog,
-        upsert_image_data,
-        upsert_text_embedding,
-    )
-    from imagent.image_processing import ocr
-    from imagent.image_processing.hashing import compute_hash
-    from imagent.image_processing.metadata import extract_file_metadata, iso_utc
-    from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
-    from imagent.os_specific.files import is_not_downloaded
-    from imagent.pipeline.console import file_link, make_output_safe
-    from imagent.pipeline.discovery import discover
-    from imagent.pipeline.error_logger import log_error
-    from imagent.pipeline.failure import IndexingFailure, RunStopped
-    from imagent.pipeline.locking import AlreadyRunning, single_instance
-    from imagent.pipeline.progress import Progress
-    from imagent.pipeline.serialisation import serialize_embedding
-    from imagent.pipeline.versions import collect_versions, model_versions
-    from imagent.pipeline.validation import find_overlapping_root, validate_folder
-    from imagent.text_processing.formatters import build_description, build_search_text
-    from imagent.vlm.analyzer import analyse_image, embed_search_text
-    from imagent.vlm.client import NotReady, check_ready, unload_model
-except ModuleNotFoundError as exc:
-    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
-             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
+from imagent import config
+from imagent.db.connection import describe_db_error, init_db
+from imagent.db.operations import (
+    VERSION_COLUMNS,
+    add_failure_history,
+    delete_backlog,
+    delete_backlog_paths,
+    delete_images,
+    get_backlog,
+    get_backlog_paths_for_root,
+    get_exhausted_backlog,
+    get_or_add_root,
+    images_by_path,
+    list_roots,
+    lookup_by_path,
+    mark_root_scanned,
+    park_backlog,
+    record_backlog_failure,
+    refund_backlog_attempts,
+    requeue_changed_parked,
+    update_image_location,
+    update_image_modified_at,
+    upsert_backlog,
+    upsert_image_data,
+    upsert_text_embedding,
+)
+from imagent.image_processing import ocr
+from imagent.image_processing.hashing import compute_hash
+from imagent.image_processing.metadata import extract_file_metadata, iso_utc
+from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
+from imagent.os_specific.files import is_not_downloaded
+from imagent.pipeline.console import file_link, make_output_safe
+from imagent.pipeline.discovery import discover
+from imagent.pipeline.error_logger import log_error
+from imagent.pipeline.failure import IndexingFailure, RunStopped
+from imagent.pipeline.locking import AlreadyRunning, single_instance
+from imagent.pipeline.progress import Progress
+from imagent.pipeline.serialisation import serialize_embedding
+from imagent.pipeline.versions import collect_versions, model_versions
+from imagent.pipeline.validation import find_overlapping_root, validate_folder
+from imagent.text_processing.formatters import build_description, build_search_text
+from imagent.vlm.analyzer import analyse_image, embed_search_text
+from imagent.vlm.client import NotReady, check_ready, unload_model
 
 try:
     import questionary
@@ -339,7 +335,7 @@ def _index_backlog() -> None:
     except Exception as exc:
         conn.close()
         sys.exit(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
-                 f"Run: {config.INSTALL_COMMAND}. Nothing was indexed; the backlog is kept.")
+                 f"Run: {config.SETUP_COMMAND}. Nothing was indexed; the backlog is kept.")
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
@@ -912,5 +908,5 @@ def main(folder: str | None = None) -> None:
     ):
         run()
     else:
-        print(f"Skipping indexing. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" later to process the backlog.")
+        print(f"Skipping indexing. Run {config.SCAN_COMMAND} later to process the backlog.")
 

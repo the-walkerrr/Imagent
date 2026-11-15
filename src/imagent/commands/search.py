@@ -26,27 +26,22 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
-try:
-    import numpy as np
+import numpy as np
 
-    from imagent import config
-    from imagent.db.connection import init_db
-    from imagent.db.operations import (
-        count_embeddings,
-        get_image_summary,
-        iter_embedding_batches,
-    )
-    from imagent.pipeline.console import file_link, make_output_safe
-    from imagent.pipeline.error_logger import log_error
-    from imagent.pipeline.locking import is_running
-    from imagent.pipeline.progress import SearchProgress
-    from imagent.vlm.analyzer import embed_search_text, understand_query
-    from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running
-except ModuleNotFoundError as exc:
-    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
-             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
+from imagent import config
+from imagent.db.connection import init_db
+from imagent.db.operations import (
+    count_embeddings,
+    get_image_summary,
+    iter_embedding_batches,
+)
+from imagent.pipeline.console import file_link, make_output_safe
+from imagent.pipeline.error_logger import log_error
+from imagent.pipeline.locking import is_running
+from imagent.pipeline.progress import SearchProgress
+from imagent.vlm.analyzer import embed_search_text, understand_query
+from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +120,7 @@ def start_session() -> tuple | None:
     progress.step("Loading the model and starting the server")
     try:
         try:
-            client, settings = check_ready(conn, ("judge", "embedding"),
-                                           say=progress.say)
+            client, settings = check_ready(conn, ("judge", "embedding"))
         except NotReady as exc:
             progress.fail()
             progress.say(str(exc))
@@ -134,7 +128,7 @@ def start_session() -> tuple | None:
 
         if count_embeddings(conn) == 0:
             progress.fail()
-            progress.say(f"No indexed images found. Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" first.")
+            progress.say(f"No indexed images found. Run {config.SCAN_COMMAND} first.")
             return None
 
         if _another_model_is_running(client, settings, progress):
@@ -229,7 +223,7 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             })
         if missing:
             progress.say(f"Skipped {missing} closer match(es) whose file is missing "
-                         f"(is a drive disconnected?). Run {config.RUN_COMMAND} and choose \"Scan folders and index images\" to bring the index up to date.")
+                         f"(is a drive disconnected?). Run {config.SCAN_COMMAND} to bring the index up to date.")
         return results
     finally:
         progress.close()

@@ -5,8 +5,6 @@ imagent/commands/menu.py — Imagent: the menu that run.sh and run.bat open. Pic
 It runs the chosen command and ends with that command's exit code. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
 
-Uninstall is not run from here: it deletes .venv, which this program runs from. The menu ends with UNINSTALL_EXIT_CODE
-and the launcher starts the uninstaller.
 """
 
 from __future__ import annotations
@@ -14,18 +12,13 @@ from __future__ import annotations
 import subprocess
 import sys
 
-try:
-    import questionary
+import questionary
 
-    from imagent import config
-    from imagent.db.connection import init_db
-    from imagent.db.operations import get_exhausted_backlog
-    from imagent.pipeline.console import make_output_safe
-except ModuleNotFoundError as exc:
-    sys.exit(f"Imagent is not set up yet (the Python package '{exc.name}' is missing). "
-             f"Run: {'install.bat' if sys.platform == 'win32' else 'sh install.sh'}")
+from imagent import config
+from imagent.db.connection import init_db
+from imagent.db.operations import get_exhausted_backlog
+from imagent.pipeline.console import make_output_safe
 
-UNINSTALL_EXIT_CODE = 75  # tells run.sh / run.bat to start the uninstaller (they compare with this number)
 UNINSTALL = "uninstall"
 
 SEARCH = ("Search your images", "search")
@@ -67,8 +60,6 @@ def main() -> None:
                                 pointer="»", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)
-    if choice == UNINSTALL:
-        sys.exit(UNINSTALL_EXIT_CODE)
     process = subprocess.Popen([sys.executable, "-m", "imagent", choice])
     while True:
         try:
