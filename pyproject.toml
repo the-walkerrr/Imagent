@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "imagent"
 description = "Local image indexing and search tool: private, offline, and cross-platform."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.15"
 dynamic = ["version"]
 dependencies = [
     "pydantic>=2.0.0",

@@ -2,6 +2,7 @@
 """
 imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is run with no command. Pick an entry with the arrow keys and Enter.
 
+Before it appears, ``cli.py`` runs setup if it has not been done (``needs_setup``).
 It runs the chosen command and ends with that command's exit code. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
 
@@ -16,7 +17,7 @@ import questionary
 
 from imagent import config
 from imagent.db.connection import init_db
-from imagent.db.operations import get_exhausted_backlog
+from imagent.db.operations import get_device_settings, get_exhausted_backlog, get_model_settings
 from imagent.pipeline.console import make_output_safe
 
 UNINSTALL = "uninstall"
@@ -45,6 +46,21 @@ def failed_count() -> int:
             conn.close()
     except Exception:
         return 0
+
+
+def needs_setup() -> bool:
+    """True when setup has not been completed: the models are not locked or this computer has not been measured.
+
+    False if that cannot be found out, so the menu still appears (it offers Uninstall, which a damaged database may need).
+    """
+    try:
+        conn = init_db(str(config.DB_PATH))
+        try:
+            return get_model_settings(conn) is None or get_device_settings(conn) is None
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 def choices(failed: int = 0) -> list:

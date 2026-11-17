@@ -1,6 +1,6 @@
 """imagent/cli.py — The ``imagent`` command: read the command line and run the command it names.
 
-``imagent`` with no command opens the menu. Each command is a module in ``imagent/commands``; it is imported only when it is
+``imagent`` with no command opens the menu, after running setup first if it has not been done. Each command is a module in ``imagent/commands``; it is imported only when it is
 run, so ``imagent --help`` and a mistyped command answer at once, without loading the image and model libraries.
 """
 
@@ -51,10 +51,14 @@ def main(argv: list[str] | None = None) -> None:
         run_cli(failed.main)
     elif args.command == "setup":
         from imagent.commands import setup
-        run_cli(setup.main, cancelled="Setup cancelled. Run it again any time.")
+        run_cli(setup.main, cancelled=setup.CANCELLED)
     elif args.command == "uninstall":
         from imagent.commands import uninstall
         run_cli(uninstall.main, cancelled=uninstall.CANCELLED)
     else:
         from imagent.commands import menu
+        if menu.needs_setup():
+            from imagent.commands import setup
+            setup.say("Imagent is not set up yet, so setup starts now.")
+            run_cli(setup.main, cancelled=setup.CANCELLED)  # ends the program if setup fails or is cancelled
         run_cli(menu.main)

@@ -11,7 +11,8 @@ from imagent import cli
 from imagent.commands import failed, menu, scan, search, setup, uninstall
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
-from tests.support import IsolatedHome
+from imagent.db.operations import set_device_settings, set_model_settings
+from tests.support import DEVICE, SETTINGS, IsolatedHome
 
 
 class RunCliTests(IsolatedHome):
@@ -52,8 +53,8 @@ class RunCliTests(IsolatedHome):
 
 
 class CommandLineTests(unittest.TestCase):
-    def run_command(self, *argv):
-        with mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
+    def run_command(self, *argv, needs_setup=False):
+        with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
                 mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu, \
                 mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall:
             cli.main(list(argv))
@@ -92,6 +93,20 @@ class CommandLineTests(unittest.TestCase):
         runs["menu"].assert_called_once_with()
         self.assertEqual([name for name, run in runs.items() if run.called], ["menu"])
 
+    def test_no_command_runs_setup_first_when_it_has_not_been_done(self):
+        runs = self.run_command(needs_setup=True)
+        runs["setup"].assert_called_once_with()
+        runs["menu"].assert_called_once_with()
+        self.assertEqual([name for name, run in runs.items() if run.called], ["menu", "setup"])
+
+    def test_the_menu_does_not_open_when_setup_is_cancelled_or_fails(self):
+        for error in (KeyboardInterrupt, SystemExit("Ollama is required.")):
+            with mock.patch.object(menu, "needs_setup", return_value=True), \
+                    mock.patch.object(setup, "main", side_effect=error), mock.patch.object(menu, "main") as run_menu, \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main([])
+            run_menu.assert_not_called()
+
     def test_a_command_that_does_not_exist_is_refused_and_nothing_runs(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
             self.run_command("reembed")
@@ -109,6 +124,28 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for command in ("search", "scan", "failed", "setup", "uninstall"):
             self.assertIn(command, result.stdout)
+
+
+class NeedsSetupTests(IsolatedHome):
+    def test_a_new_install_needs_setup(self):
+        self.assertTrue(menu.needs_setup())
+
+    def test_models_without_the_measurements_still_need_setup(self):
+        conn = self.connect()
+        with conn:
+            set_model_settings(conn, SETTINGS)
+        self.assertTrue(menu.needs_setup())
+
+    def test_a_finished_setup_does_not(self):
+        conn = self.connect()
+        with conn:
+            set_device_settings(conn, DEVICE, None)
+            set_model_settings(conn, SETTINGS)
+        self.assertFalse(menu.needs_setup())
+
+    def test_a_database_that_cannot_be_read_still_gets_the_menu(self):
+        with mock.patch.object(menu, "init_db", side_effect=DatabaseProblem("damaged")):
+            self.assertFalse(menu.needs_setup())
 
 
 class MenuTests(unittest.TestCase):

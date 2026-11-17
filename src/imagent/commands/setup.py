@@ -26,6 +26,7 @@ from imagent.db.operations import get_device_settings, get_model_settings, set_d
 from imagent.pipeline.console import make_output_safe
 
 DEFAULT_HOST = "http://localhost:11434"
+CANCELLED = "Setup cancelled. Run it again any time."
 INSTALL_TIMEOUT = 1800  # seconds allowed for installing Ollama
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
 REGISTRY = "https://registry.ollama.ai/v2"
@@ -370,7 +371,7 @@ def _erase_last_line() -> None:
 
 def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     """One screen of editable rows: type or paste each model name where it is shown, copy the AI prompt (which adds a row to
-    paste its answer into), and choose Continue once all three names are set. Nothing is cleared while you type.
+    paste its answer into; a good paste continues at once), and choose Continue once all three names are set. Nothing is cleared while you type.
 
     Returns (vlm, embedding, text_model)."""
     from prompt_toolkit import Application
@@ -383,7 +384,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor
 
     say("Fill in all three model names, then choose Continue.\n")
-    state = {"copied": False, "asked": False, "pasted": False, "message": ""}
+    state = {"copied": False, "asked": False, "message": ""}
 
     def one_line(buffer):  # a pasted line break would show as ^J
         if "\n" in buffer.text or "\r" in buffer.text:
@@ -399,7 +400,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     def ready():
         return all(buffer.text.strip() for buffer in fields.values())
 
-    show_paste = Condition(lambda: state["asked"] and not state["pasted"]) & ~is_done
+    show_paste = Condition(lambda: state["asked"]) & ~is_done
     show_message = Condition(lambda: bool(state["message"])) & ~is_done
 
     def blank(visible=~is_done):
@@ -422,7 +423,9 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     rows["paste"], paste_row = text_row("Paste one set:", paste, filled_green=False)
 
     def button(text, style):
-        window = Window(FormattedTextControl(lambda: [(style(), f"{pointer(window)}○ {text()}")], focusable=True), wrap_lines=True)
+        # dont_extend_height: without it the row stretches to fill the free height below the cursor, leaving a gap of blank lines
+        window = Window(FormattedTextControl(lambda: [(style(), f"{pointer(window)}○ {text()}")], focusable=True), wrap_lines=True,
+                        dont_extend_height=True)
         return window
 
     rows["ask"] = button(lambda: COPIED if state["copied"] else ASK_AI, lambda: "fg:ansigreen" if state["copied"] else "")
@@ -434,7 +437,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     def initial_focus():
         if ready():
             return "continue"
-        if state["asked"] and not state["pasted"]:
+        if state["asked"]:
             return "paste"
         return next(key for key, buffer in fields.items() if not buffer.text.strip())
 
@@ -477,16 +480,14 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
             return
         for key, name in zip(("vlm", "embedding", "text"), names):
             fields[key].document = Document(name)
-        event.app.layout.focus(rows["continue"])
-        state["pasted"], state["message"] = True, ""
+        event.app.exit(result="continue")  # a good paste is the answer: no second Continue
 
     @bindings.add("enter", filter=has_focus(rows["ask"]))
     def _(event):
         state["asked"], state["message"] = True, ""
         if copy_to_clipboard(build_ai_prompt()):
             state["copied"] = True
-            if not state["pasted"]:
-                event.app.layout.focus(rows["paste"])
+            event.app.layout.focus(rows["paste"])
         else:  # nowhere to copy it to: leave the screen, print the prompt for copying by hand, and come back
             event.app.erase_when_done = True
             event.app.exit(result="print")

@@ -9,7 +9,7 @@
 
 ## Requirements
 
-Python 3.9 or newer, [pipx](https://pipx.pypa.io) (or `uv`) and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
+Python 3.9 to 3.14, [pipx](https://pipx.pypa.io) (or `uv`) and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
 
 ## Install
 
@@ -17,6 +17,12 @@ Install the `imagent` command (once):
 
 ```bash
 pipx install git+https://github.com/the-walkerrr/Imagent.git
+```
+
+If your default Python is newer than 3.14, the install stops with a message that the package requires a different Python. Install Python 3.12 and tell pipx to use it:
+
+```bash
+pipx install --python python3.12 git+https://github.com/the-walkerrr/Imagent.git
 ```
 
 Then set it up (once). It checks Ollama, downloads the three models, locks them and measures your computer:

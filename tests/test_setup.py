@@ -100,15 +100,15 @@ class ModelScreenTests(unittest.TestCase):
         self.assertEqual(self.run_screen(keys), ("a:1", "b:2", "c:3"))
 
     def test_asking_the_ai_adds_the_paste_row_and_a_good_paste_fills_all_three(self):
-        keys = self.DOWN * 3 + self.ENTER + "a:1,b:2,c:3\r" + self.ENTER  # Ask AI, paste, Continue
+        keys = self.DOWN * 3 + self.ENTER + "a:1,b:2,c:3\r"  # Ask AI, paste: no separate Continue
         self.assertEqual(self.run_screen(keys), ("a:1", "c:3", "b:2"))  # pasted as vision, text, embedding
 
     def test_an_unreadable_paste_is_cleared_and_the_row_stays(self):
-        keys = self.DOWN * 3 + self.ENTER + "garbage\r" + "a:1,b:2,c:3\r" + self.ENTER
+        keys = self.DOWN * 3 + self.ENTER + "garbage\r" + "a:1,b:2,c:3\r"
         self.assertEqual(self.run_screen(keys), ("a:1", "c:3", "b:2"))
 
     def test_without_a_clipboard_the_prompt_is_printed_and_the_screen_comes_back_with_the_paste_row(self):
-        result = self.run_screen(self.DOWN * 3 + self.ENTER, copied=False, extra_keys_after_failed_copy="a:1,b:2,c:3\r\r")
+        result = self.run_screen(self.DOWN * 3 + self.ENTER, copied=False, extra_keys_after_failed_copy="a:1,b:2,c:3\r")
         self.assertEqual(result, ("a:1", "c:3", "b:2"))
         self.offer_copy.assert_called_once()
 
