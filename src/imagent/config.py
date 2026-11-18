@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import platform
@@ -150,6 +151,24 @@ def apply_device_settings(device: dict) -> None:
     ONE_MODEL_AT_A_TIME = bool(device.get("one_model_at_a_time"))  # None: not measured yet, so the two models are left to share the memory
     LLM_OPTIONS.update(num_ctx=OLLAMA_NUM_CTX, use_mmap=OLLAMA_USE_MMAP)
     EMBED_OPTIONS.update(use_mmap=OLLAMA_USE_MMAP)
+
+
+def device_settings() -> dict:
+    """The device settings in place right now, in the form ``apply_device_settings`` takes."""
+    return {"timeout_seconds": OLLAMA_TIMEOUT, "num_ctx": OLLAMA_NUM_CTX, "use_mmap": OLLAMA_USE_MMAP,
+            "image_long_edge": IMAGE_MAX_LONG_EDGE, "one_model_at_a_time": ONE_MODEL_AT_A_TIME}
+
+
+@contextlib.contextmanager
+def temporary_device_settings(**changes):
+    """Run the block with some of the device settings changed (``timeout_seconds``, ``num_ctx``, ``use_mmap``,
+    ``image_long_edge``), then put back the ones that were in place: a try with other settings never changes the usual ones."""
+    before = device_settings()
+    apply_device_settings({**before, **changes})
+    try:
+        yield
+    finally:
+        apply_device_settings(before)
 
 
 # --- Database and indexing ---------------------------------------------------

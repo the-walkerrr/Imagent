@@ -5,6 +5,8 @@ Ollama is only fixed after you agree. The models cannot be changed afterwards; r
 reinstalls a missing one. Starts Ollama only temporarily, to download the models.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import platform
@@ -184,12 +186,25 @@ def system_details() -> str:
 
 # --- AI prompt ----------------------------------------------------------------
 
-def build_ai_prompt() -> str:
+def failed_models_section(failed: dict | None) -> str:
+    """The part of the AI prompt about models that were downloaded and tried on this computer and did not work: each with the reason."""
+    if not failed:
+        return ""
+    lines = "\n".join(f"- {name} {' '.join(reason.split())}" for name, reason in failed.items())
+    return f"""
+## Models that already failed on this computer
+They were downloaded and tried here. Do not suggest any of them, and do not suggest a larger model of the same family: choose smaller ones, or another family. A model may have failed for lack of memory, for being too slow, or because it could not answer in the required JSON form.
+{lines}
+"""
+
+
+def build_ai_prompt(failed: dict | None = None) -> str:
+    """The prompt to paste into an AI chat. ``failed`` maps each model that was tried on this computer and did not work to the reason."""
     return f"""I need to choose AI models for a local image search tool that runs on my computer through Ollama. Choose the smallest and fastest models that are accurate enough for the tasks below, not the largest that fit: more memory is a limit, never a goal, and a computer with a lot of memory does not need big models for these tasks.
 
 ## My computer
 {system_details()}
-
+{failed_models_section(failed)}
 ## The three models
 - Vision model: looks at each image once and writes a JSON description (scene, objects, people, colors and mood, tags). A separate OCR step reads text in images. The descriptions must be accurate, and I may index thousands of images, so speed matters too.
 - Text model: fixes typos in my search query and writes a short description of the image I am looking for. It never sees images. One request per search. This is an easy task that a small model does well, and it can be the vision model itself.
@@ -238,9 +253,9 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def offer_prompt_copy() -> bool:
+def offer_prompt_copy(failed: dict | None = None) -> bool:
     """Copy the AI prompt to the clipboard. If that fails, print it for manual copying."""
-    prompt = build_ai_prompt()
+    prompt = build_ai_prompt(failed)
     if copy_to_clipboard(prompt):
         return True
     say("Could not reach your clipboard. Select and copy the text below by hand,", "fg:ansimagenta")
@@ -369,9 +384,11 @@ def _erase_last_line() -> None:
     print("\033[1A\033[2K", end="", flush=True)
 
 
-def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
+def ask_models(vlm: str = "", embedding: str = "", text_model: str = "", failed: dict | None = None):
     """One screen of editable rows: type or paste each model name where it is shown, copy the AI prompt (which adds a row to
     paste its answer into; a good paste continues at once), and choose Continue once all three names are set. Nothing is cleared while you type.
+
+    ``failed`` maps the models that were tried on this computer and did not work to the reason; the prompt tells the AI about them.
 
     Returns (vlm, embedding, text_model)."""
     from prompt_toolkit import Application
@@ -485,7 +502,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
     @bindings.add("enter", filter=has_focus(rows["ask"]))
     def _(event):
         state["asked"], state["message"] = True, ""
-        if copy_to_clipboard(build_ai_prompt()):
+        if copy_to_clipboard(build_ai_prompt(failed)):
             state["copied"] = True
             event.app.layout.focus(rows["paste"])
         else:  # nowhere to copy it to: leave the screen, print the prompt for copying by hand, and come back
@@ -518,7 +535,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = ""):
             sys.exit("\nSetup cancelled. Run it again any time.")
         if result == "continue":
             return tuple(fields[key].text.strip() for key in ("vlm", "embedding", "text"))
-        state["copied"] = offer_prompt_copy()  # "print": offer_prompt_copy tries the clipboard once more, then prints the prompt
+        state["copied"] = offer_prompt_copy(failed)  # "print": offer_prompt_copy tries the clipboard once more, then prints the prompt
 
 
 # --- Model lookup (ollama.com registry, no Ollama server needed) ---------------
@@ -752,15 +769,16 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
 def measure_computer(client, vlm_model: str, embedding_model: str):
     """Measure this computer with the vision model and the embedding model beside it (vlm/calibration.py), with no questions asked.
 
-    Returns (device settings, None), or (None, what is wrong with the model) when it does not run on this computer."""
+    Returns (device settings, None), or (None, problems) when a model does not run on this computer: ``problems`` maps the name
+    of the model that failed (the vision model, or the embedding model when that is the one) to what is wrong with it."""
     from imagent.vlm.calibration import NotPossible, calibrate
     say("Measuring this computer with the vision model. This runs by itself and can take a few minutes…")
     try:
         device = calibrate(client, vlm_model, embedding_model, lambda message: say(f"  {message}"))
     except NotPossible as exc:
-        return None, str(exc)
+        return None, {exc.model or vlm_model: str(exc)}
     except Exception as exc:
-        return None, f"could not be measured ({type(exc).__name__}: {exc})."
+        return None, {vlm_model: f"could not be measured ({type(exc).__name__}: {exc})."}
     say(f"✓ Pictures up to {device['image_long_edge']} pixels, a memory window of {device['num_ctx']}, "
         f"waiting up to {device['timeout_seconds']} seconds for a reply.", "fg:ansigreen")
     if device["one_model_at_a_time"]:
@@ -769,17 +787,48 @@ def measure_computer(client, vlm_model: str, embedding_model: str):
     return device, None
 
 
+def _remove_failed(client, rejected: set, fixed: dict) -> None:
+    """Take off this computer the models that did not work, so they do not keep using its disk.
+
+    Only what Imagent itself downloaded or copied (the list in install_record.json, which the uninstaller uses too) is removed: a
+    model that was on the computer before is never touched. Nothing is removed that a model which is kept needs.
+    ``rejected`` holds the names as typed, ``fixed`` maps each typed name to the name Imagent uses."""
+    record = app_config.load_install_record()
+    ours = {m for m in record.get("ollama_models", []) if isinstance(m, str)}
+    pins = record["pinned_models"] if isinstance(record.get("pinned_models"), dict) else {}
+    kept = set()
+    for typed, used in fixed.items():
+        if typed not in rejected:
+            kept |= {_normalize(typed), used, pins.get(used)}
+    removed = set()
+    for typed in sorted(rejected):
+        names = [name for name in (fixed.get(typed), _normalize(typed)) if name in ours and name not in kept]
+        for name in names:
+            try:
+                client.delete(name)
+                removed.add(name)
+            except Exception as exc:
+                say(f"⚠ Could not remove {name} ({type(exc).__name__}: {exc}). You can remove it with: ollama rm {name}", "fg:ansimagenta")
+        if any(name in removed for name in names):
+            say(f"✓ Removed {typed}, which did not work on this computer, to free its disk space.", "fg:ansigreen")
+    if removed:
+        app_config.save_install_record({**record, "ollama_models": [m for m in record.get("ollama_models", []) if m not in removed],
+                                        "pinned_models": {name: base for name, base in pins.items() if name not in removed}})
+
+
 def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
-    """Download all models and verify them. Returns (settings, names_to_clear); settings is None on failure."""
+    """Download all models and verify them. Returns (settings, problems); settings is None on failure.
+
+    ``problems`` maps the name of each model that did not work, as typed, to what is wrong with it."""
     with ollama_client(host) as client:
         if client is None:
-            return None, set()
+            return None, {}
         try:
             _pull_models(client, [vlm, embedding, text_model])
         except Exception as exc:
             print()
             say(f"✗ Download failed: {exc}", RED)
-            return None, set()
+            return None, {}
         from imagent.vlm.client import pin_model
         fixed = {}  # each model as the user typed it -> the name Imagent will use; one copy when two roles share a model
         for typed in dict.fromkeys((vlm, embedding, text_model)):
@@ -797,16 +846,22 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
             settings, problems = verify_models(client, fixed[vlm], fixed[embedding], fixed[text_model])
         except Exception as exc:
             say(f"✗ Could not check the models: {exc}", RED)
-            return None, set()
+            return None, {}
         typed_as = {used: typed for typed, used in fixed.items()}
         problems = {typed_as.get(name, name): reason for name, reason in problems.items()}
         if settings is not None:
-            settings["device"], reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
-            if reason:
-                settings, problems = None, {vlm: reason}
+            device, measure_problems = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
+            if measure_problems:
+                settings = None
+                problems = {typed_as.get(name, name): reason for name, reason in measure_problems.items()}
+                for name, reason in problems.items():  # said before the removal below, so the reason comes first
+                    say(f"✗ '{name}' {reason}", RED)
+                _remove_failed(client, set(problems), fixed)
+                return None, problems
+            settings["device"] = device
     for name, reason in problems.items():
         say(f"✗ '{name}' {reason}", RED)
-    return settings, set(problems)
+    return settings, problems
 
 
 # --- Choosing models (first run only) ------------------------------------------
@@ -819,8 +874,9 @@ def choose_models(saved_host: str):
     step("Models")
     host = saved_host or DEFAULT_HOST
     vlm = embedding = text_model = ""
+    failed: dict = {}  # every model that was tried here and did not work, with the reason: the AI prompt tells the AI
     while True:
-        vlm, embedding, text_model = ask_models(vlm, embedding, text_model)
+        vlm, embedding, text_model = ask_models(vlm, embedding, text_model, failed)
         proceed, missing = review_models(vlm, embedding, text_model, is_local(host))
         if not proceed:
             # Clear only the names that were not found; keep the valid ones.
@@ -833,6 +889,7 @@ def choose_models(saved_host: str):
         settings, rejected = download_and_verify(host, vlm, embedding, text_model)
         if settings is not None:
             return settings, host
+        failed.update(rejected)
         vlm = "" if vlm in rejected else vlm
         embedding = "" if embedding in rejected else embedding
         text_model = "" if text_model in rejected else text_model
@@ -978,9 +1035,10 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
             fail(f"Could not read the model list from Ollama: {exc}")
         if digest is None or (device is not None and device["one_model_at_a_time"] is not None):
             return  # a missing model was offered for reinstall above; a measured computer stays measured
-        device, reason = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
-    if reason:
-        fail(f"'{settings['vlm_model']}' {reason}")
+        device, problems = measure_computer(client, settings["vlm_model"], settings["embedding_model"])
+    if problems:
+        name, reason = next(iter(problems.items()))
+        fail(f"'{name}' {reason}")
     conn = init_db(str(app_config.DB_PATH))
     try:
         with conn:

@@ -2,6 +2,7 @@ import contextlib
 import io
 import shutil
 import sqlite3
+import sys
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -117,6 +118,9 @@ class RunTests(IsolatedHome):
             self.addCleanup(patcher.stop)
         patcher = mock.patch.object(scan.ocr, "check_available")
         self.ocr_check = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(scan, "_offer_lower_settings")  # it asks the user a question
+        self.offer = patcher.start()
         self.addCleanup(patcher.stop)
 
     def _attempts(self):
@@ -270,6 +274,34 @@ class RunTests(IsolatedHome):
         self.assertEqual(sum(1 for r in rows.values() if r["last_error"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
         self.assertTrue(all(r["status"] == "queued" and r["attempts"] == 0 for r in rows.values()))
 
+    def test_images_that_failed_for_the_computers_trouble_are_offered_a_try_with_lower_settings_after_the_run(self):
+        self.run_with([AnalysisFailed("out_of_memory", "not enough memory", [])] * (4 * config.SERVICE_TRIES))
+        self.offer.assert_called_once()
+        failures = self.offer.call_args.args[3]
+        self.assertEqual([(Path(row["file_path"]).name, kind) for row, kind, _ in failures],
+                         [("a.png", "out_of_memory"), ("b.png", "out_of_memory"), ("c.png", "out_of_memory")])
+        self.assertIn("Close other apps", failures[0][2])  # the message the user was shown for it
+
+    def test_each_image_is_offered_with_the_trouble_it_had(self):
+        self.run_with([AnalysisFailed("timeout", "no reply", [])] * config.SERVICE_TRIES
+                      + [AnalysisFailed("out_of_memory", "memory", [])] * config.SERVICE_TRIES + [("indexed", "ok")] * 2)
+        self.assertEqual([kind for _, kind, _ in self.offer.call_args.args[3]], ["timeout", "out_of_memory"])
+
+    def test_no_offer_when_every_image_was_indexed_or_the_trouble_was_the_images(self):
+        self.run_with([("indexed", "ok")] * 4)
+        self.run_with([problem(UNREADABLE, "damaged", retry_when="file_changed")] * 4)
+        self.offer.assert_not_called()
+
+    def test_no_offer_when_the_run_stopped_for_a_reason_lower_settings_would_not_help(self):
+        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        self.run_with([crash] * config.SERVICE_TRIES + [RunStopped("The embedding model has changed.")])
+        self.offer.assert_not_called()
+
+    def test_no_offer_when_the_database_could_not_be_written(self):
+        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        self.run_with([crash] * config.SERVICE_TRIES + [sqlite3.OperationalError("database or disk is full")])
+        self.offer.assert_not_called()
+
     def test_timeouts_in_a_row_stop_the_run_too_and_the_files_stay_queued_for_the_next_run(self):
         stop = self.run_with([AnalysisFailed("timeout", "no reply", [])] * (4 * config.SERVICE_TRIES))
         self.assertEqual(stop.code, 1)
@@ -358,6 +390,243 @@ class RunTests(IsolatedHome):
         with scan.single_instance("indexing", "Indexing"):
             with self.assertRaisesRegex(SystemExit, "already running"):
                 scan.run()
+
+
+
+class LowerSettingsStepsTests(IsolatedHome):
+    """What is changed, in what order, for an image by what went wrong with it."""
+
+    def steps(self, kind, long_side=None, **device):
+        for name, value in {"OLLAMA_TIMEOUT": 300, "OLLAMA_USE_MMAP": False, "IMAGE_MAX_LONG_EDGE": 1024, **device}.items():
+            setattr(config, name, value)
+        return scan.lower_settings_steps(kind, long_side)
+
+    def test_no_reply_in_time_first_waits_longer_and_then_asks_for_smaller_pictures(self):
+        steps = self.steps("timeout")
+        self.assertEqual(steps[0], {"timeout_seconds": 300 * config.OLLAMA_TIMEOUT_STEP ** config.OLLAMA_TIMEOUT_RAISES})
+        self.assertEqual([step.get("image_long_edge") for step in steps], [None, 768, 576, 432])
+        self.assertTrue(all(step["timeout_seconds"] == steps[0]["timeout_seconds"] for step in steps))  # the longer wait is kept
+
+    def test_running_out_of_memory_first_pages_the_model_in_from_disk_and_then_asks_for_smaller_pictures(self):
+        for kind in ("out_of_memory", "server_crash"):
+            steps = self.steps(kind)
+            self.assertEqual(steps[0], {"use_mmap": True})
+            self.assertEqual([step.get("image_long_edge") for step in steps], [None, 768, 576, 432])
+            self.assertFalse(any("timeout_seconds" in step for step in steps))
+
+    def test_a_model_that_is_already_paged_in_goes_straight_to_smaller_pictures(self):
+        steps = self.steps("out_of_memory", OLLAMA_USE_MMAP=True)
+        self.assertEqual(steps[0], {"image_long_edge": 768})
+        self.assertFalse(any("use_mmap" in step for step in steps))
+
+    def test_sizes_never_go_below_what_calibration_goes_down_to(self):
+        edges = [step["image_long_edge"] for step in self.steps("out_of_memory") if "image_long_edge" in step]
+        self.assertTrue(all(edge >= config.CALIBRATION_MIN_EDGE for edge in edges))
+
+    def test_sizes_start_below_the_pictures_own_size_because_a_larger_one_would_change_nothing(self):
+        steps = self.steps("out_of_memory", long_side=800, OLLAMA_USE_MMAP=True)
+        self.assertEqual([step["image_long_edge"] for step in steps], [600, 450, 337])
+        self.assertEqual(self.steps("out_of_memory", long_side=400, OLLAMA_USE_MMAP=True), [])  # nothing lower to ask for
+
+    def test_the_usual_settings_are_not_touched_by_working_out_the_steps(self):
+        before = config.device_settings()
+        self.steps("timeout")
+        self.assertEqual(config.device_settings(), {**before})
+
+
+class IndexWithLowerSettingsTests(IsolatedHome):
+    def setUp(self):
+        super().setUp()
+        self.conn = self.connect()
+        self.row = {"file_path": str(self.work / "a.png"), "root_id": 1}  # no file: its size is not known, so the whole ladder is tried
+        self.settings = {"vlm_model": "v", "embedding_model": "e"}
+        self.seen = []  # the settings in place at each try
+        config.OLLAMA_TIMEOUT, config.OLLAMA_USE_MMAP, config.IMAGE_MAX_LONG_EDGE = 300, False, 1024
+        self.unload = self.patch("unload_model")
+        self.make_client = self.patch("make_client")
+
+    def patch(self, name, **kwargs):
+        patcher = mock.patch.object(scan, name, **kwargs)
+        mocked = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mocked
+
+    def index_image(self, works_when):
+        """An ``index_image`` that works when ``works_when(settings now in place)``, and otherwise fails for lack of memory."""
+        def index(conn, client, settings, root_id, path, on_stage, on_retry):
+            now = config.device_settings()
+            self.seen.append((now, client))
+            on_stage("analysing image")
+            if not works_when(now):
+                raise AnalysisFailed("out_of_memory", "not enough memory", [])
+            return "indexed", "a cat"
+        return self.patch("index_image", side_effect=index)
+
+    def run_it(self, kind="out_of_memory", stages=None):
+        return scan._index_with_lower_settings(self.conn, "client", self.settings, self.row, kind,
+                                               (stages if stages is not None else []).append, lambda kind: None)
+
+    def test_the_first_step_that_works_ends_it_and_says_what_was_changed(self):
+        self.index_image(lambda now: now["image_long_edge"] <= 576)
+        result, description, changes = self.run_it()
+        self.assertEqual((result, description), ("indexed", "a cat"))
+        self.assertEqual(changes, {"use_mmap": True, "image_long_edge": 576})
+        self.assertEqual([(now["use_mmap"], now["image_long_edge"]) for now, _ in self.seen], [(True, 1024), (True, 768), (True, 576)])
+
+    def test_the_usual_settings_come_back_whether_it_worked_or_not(self):
+        usual = config.device_settings()
+        index = self.index_image(lambda now: False)
+        self.assertIsNone(self.run_it())
+        self.assertEqual(config.device_settings(), usual)
+        self.assertEqual(index.call_count, 4)  # paged in, 768, 576, 432
+        self.assertEqual(config.LLM_OPTIONS["use_mmap"], usual["use_mmap"])  # the options sent to Ollama too
+        self.index_image(lambda now: True)
+        self.run_it()
+        self.assertEqual(config.device_settings(), usual)
+
+    def test_a_failure_that_is_not_the_computers_is_raised_and_the_usual_settings_come_back(self):
+        usual = config.device_settings()
+        reply = AnalysisFailed("invalid_reply", "not in the expected form", [])
+        self.patch("index_image", side_effect=reply)
+        with self.assertRaises(AnalysisFailed):
+            self.run_it()
+        self.assertEqual(config.device_settings(), usual)
+
+    def test_the_models_memory_is_freed_before_each_try_for_lack_of_memory(self):
+        self.index_image(lambda now: now["image_long_edge"] <= 768)
+        self.run_it()
+        self.assertEqual([call.args[1] for call in self.unload.call_args_list], ["v", "e", "v", "e"])  # two tries
+
+    def test_no_reply_in_time_is_tried_with_a_client_that_waits_longer_and_the_models_are_not_unloaded(self):
+        self.index_image(lambda now: now["timeout_seconds"] >= 1200)
+        self.run_it("timeout")
+        self.make_client.assert_called_once_with(timeout=1200)
+        self.assertIs(self.seen[0][1], self.make_client.return_value)
+        self.unload.assert_not_called()
+
+    def test_what_is_being_tried_is_shown(self):
+        self.index_image(lambda now: now["image_long_edge"] <= 768)
+        stages = []
+        self.run_it(stages=stages)
+        self.assertTrue(any(stage.startswith("lower settings (model paged in from disk) · ") for stage in stages), stages)
+        self.assertTrue(any("pictures up to 768 px" in stage for stage in stages), stages)
+
+    def test_an_image_with_nothing_lower_to_try_gives_none(self):
+        self.row = {"file_path": str(self.make_image(self.work / "tiny.png")), "root_id": 1}  # 8 pixels: nothing smaller to ask for
+        config.OLLAMA_USE_MMAP = True
+        index = self.index_image(lambda now: True)
+        self.assertIsNone(self.run_it())
+        index.assert_not_called()
+
+
+class OfferLowerSettingsTests(IsolatedHome):
+    """The question to the user, and what is done with the answer."""
+
+    def setUp(self):
+        super().setUp()
+        self.conn = self.connect()
+        with self.conn:
+            root_id = get_or_add_root(self.conn, str(self.work))
+            for name in ("a.png", "b.png"):
+                upsert_backlog(self.conn, str(self.work / name), root_id, "t")
+        rows = {Path(r["file_path"]).name: dict(r) for r in self.conn.execute("SELECT * FROM backlog")}
+        self.failures = [(rows["a.png"], "out_of_memory", "Ollama ran out of memory. Close other apps."),
+                         (rows["b.png"], "timeout", "The model did not reply in time.")]
+        config.OLLAMA_TIMEOUT, config.OLLAMA_USE_MMAP, config.IMAGE_MAX_LONG_EDGE = 300, False, 1024
+        self.answer = True
+        self.tty = True
+        self.seen = []
+        patchers = (mock.patch.object(scan, "unload_model"), mock.patch.object(scan, "make_client"),
+                    mock.patch.object(scan, "Progress"),
+                    mock.patch.object(scan.questionary, "confirm", side_effect=lambda *a, **k: SimpleNamespace(ask=lambda: self.answer)),
+                    mock.patch.object(sys, "stdin", SimpleNamespace(isatty=lambda: self.tty)))
+        mocks = [patcher.start() for patcher in patchers]
+        for patcher in patchers:
+            self.addCleanup(patcher.stop)
+        self.progress, self.confirm = mocks[2].return_value, mocks[3]
+
+    def index_image(self, outcome=lambda path, now: ("indexed", "a cat")):
+        def index(conn, client, settings, root_id, path, on_stage, on_retry):
+            now = config.device_settings()
+            self.seen.append((path.name, now))
+            result = outcome(path, now)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        patcher = mock.patch.object(scan, "index_image", side_effect=index)
+        mocked = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mocked
+
+    def offer(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            scan._offer_lower_settings(self.conn, "client", {"vlm_model": "v", "embedding_model": "e"}, self.failures, None)
+        return out.getvalue()
+
+    def queued(self):
+        return sorted(Path(r["file_path"]).name for r in get_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS))
+
+    def test_the_user_is_told_which_images_and_why_before_being_asked(self):
+        self.answer = False
+        shown = self.offer()
+        self.assertIn("2 image(s) were not indexed", shown)
+        self.assertIn("a.png", shown)
+        self.assertIn("Ollama ran out of memory", shown)
+        self.assertIn("The model did not reply in time", shown)
+        self.confirm.assert_called_once()
+        self.assertFalse(self.confirm.call_args.kwargs["default"])  # Enter alone never lowers anything
+
+    def test_a_no_tries_nothing_and_leaves_both_images_queued(self):
+        self.answer = False
+        index = self.index_image()
+        shown = self.offer()
+        index.assert_not_called()
+        self.assertEqual(self.queued(), ["a.png", "b.png"])
+        self.assertIn("usual settings", shown)
+
+    def test_a_yes_tries_each_image_with_the_settings_for_what_went_wrong_with_it(self):
+        self.index_image()
+        shown = self.offer()
+        (first_name, first), (second_name, second) = self.seen
+        self.assertEqual((first_name, first["use_mmap"], first["timeout_seconds"]), ("a.png", True, 300))  # memory: paged in from disk
+        self.assertEqual((second_name, second["use_mmap"], second["timeout_seconds"]), ("b.png", False, 1200))  # no reply: a longer wait
+        self.assertEqual(self.queued(), [])  # both were indexed, so no longer queued
+        self.assertIn("2 of 2 image(s) indexed with lower settings", shown)
+        self.assertEqual(config.device_settings()["timeout_seconds"], 300)  # nothing stays lowered
+
+    def test_one_image_getting_lower_settings_does_not_lower_them_for_the_next(self):
+        self.index_image(lambda path, now: ("indexed", "ok"))
+        self.offer()
+        self.assertFalse(self.seen[1][1]["use_mmap"])  # a.png's paged-in loading was not carried over to b.png
+
+    def test_an_image_that_still_fails_stays_queued_and_the_others_go_on(self):
+        self.index_image(lambda path, now: AnalysisFailed("out_of_memory", "memory", []) if path.name == "a.png" else ("indexed", "ok"))
+        shown = self.offer()
+        self.assertEqual(self.queued(), ["a.png"])
+        self.assertIn("1 of 2 image(s) indexed with lower settings", shown)
+        results = [call.args[0] for call in self.progress.done.call_args_list]
+        self.assertEqual(results, ["FAILED", "indexed"])
+
+    def test_an_image_whose_lower_try_fails_for_the_models_reply_is_set_aside_like_in_the_run(self):
+        self.index_image(lambda path, now: AnalysisFailed("cut_off", "cut off", []) if path.name == "a.png" else ("indexed", "ok"))
+        self.offer()
+        row = {Path(r["file_path"]).name: dict(r) for r in self.conn.execute("SELECT * FROM backlog")}["a.png"]
+        self.assertEqual((row["status"], row["park_kind"]), ("parked", "cut_off"))
+
+    def test_without_a_terminal_nothing_is_asked_or_tried(self):
+        self.tty = False
+        index = self.index_image()
+        shown = self.offer()
+        self.confirm.assert_not_called()
+        index.assert_not_called()
+        self.assertIn("scan again in a terminal", shown)
+        self.assertEqual(self.queued(), ["a.png", "b.png"])
+
+    def test_a_long_list_is_cut_short_with_how_many_more(self):
+        self.answer = False
+        self.failures = [(self.failures[0][0], "out_of_memory", "memory")] * 13
+        self.assertIn("… and 3 more.", self.offer())
 
 
 if __name__ == "__main__":

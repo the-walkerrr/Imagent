@@ -31,6 +31,7 @@ from typing import Callable
 
 import httpx
 import ollama
+from PIL import Image
 
 from imagent import config
 from imagent.db.connection import describe_db_error, init_db
@@ -73,8 +74,8 @@ from imagent.pipeline.serialisation import serialize_embedding
 from imagent.pipeline.versions import collect_versions, model_versions
 from imagent.pipeline.validation import find_overlapping_root, validate_folder
 from imagent.text_processing.formatters import build_description, build_search_text
-from imagent.vlm.analyzer import analyse_image, embed_search_text
-from imagent.vlm.client import NotReady, check_ready, unload_model
+from imagent.vlm.analyzer import OUT_OF_MEMORY, SERVER_CRASH, TIMEOUT, analyse_image, embed_search_text
+from imagent.vlm.client import NotReady, check_ready, make_client, unload_model
 
 try:
     import questionary
@@ -275,6 +276,149 @@ def _index_with_tries(conn, client: ollama.Client, settings: dict, root_id: int,
 
 
 # ---------------------------------------------------------------------------
+# Trying an image again with lower settings
+# ---------------------------------------------------------------------------
+
+LOWER_SETTINGS_KINDS = (OUT_OF_MEMORY, SERVER_CRASH, TIMEOUT)  # the troubles that a lighter or a more patient way of asking can put right
+
+
+def _long_side(image_path: Path) -> int | None:
+    """The longer side of the picture in pixels, read from its header; None if it cannot be read."""
+    try:
+        with Image.open(image_path) as image:
+            return max(image.size)
+    except Exception:
+        return None
+
+
+def lower_settings_steps(kind: str, long_side: int | None) -> list[dict]:
+    """What to change, one step after the other, to try an image again that failed with ``kind``.
+
+    Each step is the changes to the usual device settings (see ``config.temporary_device_settings``) and builds on the one before:
+      * no reply in time: start waiting where the failed tries stopped waiting, then ask for smaller pictures;
+      * out of memory, or Ollama stopped (which is often what running out of graphics memory looks like): load the model paged in
+        from disk, which needs less memory, if it is not already, then ask for smaller pictures.
+    The sizes go down as calibration's do (``config.CALIBRATION_EDGE_STEP``) and stop where it stops (``CALIBRATION_MIN_EDGE``).
+    They start below the picture's own long side: a size at or above it would change nothing. The context window stays as it is: it
+    holds the largest picture, so a smaller one fits it too."""
+    usual = config.device_settings()
+    changes: dict = {}
+    steps: list[dict] = []
+    if kind == TIMEOUT:
+        changes["timeout_seconds"] = usual["timeout_seconds"] * config.OLLAMA_TIMEOUT_STEP ** config.OLLAMA_TIMEOUT_RAISES
+        steps.append(dict(changes))
+    elif not usual["use_mmap"]:
+        changes["use_mmap"] = True
+        steps.append(dict(changes))
+    edge = min(usual["image_long_edge"], long_side or usual["image_long_edge"])
+    while True:
+        edge = int(edge * config.CALIBRATION_EDGE_STEP)
+        if edge < config.CALIBRATION_MIN_EDGE:
+            return steps
+        changes = {**changes, "image_long_edge": edge}
+        steps.append(dict(changes))
+
+
+def _describe_changes(changes: dict) -> str:
+    parts = []
+    if "timeout_seconds" in changes:
+        parts.append(f"waiting up to {changes['timeout_seconds']} s")
+    if "use_mmap" in changes:
+        parts.append("model paged in from disk")
+    if "image_long_edge" in changes:
+        parts.append(f"pictures up to {changes['image_long_edge']} px")
+    return ", ".join(parts)
+
+
+def _index_with_lower_settings(conn, client: ollama.Client, settings: dict, row, kind: str,
+                               on_stage: Callable[[str], None], on_retry: Callable[[str], None]) -> tuple[str, str, dict] | None:
+    """``index_image`` for an image that failed with ``kind``, tried again with lower settings: each step of ``lower_settings_steps``
+    in turn, until one works. The settings are lower only while that one try runs, so no other image and no later run sees them.
+
+    Returns ``(result, short_description, what_was_changed)``, or None when no step worked (or there was none). A failure that is
+    not the computer's (the model's reply, the picture) is raised: lower settings do not put it right."""
+    path = Path(row["file_path"])
+    for changes in lower_settings_steps(kind, _long_side(path)):
+        label = f"lower settings ({_describe_changes(changes)}) · "
+        with config.temporary_device_settings(**changes):
+            if kind != TIMEOUT:
+                for name in (settings["vlm_model"], settings["embedding_model"]):
+                    unload_model(client, name)  # the memory is free again, and the models load with the settings of this try
+            step_client = make_client(timeout=changes["timeout_seconds"]) if "timeout_seconds" in changes else client
+            try:
+                result, description = index_image(conn, step_client, settings, row["root_id"], path,
+                                                  lambda stage: on_stage(label + stage), on_retry)
+            except IndexingFailure as failure:
+                if not failure.service:
+                    raise
+                with conn:
+                    add_failure_history(conn, row["file_path"], failure.attempts)
+                continue
+        return result, description, changes
+    return None
+
+
+def _offer_lower_settings(conn, client: ollama.Client, settings: dict, failures: list, parked_versions: dict | None) -> None:
+    """Tell the user which images were not indexed because of the computer (its memory or its speed, not the images) and why, and
+    ask whether to try them again with lower settings. The settings are lower for these images only, and for each one by what went
+    wrong with it: the usual settings stay as they are, and every other image is indexed as before.
+
+    ``failures`` holds ``(backlog row, kind of trouble, message)`` for each of them."""
+    width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
+    print(f"\n{len(failures)} image(s) were not indexed, and the trouble was the computer's, not the images':")
+    for row, _, message in failures[:10]:
+        print(f"\n  {file_link(row['file_path'], row['file_path'])}")
+        print(textwrap.fill(message, width, initial_indent="    ", subsequent_indent="    "))
+    if len(failures) > 10:
+        print(f"\n  … and {len(failures) - 10} more.")
+    if questionary is None or not sys.stdin.isatty():
+        print("\nThey stay queued. To try them again with lower settings, scan again in a terminal.")
+        return
+    print("\nImagent can try each of them again with lower settings, chosen for what went wrong with that image: a longer wait, "
+          "the model paged in from disk, a smaller picture. Your usual settings do not change and no other image is affected. "
+          "A picture read at a smaller size is described in less detail.")
+    if not questionary.confirm("Try these images again with lower settings?", default=False, style=STYLE).ask():
+        print("They stay queued, and the next scan tries them with your usual settings.")
+        return
+    indexed = 0
+    progress = Progress(len(failures))
+    try:
+        for i, (row, kind, _) in enumerate(failures, start=1):
+            progress.start(i, row["file_path"])
+            try:
+                found = _index_with_lower_settings(conn, client, settings, row, kind, progress.stage, lambda kind: None)
+            except IndexingFailure as exc:  # not the computer's: set aside or left queued, as in the run itself
+                with conn:
+                    add_failure_history(conn, row["file_path"], exc.attempts)
+                    if exc.park:
+                        park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when, parked_versions)
+                    else:
+                        record_backlog_failure(conn, row["file_path"], str(exc), count_attempt=False, kind=exc.kind if exc.report else None)
+                progress.done("FAILED", str(exc))
+                continue
+            except sqlite3.Error as exc:
+                progress.done("FAILED", describe_db_error(exc, str(config.DB_PATH)))
+                break
+            except Exception as exc:
+                progress.done("FAILED", f"{type(exc).__name__}: {exc}")
+                continue
+            if found is None:
+                progress.done("FAILED", "Still not indexed, even with lower settings. It stays queued.")
+                continue
+            result, description, changes = found
+            with conn:
+                delete_backlog(conn, row["file_path"])
+            indexed += 1
+            progress.done(result, f"({_describe_changes(changes)}) {description}")
+    except KeyboardInterrupt:
+        progress.close()
+        print("  interrupted")
+    finally:
+        progress.close()
+    print(f"\n{indexed} of {len(failures)} image(s) indexed with lower settings; {len(failures) - indexed} stay queued.")
+
+
+# ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
@@ -341,6 +485,8 @@ def _index_backlog() -> None:
     wall_start = time.perf_counter()
     in_a_row = 0  # consecutive images that failed for a reason that is not theirs (Ollama, the machine)
     last_service_error = ""
+    lower_settings_offer: list[tuple] = []  # (backlog row, kind, message) of images that failed for the computer's trouble: the user may try them again with lower settings
+    can_offer = True  # not after Ctrl+C, a database that could not be written, or a model that changed
     io_failures: list[str] = []  # files that failed one after another with an error of the file system: a drive that went away, perhaps
     stopped = ""
     recent_retries: deque[bool] = deque(maxlen=config.RETRY_RATE_WINDOW)  # for the latest analysed images: did the model's reply need asking for again?
@@ -393,6 +539,8 @@ def _index_backlog() -> None:
                     if exc.service:
                         in_a_row += 1
                         last_service_error = str(exc)
+                        if exc.kind in LOWER_SETTINGS_KINDS:
+                            lower_settings_offer.append((row, exc.kind, message))
                     else:
                         in_a_row = 0
                     if exc.model_trouble:
@@ -401,6 +549,7 @@ def _index_backlog() -> None:
                     counts["failed"] += 1
                     progress.done("FAILED", str(exc))
                     stopped = f"Indexing stopped. {exc} Nothing was held against the files; the rest stays queued."
+                    can_offer = False
                     break
                 except Exception as exc:
                     if isinstance(exc, FileNotFoundError) and _is_gone(image_path, root_paths.get(row["root_id"])):
@@ -453,10 +602,12 @@ def _index_backlog() -> None:
                 message = describe_db_error(exc, db_path)
                 progress.done("FAILED", message)
                 stopped = f"Indexing stopped. {message} Finished images are saved and the rest stays queued."
+                can_offer = False
                 break
     except KeyboardInterrupt:
         progress.close()
         print("  interrupted")
+        can_offer = False
         stopped = "Interrupted. Finished images are saved; the rest stays queued."
     finally:
         progress.close()
@@ -483,6 +634,8 @@ def _index_backlog() -> None:
         print_failed(conn)
     except sqlite3.Error:
         pass  # the database is what stopped the run; its message is above
+    if lower_settings_offer and can_offer:
+        _offer_lower_settings(conn, client, settings, lower_settings_offer, parked_versions)
     print()
 
     conn.close()

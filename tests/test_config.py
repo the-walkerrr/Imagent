@@ -30,6 +30,27 @@ class ConfigFileTests(IsolatedHome):
         self.assertEqual(config.load_config(), {})
 
 
+class TemporaryDeviceSettingsTests(IsolatedHome):
+    def test_the_settings_change_for_the_block_and_the_options_sent_to_ollama_with_them(self):
+        with config.temporary_device_settings(num_ctx=4096, use_mmap=True, image_long_edge=512, timeout_seconds=900):
+            self.assertEqual((config.OLLAMA_NUM_CTX, config.OLLAMA_USE_MMAP, config.IMAGE_MAX_LONG_EDGE, config.OLLAMA_TIMEOUT),
+                             (4096, True, 512, 900))
+            self.assertEqual((config.LLM_OPTIONS["num_ctx"], config.LLM_OPTIONS["use_mmap"], config.EMBED_OPTIONS["use_mmap"]),
+                             (4096, True, True))
+
+    def test_only_what_is_named_changes(self):
+        before = config.device_settings()
+        with config.temporary_device_settings(image_long_edge=512):
+            self.assertEqual(config.device_settings(), {**before, "image_long_edge": 512})
+
+    def test_the_earlier_settings_come_back_even_when_the_block_fails(self):
+        before, options = config.device_settings(), dict(config.LLM_OPTIONS)
+        with self.assertRaises(RuntimeError), config.temporary_device_settings(num_ctx=2048, use_mmap=not before["use_mmap"]):
+            raise RuntimeError("boom")
+        self.assertEqual(config.device_settings(), before)
+        self.assertEqual(config.LLM_OPTIONS, options)
+
+
 class LockTests(IsolatedHome):
     def test_only_one_holder_at_a_time(self):
         with single_instance("indexing", "Indexing"):

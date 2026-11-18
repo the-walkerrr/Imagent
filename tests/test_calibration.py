@@ -13,6 +13,7 @@ from PIL import Image
 from imagent import config
 from imagent.db.operations import get_device_settings, set_device_settings
 from tests.support import DEVICE, IsolatedHome
+from tests.test_analysis import GOOD
 from imagent.vlm import calibration
 
 REQUEST = httpx.Request("POST", "http://localhost")
@@ -47,11 +48,16 @@ class FakeOllama:
         return SimpleNamespace(models=[SimpleNamespace(model="vlm", size=self.size)])
 
 
-def reply(prompt_tokens=1500, prefill=2.0, load=5.0, rate=10.0):
-    """The numbers of a reply of 48 tokens at ``rate`` tokens per second."""
+def reply(prompt_tokens=1500, prefill=2.0, load=5.0, rate=10.0, content=GOOD):
+    """The numbers of a reply of 48 tokens at ``rate`` tokens per second; by default it is a description that fits the schema."""
     return {"prompt_eval_count": prompt_tokens, "prompt_eval_duration": int(prefill * 1e9), "load_duration": int(load * 1e9),
             "eval_count": 48, "eval_duration": int(48 / rate * 1e9), "done_reason": "stop",
-            "message": SimpleNamespace(content="{}")}
+            "message": SimpleNamespace(content=content)}
+
+
+def is_trial(request):
+    """A short trial (to time the model), not the full description that is asked for once the settings are found."""
+    return request["options"]["num_predict"] == config.CALIBRATION_TRIAL_TOKENS
 
 
 def edge_of(request):
@@ -101,6 +107,11 @@ class CalibrationTests(unittest.TestCase):
         with self.assertRaisesRegex(calibration.NotPossible, "did not work on this computer"):
             self.run_it(FakeOllama(lambda request: NO_MEMORY))
 
+    def test_a_vision_model_that_does_not_run_is_named_as_the_one_that_failed(self):
+        with self.assertRaises(calibration.NotPossible) as raised:
+            self.run_it(FakeOllama(lambda request: NO_MEMORY))
+        self.assertEqual(raised.exception.model, "vlm")
+
     def test_the_context_is_the_smallest_power_of_two_that_holds_the_prompt_and_room_to_raise_the_cap(self):
         found = self.run_it(FakeOllama(lambda request: reply(prompt_tokens=1500)))
         needed = 1500 + int(config.OLLAMA_MAX_OUTPUT_TOKENS * config.ANALYSIS_CAP_STEP)
@@ -133,6 +144,46 @@ class CalibrationTests(unittest.TestCase):
         found = self.run_it(FakeOllama(outcome))
         self.assertTrue(found["use_mmap"])
         self.assertEqual(found["image_long_edge"], config.IMAGE_EDGE_CEILING)
+
+    def test_a_model_that_cannot_write_a_description_that_fits_the_schema_is_not_fit_for_the_job(self):
+        client = FakeOllama(lambda request: reply() if is_trial(request) else reply(content="This is a nice picture."))
+        with self.assertRaisesRegex(calibration.NotPossible, "did not answer in the form Imagent needs") as raised:
+            self.run_it(client)
+        self.assertEqual(raised.exception.model, "vlm")
+        self.assertEqual(len({edge_of(r) for r in client.requests}), 1)  # another picture size would not teach it the form
+
+    def test_a_model_whose_description_is_always_cut_off_is_not_fit_for_the_job(self):
+        def outcome(request):
+            if is_trial(request):
+                return reply()
+            return {**reply(content='{"scene": "a'), "eval_count": request["options"]["num_predict"], "done_reason": "length"}
+        with self.assertRaisesRegex(calibration.NotPossible, "could not finish describing the test picture") as raised:
+            self.run_it(FakeOllama(outcome))
+        self.assertEqual(raised.exception.model, "vlm")
+
+    def test_a_description_that_is_right_after_the_steps_indexing_takes_is_accepted(self):
+        full = iter([reply(content="not json")])  # the first full reply is wrong; the problems are sent back and it answers again
+        client = FakeOllama(lambda request: reply() if is_trial(request) else next(full, reply()))
+        found = self.run_it(client)
+        self.assertEqual(found["image_long_edge"], config.IMAGE_EDGE_CEILING)
+        self.assertEqual(len([r for r in client.requests if not is_trial(r)]), 2)
+
+    def test_the_description_is_asked_for_with_the_settings_that_were_found_and_the_usual_ones_come_back(self):
+        usual = config.device_settings()
+        client = FakeOllama(lambda request: reply(prompt_tokens=1500))
+        found = self.run_it(client)
+        full = [r for r in client.requests if not is_trial(r)]
+        self.assertEqual(len(full), 1)
+        self.assertEqual(full[0]["options"]["num_ctx"], found["num_ctx"])
+        self.assertIs(full[0]["options"]["use_mmap"], found["use_mmap"])
+        self.assertEqual(full[0]["options"]["num_predict"], config.OLLAMA_MAX_OUTPUT_TOKENS)
+        self.assertEqual(config.device_settings(), usual)  # trying settings out does not change the ones in place
+
+    def test_running_out_of_memory_writing_the_description_is_tried_again_paged_in_from_disk(self):
+        def outcome(request):
+            return NO_MEMORY if not is_trial(request) and not request["options"]["use_mmap"] else reply()
+        found = self.run_it(FakeOllama(outcome))
+        self.assertTrue(found["use_mmap"])
 
     def test_a_model_that_never_replies_in_time_is_not_tried_the_other_way_as_well(self):
         slow = httpx.ReadTimeout("slow", request=REQUEST)
@@ -192,8 +243,9 @@ class CalibrationTests(unittest.TestCase):
 
     def test_an_embedding_model_that_does_not_run_even_alone_means_the_computer_cannot_run_the_models(self):
         client = FakeOllama(lambda request: reply(), embedder=lambda: ollama.ResponseError("Compute error.", 500))
-        with self.assertRaisesRegex(calibration.NotPossible, "embedding model 'emb' did not work"):
+        with self.assertRaisesRegex(calibration.NotPossible, "did not work on this computer, even one after the other") as raised:
             self.run_it(client)
+        self.assertEqual(raised.exception.model, "emb")  # the embedding model is the one that failed, not the vision model
         self.assertEqual(len(client.embeds), 2)
 
     def test_other_trouble_with_the_embedding_model_is_not_taken_for_not_fitting(self):

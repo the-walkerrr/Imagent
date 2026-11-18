@@ -136,7 +136,7 @@ class SetupPinTests(IsolatedHome):
     def test_a_problem_with_a_copied_model_is_reported_under_the_name_the_user_typed(self):
         settings, rejected, _, _, _ = self.download(problems={"imagent-pin/v:vd": "is not a vision model."})
         self.assertIsNone(settings)
-        self.assertEqual(rejected, {"v"})
+        self.assertEqual(rejected, {"v": "is not a vision model."})  # as typed, with what is wrong
 
     def test_a_pinned_copy_that_was_removed_is_made_again_from_the_same_version(self):
         config.save_install_record({"pinned_models": {"imagent-pin/e:abc123abc123": "e:latest"}})

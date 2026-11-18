@@ -14,7 +14,12 @@ made here (a scene drawn with Pillow, so nothing is downloaded or shipped), at s
   * one_model_at_a_time: whether the embedding model runs while the vision model is still loaded (indexing does this for
     every image). When it does not, indexing unloads the one before loading the other.
 
-``calibrate`` raises ``NotPossible`` when not even the smallest size works: the model does not run on this computer.
+The trials are short (``config.CALIBRATION_TRIAL_TOKENS``), so one full description of the picture is asked for as well, with
+the settings found and the steps indexing takes for a reply that is cut off or does not fit the schema: a model that cannot
+write one is not fit for the job, whatever its speed.
+
+``calibrate`` raises ``NotPossible`` when not even the smallest size works, or the model cannot write a usable description:
+the model does not run on this computer. ``NotPossible.model`` says which model it was.
 """
 
 from __future__ import annotations
@@ -30,12 +35,18 @@ from PIL import Image, ImageDraw
 
 from imagent import config
 from imagent.image_processing.memory import available_memory
-from imagent.vlm.analyzer import OUT_OF_MEMORY, ServiceTrouble, send_request
+from imagent.vlm.analyzer import (
+    CUT_OFF, INVALID_REPLY, OUT_OF_MEMORY, AnalysisFailed, ServiceTrouble, _request_analysis, send_request,
+)
 from imagent.vlm.client import unload_model
 
 
 class NotPossible(Exception):
-    """The vision model cannot run on this computer; the message says why, in plain words."""
+    """A model cannot run on this computer; the message says why, in plain words, and ``model`` is the one that cannot."""
+
+    def __init__(self, message: str, model: str | None = None):
+        super().__init__(message)
+        self.model = model
 
 
 class NoAnswer(Exception):
@@ -112,8 +123,7 @@ def _fits_with_vlm(client: ollama.Client, vlm_model: str, embedding_model: str, 
         unload_model(client, name)
     time.sleep(config.OLLAMA_RECOVERY_WAIT)
     if not _embeds(client, embedding_model, use_mmap):
-        raise NotPossible(f"and the embedding model '{embedding_model}' did not work on this computer, even one after the other. "
-                          "Smaller models may.")
+        raise NotPossible("did not work on this computer, even one after the other. A smaller model may.", embedding_model)
     return False
 
 
@@ -147,6 +157,23 @@ def _trial(client: ollama.Client, model: str, edge: int, num_ctx: int, use_mmap:
     }, client
 
 
+def _check_description(client: ollama.Client, model: str, edge: int) -> None:
+    """One full description of the test picture, asked for the way indexing asks, with the same steps for a reply that is cut off
+    or does not fit the schema. The settings to try are in place (``config.temporary_device_settings``).
+
+    Raises ``ServiceTrouble`` when the model could not be reached, and ``NotPossible`` when it did not give a usable reply."""
+    try:
+        _request_analysis(client, model, calibration_image(edge))
+    except AnalysisFailed as exc:
+        if exc.kind == CUT_OFF:
+            raise NotPossible("could not finish describing the test picture, even after trying again with different settings "
+                              "and with more room. A smaller model may.", model) from exc
+        if exc.kind == INVALID_REPLY:
+            raise NotPossible("did not answer in the form Imagent needs (a JSON description that fits its schema), even after "
+                              "it was told what was wrong. A different model may.", model) from exc
+        raise ServiceTrouble(exc.kind, str(exc)) from exc
+
+
 def _fit_context(client: ollama.Client, model: str, edge: int, use_mmap: bool, limit: int | None,
                  start: int) -> tuple[int, dict, ollama.Client]:  # raises ServiceTrouble, NoAnswer or NotPossible
     """The smallest context that holds the prompt at this size, found by trying: Ollama cuts a prompt that does not fit.
@@ -168,7 +195,8 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
     """Measure this computer with the vision model ``model``, and with the embedding model ``embedding_model`` beside it.
 
     Returns the settings (see ``db.operations.set_device_settings``). Both models are unloaded afterwards. Raises
-    ``NotPossible`` when the vision model does not run here at any size worth sending, or the embedding model does not run at all."""
+    ``NotPossible`` (naming the model) when the vision model does not run here at any size worth sending or cannot write a usable
+    description, or the embedding model does not run at all."""
     available = available_memory()
     size = _model_bytes(client, model)
     limit = _model_context_limit(client, model)
@@ -206,12 +234,22 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
                     trouble = "The model did not report how fast it works."
                     break
                 prefill = max(first["prefill_seconds"], warm["prefill_seconds"])
-                say("Checking that the embedding model fits beside it…")
-                one_at_a_time = not _fits_with_vlm(client, model, embedding_model, use_mmap)  # the vision model is still loaded from the trial above
                 first_reply = first["load_seconds"] + prefill + config.OLLAMA_MAX_OUTPUT_TOKENS / speed
+                timeout = math.ceil(first_reply * config.CALIBRATION_TIMEOUT_MARGIN)
+                say("Checking that the model writes a complete description…")
+                try:
+                    with config.temporary_device_settings(num_ctx=context, use_mmap=use_mmap, image_long_edge=edge, timeout_seconds=timeout):
+                        _check_description(client, model, edge)
+                except ServiceTrouble as exc:  # the same steps as for a trial that does not get an answer
+                    trouble = str(exc)
+                    if exc.kind == OUT_OF_MEMORY:
+                        continue
+                    break
+                say("Checking that the embedding model fits beside it…")
+                one_at_a_time = not _fits_with_vlm(client, model, embedding_model, use_mmap)  # the vision model is still loaded from the checks above
                 return {
                     "num_ctx": context, "use_mmap": use_mmap, "image_long_edge": edge,
-                    "timeout_seconds": math.ceil(first_reply * config.CALIBRATION_TIMEOUT_MARGIN),
+                    "timeout_seconds": timeout,
                     "one_model_at_a_time": one_at_a_time,
                     "measurements": {
                         "prompt_tokens": warm["prompt_tokens"], "prefill_seconds": round(prefill, 2),
@@ -221,7 +259,7 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
                 }
             edge = int(edge * config.CALIBRATION_EDGE_STEP)
         raise NotPossible(f"did not work on this computer at any picture size worth using"
-                          f"{f' (last problem: {trouble})' if trouble else ''}. A smaller model may.")
+                          f"{f' (last problem: {trouble})' if trouble else ''}. A smaller model may.", model)
     finally:
         unload_model(client, model)
         unload_model(client, embedding_model)

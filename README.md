@@ -44,6 +44,12 @@ imagent                             # open a menu (arrow keys and Enter) with th
 
 `imagent --help` lists the commands. To index: run `imagent scan` with a folder, then `imagent search`.
 
+## When a model does not fit your computer
+
+Setup tries each model for real. If one cannot run here, or cannot write a description in the form Imagent needs, setup says which one, removes what it downloaded for it (a model that was already on your computer is never removed) and asks again; the prompt you copy for an AI chat then lists the models that already failed.
+
+If a picture cannot be indexed because Ollama ran out of memory, stopped or did not reply in time, `imagent scan` lists those pictures and why, and asks whether to try them again with lower settings (a longer wait, the model paged in from disk, a smaller picture). The lower settings apply only to those pictures, each by what went wrong with it; your usual settings do not change. The default answer is no.
+
 ## The models are locked
 
 `imagent setup` saves a private copy of each of the three models (vision, text and embedding), so a later `ollama pull` cannot change them. Different embedding models give different vectors for the same text, so changing a model would break every search of what is already indexed. To use other models, uninstall Imagent and set it up again (this clears the index).
