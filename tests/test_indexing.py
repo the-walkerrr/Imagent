@@ -1,5 +1,7 @@
 import contextlib
 import io
+import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -15,7 +17,9 @@ from imagent import config
 from imagent.commands import scan
 from imagent.db.operations import get_backlog, get_exhausted_backlog, get_or_add_root, upsert_backlog
 from tests.support import IsolatedHome
+from imagent.image_processing.hashing import compute_pixel_hash
 from imagent.image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, ImageProblem, problem
+from imagent.pipeline.error_messages import describe
 from imagent.pipeline.failure import RunStopped
 from imagent.vlm.analyzer import AnalysisFailed
 
@@ -93,6 +97,54 @@ class ModelMemoryTests(IsolatedHome):
         return fail
 
 
+class IndexedRecordTests(IsolatedHome):
+    """What ``index_image`` stores about the picture, so that a later scan can tell an edited picture from edited metadata."""
+
+    def setUp(self):
+        super().setUp()
+        self.conn = self.connect()
+        with self.conn:
+            self.root_id = get_or_add_root(self.conn, str(self.work))
+        self.settings = {"vlm_model": "vlm", "embedding_model": "emb", "embedding_dim": 2, "versions": {}}
+        self.analysis = SimpleNamespace(reply={config.SUMMARY_FIELD: "A cat."}, ocr_text=[], features={}, attempts=[])
+        patchers = {name: mock.patch.object(scan, name, **options) for name, options in (
+            ("analyse_image", {"return_value": self.analysis}), ("embed_search_text", {"return_value": [0.5, 0.5]}), ("unload_model", {}))}
+        for patcher in patchers.values():
+            self.addCleanup(patcher.stop)
+        self.analyse = patchers["analyse_image"].start()
+        patchers["embed_search_text"].start()
+        patchers["unload_model"].start()
+
+    def stored(self, path):
+        row = self.conn.execute("SELECT * FROM image_data WHERE file_path = ?", (str(path),)).fetchone()
+        return dict(row) if row else None
+
+    def test_the_pixel_hash_of_the_picture_is_stored_with_the_hash_of_the_file(self):
+        image = self.make_image(self.work / "a.png", shade=3)
+        scan.index_image(self.conn, object(), self.settings, self.root_id, image)
+        self.assertEqual(self.stored(image)["pixel_hash"], compute_pixel_hash(str(image)))
+
+    def test_a_picture_pillow_cannot_read_is_stored_without_one(self):
+        image = self.work / "a.xyz"
+        image.write_bytes(b"not a picture Pillow knows")  # analysed through a converted copy, which is mocked here
+        scan.index_image(self.conn, object(), self.settings, self.root_id, image)
+        self.assertIsNone(self.stored(image)["pixel_hash"])
+
+    def test_a_file_that_changed_while_it_was_analysed_is_not_stored_and_costs_no_attempt(self):
+        image = self.make_image(self.work / "a.png")
+
+        def edited_meanwhile(*args, **kwargs):
+            later = os.stat(image).st_mtime + 100
+            os.utime(image, (later, later))
+            return self.analysis
+
+        self.analyse.side_effect = edited_meanwhile
+        with self.assertRaises(ImageProblem) as raised:
+            scan.index_image(self.conn, object(), self.settings, self.root_id, image)
+        self.assertEqual((raised.exception.kind, raised.exception.park), (BUSY, False))
+        self.assertIsNone(self.stored(image))
+
+
 class RunTests(IsolatedHome):
     """The indexing loop with the models replaced: what happens to the queue when something breaks."""
 
@@ -124,8 +176,17 @@ class RunTests(IsolatedHome):
         self.addCleanup(patcher.stop)
 
     def _attempts(self):
-        return {Path(r["file_path"]).name: (r["attempts"], r["last_error"]) for r in
-                self.conn.execute("SELECT file_path, attempts, last_error FROM backlog")}
+        return {Path(r["file_path"]).name: (r["attempts"], describe(r["error_id"], json.loads(r["error_params"] or "{}")) or None) for r in
+                self.conn.execute("SELECT file_path, attempts, error_id, error_params FROM backlog")}
+
+    def test_only_the_files_of_the_chosen_folders_are_indexed(self):
+        with self.conn:
+            other_id = get_or_add_root(self.conn, str(self.work / "other"))
+            upsert_backlog(self.conn, str(self.work / "other" / "e.png"), other_id, "t")
+        with mock.patch.object(scan, "index_image", return_value=("indexed", "")) as index_image:
+            scan._index_backlog({other_id})
+        self.assertEqual([call.args[4].name for call in index_image.call_args_list], ["e.png"])
+        self.assertEqual(len(get_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS)), 4)  # the other folder's files stay queued
 
     def test_a_full_disk_stops_the_run_and_blames_no_file(self):
         full = sqlite3.OperationalError("database or disk is full")
@@ -181,7 +242,7 @@ class RunTests(IsolatedHome):
 
         def index_image(conn, client, settings, root_id, path, on_stage, on_retry):
             if path.name == "b.png":
-                raise AnalysisFailed("cut_off", "cut off at 5 tokens", [attempt])
+                raise AnalysisFailed("cut_off", "reply_cut_off", [attempt])
             return "indexed", "ok"
         with mock.patch.object(scan, "index_image", side_effect=index_image):
             scan._index_backlog()
@@ -193,7 +254,7 @@ class RunTests(IsolatedHome):
         self.assertEqual([tuple(h) for h in history], [("cut_off", "first try", "{")])
 
     def test_a_file_that_changes_is_queued_again_after_being_parked(self):
-        with mock.patch.object(scan, "index_image", side_effect=AnalysisFailed("cut_off", "x", [])):
+        with mock.patch.object(scan, "index_image", side_effect=AnalysisFailed("cut_off", "reply_cut_off", [])):
             scan._index_backlog()
         self.assertEqual(len(get_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS)), 0)
         with self.conn:
@@ -231,7 +292,7 @@ class RunTests(IsolatedHome):
         return {Path(r["file_path"]).name: dict(r) for r in self.conn.execute("SELECT * FROM backlog")}
 
     def test_an_image_with_a_problem_of_its_own_is_set_aside_with_the_reason_and_when_to_retry(self):
-        damaged = problem(UNREADABLE, "The image cannot be read; it is damaged.", retry_when="file_changed")
+        damaged = problem(UNREADABLE, "damaged_picture", retry_when="file_changed")
         self.run_with([("indexed", "ok"), damaged, ("indexed", "ok"), ("indexed", "ok")])
         row = self._rows()["b.png"]
         self.assertEqual((row["status"], row["park_kind"], row["retry_when"], row["attempts"]), ("parked", "unreadable", "file_changed", 0))
@@ -239,12 +300,12 @@ class RunTests(IsolatedHome):
 
     def test_a_damaged_looking_file_that_changed_since_the_scan_is_still_being_written_and_stays_queued(self):
         self.make_image(self.work / "b.png")  # its modification time is not the "t" the scan recorded for it
-        damaged = problem(UNREADABLE, "The image cannot be read; it is damaged.", retry_when="file_changed")
+        damaged = problem(UNREADABLE, "damaged_picture", retry_when="file_changed")
         with mock.patch("time.sleep", side_effect=AssertionError("it waited")):
             self.run_with([("indexed", "ok"), damaged, ("indexed", "ok"), ("indexed", "ok")])
         row = self._rows()["b.png"]
         self.assertEqual((row["status"], row["attempts"], row["park_kind"]), ("queued", 0, None))
-        self.assertIn("changed after it was scanned", row["last_error"])
+        self.assertEqual(row["error_id"], "changed_since_scan")
         self.assertEqual(get_exhausted_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS), [])  # not reported: tried again by the next run
         self.assertEqual(self.conn.execute("SELECT kind FROM failure_history").fetchone()[0], "unreadable")  # what was found is kept
 
@@ -254,28 +315,28 @@ class RunTests(IsolatedHome):
         path = self.make_image(self.work / "b.png")
         with self.conn:
             upsert_backlog(self.conn, str(path), 1, iso_utc(os.stat(path).st_mtime))
-        damaged = problem(UNREADABLE, "The image cannot be read; it is damaged.", retry_when="file_changed")
+        damaged = problem(UNREADABLE, "damaged_picture", retry_when="file_changed")
         self.run_with([("indexed", "ok"), damaged, ("indexed", "ok"), ("indexed", "ok")])
         row = self._rows()["b.png"]
         self.assertEqual((row["status"], row["park_kind"]), ("parked", "unreadable"))
 
     def test_a_file_still_being_written_stays_queued_and_loses_no_attempt(self):
-        busy = ImageProblem(BUSY, "still being written", park=False, report=False)
+        busy = ImageProblem(BUSY, "changed_since_scan", park=False, report=False)
         self.run_with([("indexed", "ok"), busy, ("indexed", "ok"), ("indexed", "ok")])
         row = self._rows()["b.png"]
-        self.assertEqual((row["status"], row["attempts"], row["last_error"], row["park_kind"]), ("queued", 0, "still being written", None))
+        self.assertEqual((row["status"], row["attempts"], row["error_id"], row["park_kind"]), ("queued", 0, "changed_since_scan", None))
         self.assertEqual(get_exhausted_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS), [])  # nothing to tell the user: it is tried again later
 
     def test_trouble_with_the_machine_several_times_in_a_row_stops_the_run_and_parks_nothing_that_is_not_the_files_fault(self):
-        short = AnalysisFailed("out_of_memory", "not enough memory", [])
+        short = AnalysisFailed("out_of_memory", "model_out_of_memory", [])
         stop = self.run_with([short] * (4 * config.SERVICE_TRIES))
         self.assertEqual(stop.code, 1)
         rows = self._rows()
-        self.assertEqual(sum(1 for r in rows.values() if r["last_error"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
+        self.assertEqual(sum(1 for r in rows.values() if r["error_id"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
         self.assertTrue(all(r["status"] == "queued" and r["attempts"] == 0 for r in rows.values()))
 
     def test_images_that_failed_for_the_computers_trouble_are_offered_a_try_with_lower_settings_after_the_run(self):
-        self.run_with([AnalysisFailed("out_of_memory", "not enough memory", [])] * (4 * config.SERVICE_TRIES))
+        self.run_with([AnalysisFailed("out_of_memory", "model_out_of_memory", [])] * (4 * config.SERVICE_TRIES))
         self.offer.assert_called_once()
         failures = self.offer.call_args.args[3]
         self.assertEqual([(Path(row["file_path"]).name, kind) for row, kind, _ in failures],
@@ -283,49 +344,52 @@ class RunTests(IsolatedHome):
         self.assertIn("Close other apps", failures[0][2])  # the message the user was shown for it
 
     def test_each_image_is_offered_with_the_trouble_it_had(self):
-        self.run_with([AnalysisFailed("timeout", "no reply", [])] * config.SERVICE_TRIES
-                      + [AnalysisFailed("out_of_memory", "memory", [])] * config.SERVICE_TRIES + [("indexed", "ok")] * 2)
+        self.run_with([AnalysisFailed("timeout", "model_timeout", [])] * config.SERVICE_TRIES
+                      + [AnalysisFailed("out_of_memory", "model_out_of_memory", [])] * config.SERVICE_TRIES + [("indexed", "ok")] * 2)
         self.assertEqual([kind for _, kind, _ in self.offer.call_args.args[3]], ["timeout", "out_of_memory"])
 
     def test_no_offer_when_every_image_was_indexed_or_the_trouble_was_the_images(self):
         self.run_with([("indexed", "ok")] * 4)
-        self.run_with([problem(UNREADABLE, "damaged", retry_when="file_changed")] * 4)
+        self.run_with([problem(UNREADABLE, "damaged_picture", retry_when="file_changed")] * 4)
         self.offer.assert_not_called()
 
     def test_no_offer_when_the_run_stopped_for_a_reason_lower_settings_would_not_help(self):
-        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        crash = AnalysisFailed("server_crash", "model_stopped", [])
         self.run_with([crash] * config.SERVICE_TRIES + [RunStopped("The embedding model has changed.")])
         self.offer.assert_not_called()
 
     def test_no_offer_when_the_database_could_not_be_written(self):
-        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        crash = AnalysisFailed("server_crash", "model_stopped", [])
         self.run_with([crash] * config.SERVICE_TRIES + [sqlite3.OperationalError("database or disk is full")])
         self.offer.assert_not_called()
 
     def test_timeouts_in_a_row_stop_the_run_too_and_the_files_stay_queued_for_the_next_run(self):
-        stop = self.run_with([AnalysisFailed("timeout", "no reply", [])] * (4 * config.SERVICE_TRIES))
+        stop = self.run_with([AnalysisFailed("timeout", "model_timeout", [])] * (4 * config.SERVICE_TRIES))
         self.assertEqual(stop.code, 1)
-        failed = [r for r in self._rows().values() if r["last_error"]]
+        failed = [r for r in self._rows().values() if r["error_id"]]
         self.assertEqual(len(failed), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
         self.assertTrue(all(r["status"] == "queued" and r["attempts"] == 0 for r in failed))
 
     def test_trouble_with_the_machine_is_tried_again_right_away_and_a_try_that_works_ends_it(self):
-        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        crash = AnalysisFailed("server_crash", "model_stopped", [])
         self.assertIsNone(self.run_with([crash, crash, ("indexed", "ok")] + [("indexed", "ok")] * 3))
         self.assertEqual(self._rows(), {})  # every image was indexed, the first one on its third try
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM failure_history").fetchone()[0], 0)
 
     def test_after_every_try_the_user_is_told_what_happened_and_what_to_do_and_the_file_stays_queued(self):
-        crash = AnalysisFailed("server_crash", "Ollama stopped responding.", [])
+        crash = AnalysisFailed("server_crash", "model_stopped", [])
         self.assertIsNone(self.run_with([crash] * config.SERVICE_TRIES + [("indexed", "ok")] * 3))
         row = self._rows()["a.png"]
         self.assertEqual((row["status"], row["attempts"], row["park_kind"]), ("queued", 0, "server_crash"))  # tried by the next run too
-        self.assertIn(f"tried {config.SERVICE_TRIES} times", row["last_error"])
-        self.assertIn("Close other apps", row["last_error"])
+        self.assertEqual((row["error_id"], json.loads(row["error_params"])), ("model_stopped", {"tries": config.SERVICE_TRIES}))
+        self.assertNotIn("Ollama stopped responding", str(dict(row)))  # only the id is stored, not the wording
+        message = describe(row["error_id"], json.loads(row["error_params"]))
+        self.assertIn(f"tried {config.SERVICE_TRIES} times", message)
+        self.assertIn("Close other apps", message)
         self.assertEqual([f["file_path"] for f in get_exhausted_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS)], [str(self.work / "a.png")])
 
     def test_what_a_failed_try_was_is_shown_while_the_next_one_runs(self):
-        crash = AnalysisFailed("timeout", "No reply.", [])
+        crash = AnalysisFailed("timeout", "model_timeout", [])
         stages = []
         outcomes = [crash, ("indexed", "ok")]
 
@@ -342,8 +406,7 @@ class RunTests(IsolatedHome):
         self.assertTrue(stages[2].startswith("timeout: trying again, 2 of ") and stages[2].endswith("analysing image"), stages)
 
     def test_a_picture_too_large_for_the_free_memory_stays_queued_and_is_reported_until_a_run_indexes_it(self):
-        large = problem(TOO_LARGE, "The picture has 900 megapixels, more than the memory free right now allows. Close other programs, then scan again.",
-                        park=False)
+        large = problem(TOO_LARGE, "picture_too_large", params={"megapixels": "900"}, park=False)
         self.run_with([("indexed", "ok"), large, ("indexed", "ok"), ("indexed", "ok")])
         row = self._rows()["b.png"]
         self.assertEqual((row["status"], row["attempts"], row["park_kind"]), ("queued", 0, "too_large"))
@@ -352,7 +415,7 @@ class RunTests(IsolatedHome):
         self.assertEqual(get_exhausted_backlog(self.conn, config.BACKLOG_MAX_ATTEMPTS), [])
 
     def test_a_problem_of_the_files_does_not_count_towards_stopping(self):
-        damaged = problem(UNREADABLE, "damaged", retry_when="file_changed")
+        damaged = problem(UNREADABLE, "damaged_picture", retry_when="file_changed")
         self.assertIsNone(self.run_with([damaged] * 4))
         self.assertTrue(all(r["status"] == "parked" for r in self._rows().values()))
 
@@ -361,7 +424,7 @@ class RunTests(IsolatedHome):
         self.assertEqual(stop.code, 1)
         rows = self._rows()
         self.assertTrue(all(r["attempts"] == 0 for r in rows.values()))  # given back: a drive that went away is not their fault
-        self.assertEqual(sum(1 for r in rows.values() if r["last_error"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
+        self.assertEqual(sum(1 for r in rows.values() if r["error_id"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
 
     def test_one_file_that_cannot_be_read_costs_an_attempt_and_the_run_goes_on(self):
         self.assertIsNone(self.run_with([("indexed", "ok"), PermissionError(13, "denied"), ("indexed", "ok"), ("indexed", "ok")]))
@@ -376,7 +439,7 @@ class RunTests(IsolatedHome):
         self.assertEqual(stop.code, 1)
         rows = self._rows()
         self.assertEqual(len(rows), 4)
-        self.assertTrue(all(r["attempts"] == 0 and r["status"] == "queued" and not r["last_error"] for r in rows.values()))
+        self.assertTrue(all(r["attempts"] == 0 and r["status"] == "queued" and not r["error_id"] for r in rows.values()))
 
     def test_missing_ocr_models_stop_the_run_before_any_image(self):
         self.ocr_check.side_effect = OSError("no internet")
@@ -458,7 +521,7 @@ class IndexWithLowerSettingsTests(IsolatedHome):
             self.seen.append((now, client))
             on_stage("analysing image")
             if not works_when(now):
-                raise AnalysisFailed("out_of_memory", "not enough memory", [])
+                raise AnalysisFailed("out_of_memory", "model_out_of_memory", [])
             return "indexed", "a cat"
         return self.patch("index_image", side_effect=index)
 
@@ -486,7 +549,7 @@ class IndexWithLowerSettingsTests(IsolatedHome):
 
     def test_a_failure_that_is_not_the_computers_is_raised_and_the_usual_settings_come_back(self):
         usual = config.device_settings()
-        reply = AnalysisFailed("invalid_reply", "not in the expected form", [])
+        reply = AnalysisFailed("invalid_reply", "reply_invalid", [])
         self.patch("index_image", side_effect=reply)
         with self.assertRaises(AnalysisFailed):
             self.run_it()
@@ -601,7 +664,7 @@ class OfferLowerSettingsTests(IsolatedHome):
         self.assertFalse(self.seen[1][1]["use_mmap"])  # a.png's paged-in loading was not carried over to b.png
 
     def test_an_image_that_still_fails_stays_queued_and_the_others_go_on(self):
-        self.index_image(lambda path, now: AnalysisFailed("out_of_memory", "memory", []) if path.name == "a.png" else ("indexed", "ok"))
+        self.index_image(lambda path, now: AnalysisFailed("out_of_memory", "model_out_of_memory", []) if path.name == "a.png" else ("indexed", "ok"))
         shown = self.offer()
         self.assertEqual(self.queued(), ["a.png"])
         self.assertIn("1 of 2 image(s) indexed with lower settings", shown)
@@ -609,7 +672,7 @@ class OfferLowerSettingsTests(IsolatedHome):
         self.assertEqual(results, ["FAILED", "indexed"])
 
     def test_an_image_whose_lower_try_fails_for_the_models_reply_is_set_aside_like_in_the_run(self):
-        self.index_image(lambda path, now: AnalysisFailed("cut_off", "cut off", []) if path.name == "a.png" else ("indexed", "ok"))
+        self.index_image(lambda path, now: AnalysisFailed("cut_off", "reply_cut_off", []) if path.name == "a.png" else ("indexed", "ok"))
         self.offer()
         row = {Path(r["file_path"]).name: dict(r) for r in self.conn.execute("SELECT * FROM backlog")}["a.png"]
         self.assertEqual((row["status"], row["park_kind"]), ("parked", "cut_off"))

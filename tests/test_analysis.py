@@ -488,13 +488,13 @@ class FailureRecordTests(IsolatedHome):
         with conn:
             root_id = get_or_add_root(conn, str(self.work))
             upsert_backlog(conn, "/a.png", root_id, "t1")
-            park_backlog(conn, "/a.png", "cut_off", "cut off", "model_changed")
+            park_backlog(conn, "/a.png", "cut_off", "reply_cut_off", "model_changed")
             upsert_backlog(conn, "/a.png", root_id, "t1")  # scanned again, unchanged
-        row = conn.execute("SELECT status, park_kind, last_error FROM backlog").fetchone()
-        self.assertEqual(tuple(row), ("parked", "cut_off", "cut off"))
+        row = conn.execute("SELECT status, park_kind, error_id FROM backlog").fetchone()
+        self.assertEqual(tuple(row), ("parked", "cut_off", "reply_cut_off"))
         with conn:
             upsert_backlog(conn, "/a.png", root_id, "t2")  # the file changed
-        row = conn.execute("SELECT status, park_kind, last_error, retry_when FROM backlog").fetchone()
+        row = conn.execute("SELECT status, park_kind, error_id, retry_when FROM backlog").fetchone()
         self.assertEqual(tuple(row), ("queued", None, None, None))
 
 

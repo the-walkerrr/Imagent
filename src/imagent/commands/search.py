@@ -20,12 +20,16 @@ All activity reads from the user-level database (``config.DB_PATH``).
 
 ``main`` is what ``imagent search`` runs. Given a query it answers it and ends. Without one it starts Ollama and loads
 the models once, then keeps asking for queries until the user types ``exit`` (or presses Ctrl+C), so later searches start at once.
+
+Each result shows its one-line summary, then its date, camera and size. With ``--full`` it shows the full description instead of the summary,
+and also the place it was taken and the folder it was found in.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 
@@ -144,9 +148,10 @@ def start_session() -> tuple | None:
 def search(query: str, session: tuple | None = None) -> list[dict]:
     """Return the ``config.UNCERTAIN_TOP_K`` images closest to ``query``, best first.
 
-    Each result dict has: file_id, file_path, short_description, description, score (the mean of the
-    similarities below), query_score (similarity to the query as typed) and hyde_score
-    (similarity to the HyDE description, None if that step failed).
+    Each result dict has: file_id, file_path, short_description, description, the file's properties
+    (width, height, file_size, mime_type, modified_at, root_path) and EXIF facts (taken_at, camera_make, camera_model,
+    gps_lat, gps_lon; None when absent), score (the mean of the similarities below), query_score (similarity to the
+    query as typed) and hyde_score (similarity to the HyDE description, None if that step failed).
 
     ``session`` is what ``start_session`` returned; without it the session is started here.
     """
@@ -157,10 +162,10 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             return []
     client, settings = session
     conn = init_db(str(config.DB_PATH))
-    progress = SearchProgress(query)
+    progress = SearchProgress()
     try:
         judge_model, embedding_model = settings["judge_model"], settings["embedding_model"]
-        progress.step("Embedding query")
+        progress.step("Searching")
         try:
             query_embedding = embed_search_text(client, embedding_model, query)
         except Exception as exc:
@@ -175,10 +180,9 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             return []
 
         hyde_embedding = None
-        progress.step("Understanding query")
+        progress.step("Analyzing")
         try:
             understanding = understand_query(client, judge_model, query)
-            progress.step("Embedding HyDE description")
             embedded = embed_search_text(client, embedding_model, understanding.hypothetical_description)
             if len(embedded) != settings["embedding_dim"]:
                 raise ValueError(f"the embedding model returned {len(embedded)} values, "
@@ -186,11 +190,11 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
             hyde_embedding = embedded
         except Exception as exc:
             log_error(conn, stage="query_understanding", exc=exc, metadata={"query": query})
-            progress.fail("skipped")
+            progress.fail("Could not analyze the query, so the search uses your words as typed.")
             # Query understanding is an enhancement, not a hard dependency —
             # fall back to the query embedding alone.
 
-        progress.step("Comparing images")
+        progress.step("Matching images")
         queries = [query_embedding] if hyde_embedding is None else [query_embedding, hyde_embedding]
         # Enough of the closest to still find UNCERTAIN_TOP_K whose file exists after skipping up to SEARCH_MAX_MISSING_SKIPPED that do not.
         file_ids, similarities, skipped_dim = _best_matches(conn, settings["embedding_dim"], queries,
@@ -217,6 +221,7 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
                 "file_path": summary["file_path"],
                 "short_description": summary["short_description"],
                 "description": summary["description"],
+                **{key: summary[key] for key in _DETAIL_COLUMNS},
                 "score": float(scores[row]),
                 "query_score": float(similarities[row, 0]),
                 "hyde_score": None if hyde_embedding is None else float(similarities[row, 1]),
@@ -230,7 +235,46 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
         conn.close()
 
 
-def _show(query: str, results: list[dict]) -> None:
+_DETAIL_COLUMNS = ("width", "height", "file_size", "mime_type", "taken_at", "modified_at",
+                   "camera_make", "camera_model", "gps_lat", "gps_lon", "root_path")
+
+
+def _file_size(size: int) -> str:
+    amount = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if amount < 1024 or unit == "GB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+
+
+def _when(result: dict) -> str | None:
+    """When the picture was taken (its EXIF time), or else when the file was last changed."""
+    if result["taken_at"]:
+        try:
+            return datetime.fromisoformat(result["taken_at"]).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return result["taken_at"]
+    return f"modified {result['modified_at'][:10]}" if result["modified_at"] else None
+
+
+def _facts(result: dict) -> str:
+    """The date, camera, size in pixels and size on disk of an image on one line, leaving out what is not known."""
+    camera = " ".join(part for part in (result["camera_make"], result["camera_model"]) if part)
+    pixels = f"{result['width']}\u00d7{result['height']}" if result["width"] and result["height"] else None
+    size = _file_size(result["file_size"]) if result["file_size"] is not None else None
+    return " \u00b7 ".join(part for part in (_when(result), camera, pixels, size) if part)
+
+
+def _description(result: dict, full: bool) -> None:
+    """The one-line summary, or with ``full`` the whole description."""
+    if full:
+        if result["description"]:
+            print("\n".join(f"   {line}".rstrip() for line in result["description"].splitlines()))
+    elif result["short_description"]:
+        print(f"   {result['short_description']}")
+
+
+def _show(query: str, results: list[dict], full: bool = False) -> None:
     if not results:
         print(f"\nNo results for: {query!r}\n")
         return
@@ -241,20 +285,31 @@ def _show(query: str, results: list[dict]) -> None:
         name = file_link(result["file_path"], result["file_path"])
         name = f"\033[1m{name}\033[0m" if bold else name
         print(f"{position}. {name}")
-        print(f"   {result['description']}")
-        print(f"   score={result['score']:.3f}")
+        _description(result, full)
+        if _facts(result):
+            print(f"   {_facts(result)}")
+        if full:
+            if result["gps_lat"] is not None and result["gps_lon"] is not None:
+                print(f"   Location: {result['gps_lat']:.5f}, {result['gps_lon']:.5f}")
+            print(f"   Format: {result['mime_type'] or 'unknown'} \u00b7 Folder: {result['root_path']}")
         print()
 
 
-def main(query: str = "") -> None:
-    """Answer ``query`` and end; with no query, keep asking for queries until the user types ``exit``."""
+def _answer(query: str, session: tuple, full: bool) -> None:
+    _show(query, search(query, session), full)
+
+
+def main(query: str = "", full: bool = False) -> None:
+    """Answer ``query`` and end; with no query, keep asking for queries until the user types ``exit``.
+
+    ``full`` also shows every result's full description, location and folder."""
     make_output_safe()
     query = query.strip()
     session = start_session()
     if session is None:
         return
     if query:
-        _show(query, search(query, session))
+        _answer(query, session, full)
         return
     while True:
         try:
@@ -266,4 +321,4 @@ def main(query: str = "") -> None:
         if not query:
             print('Type what you are looking for, for example: red car at night')
             continue
-        _show(query, search(query, session))
+        _answer(query, session, full)

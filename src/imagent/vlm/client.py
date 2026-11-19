@@ -167,7 +167,6 @@ def restart_server(client: ollama.Client) -> bool:
 
 def _stop_started_server(process: subprocess.Popen) -> None:
     stop_server(process)
-    print("Stopped the Ollama server this run started.")
 
 
 def check_ready(conn, roles: tuple[str, ...]) -> tuple[ollama.Client, dict]:

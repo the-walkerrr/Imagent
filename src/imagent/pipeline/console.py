@@ -72,6 +72,6 @@ def run_cli(main: Callable[[], None], cancelled: str = "Cancelled.") -> None:
         sys.exit(f"{describe_db_error(exc)}")
     except Exception as exc:
         saved = _save_traceback()
-        where = f"Details were saved to {saved}." if saved else "The details could not be saved."
+        where = "Details were saved to last_error.log in Imagent's data folder." if saved else "The details could not be saved."
         sys.exit(f"Something unexpected went wrong ({type(exc).__name__}: {exc}). {where} "
                  "Running it again may work; if it keeps happening, please report it with that file.")

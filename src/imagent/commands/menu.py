@@ -23,6 +23,7 @@ from imagent.pipeline.console import make_output_safe
 UNINSTALL = "uninstall"
 
 SEARCH = ("Search your images", "search")
+ADD_FOLDER = ("Add a folder", "scan add")
 SCAN = ("Scan folders and index images", "scan")
 FAILED_COMMAND = "failed"
 
@@ -65,7 +66,7 @@ def needs_setup() -> bool:
 
 def choices(failed: int = 0) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
-    entries = [SEARCH, SCAN] + shown
+    entries = [SEARCH, ADD_FOLDER, SCAN] + shown
     return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
@@ -76,7 +77,15 @@ def main() -> None:
                                 pointer="»", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)
-    process = subprocess.Popen([sys.executable, "-m", "imagent", choice])
+    command = choice.split()
+    if choice == ADD_FOLDER[1]:  # the command needs the folder, so it is asked for here
+        folder = questionary.text("Folder to add:", qmark="?", style=STYLE).ask()
+        if folder is None:  # Ctrl+C
+            sys.exit(1)
+        if not folder.strip():
+            sys.exit("No folder entered.")
+        command.append(folder.strip())
+    process = subprocess.Popen([sys.executable, "-m", "imagent", *command])
     while True:
         try:
             sys.exit(process.wait())

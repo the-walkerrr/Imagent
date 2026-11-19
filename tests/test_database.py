@@ -5,11 +5,38 @@ from unittest import mock
 from imagent import config
 from imagent.db import connection
 from imagent.db.connection import SCHEMA_VERSION, DatabaseProblem, describe_db_error, init_db
+from imagent.db.operations import get_or_add_root, record_backlog_failure, upsert_backlog
+from imagent.pipeline.error_messages import MESSAGES, all_messages
 from tests.support import IsolatedHome
 
 
 def _tables(conn):
     return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')")}
+
+
+class ErrorMessagesTableTests(IsolatedHome):
+    """The error_messages table is a copy of pipeline/error_messages.py, so the database can be queried on its own."""
+
+    def table(self, conn):
+        return {row["error_id"]: row["message"] for row in conn.execute("SELECT error_id, message FROM error_messages")}
+
+    def test_it_holds_every_message_and_a_query_can_join_a_backlog_row_to_its_wording(self):
+        conn = self.connect()
+        self.assertEqual(self.table(conn), all_messages())
+        with conn:
+            upsert_backlog(conn, "/r/a.png", get_or_add_root(conn, "/r"), "t")
+            record_backlog_failure(conn, "/r/a.png", "damaged_picture", False)
+        message = conn.execute("SELECT message FROM backlog JOIN error_messages USING (error_id)").fetchone()[0]
+        self.assertEqual(message, MESSAGES["damaged_picture"])
+
+    def test_it_follows_the_python_file_each_time_the_database_is_opened(self):
+        conn = self.connect()
+        with conn:
+            conn.execute("UPDATE error_messages SET message = 'old wording' WHERE error_id = 'damaged_picture'")
+            conn.execute("INSERT INTO error_messages VALUES ('retired_id', 'gone')")
+            conn.execute("DELETE FROM error_messages WHERE error_id = 'unexpected'")
+        conn.close()
+        self.assertEqual(self.table(self.connect()), all_messages())
 
 
 class MigrationTests(IsolatedHome):

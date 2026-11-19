@@ -25,9 +25,12 @@ class ImageProblem(IndexingFailure):
     """An image that cannot be indexed because of the image itself."""
 
 
-def problem(kind: str, message: str, step: str = "opened the image", detail: str = "", **flags) -> ImageProblem:
-    """``message`` is what the user is told (the reason and what can be done); ``detail`` is the technical side, kept in the record."""
-    return ImageProblem(kind, message, [attempt_record(step, kind, detail or message)], **flags)
+def problem(kind: str, error_id: str, step: str = "opened the image", detail: str = "", params: dict | None = None,
+            **flags) -> ImageProblem:
+    """``error_id`` (with ``params``) is what the user is told (the reason and what can be done); ``detail`` is the technical side, kept in the record."""
+    failure = ImageProblem(kind, error_id, params=params, **flags)
+    failure.attempts = [attempt_record(step, kind, detail or str(failure))]
+    return failure
 
 
 def explain(exc: BaseException, path: str) -> ImageProblem | None:
@@ -37,15 +40,13 @@ def explain(exc: BaseException, path: str) -> ImageProblem | None:
     or a dropped drive do, and are left to the caller, who tells them from a drive that has gone.
     """
     if isinstance(exc, MemoryError):
-        return problem(TOO_LARGE, "There was not enough memory to open the picture. Close other programs, then scan again.",
+        return problem(TOO_LARGE, "no_memory_to_open",
                        detail=f"{type(exc).__name__}: {exc}", park=False)
     if not (isinstance(exc, (UnidentifiedImageError, SyntaxError)) or (isinstance(exc, OSError) and exc.errno is None)):
         return None
     suffix = os.path.splitext(path)[1].lower()
     if isinstance(exc, UnidentifiedImageError) and suffix not in Image.registered_extensions():
-        return problem(UNSUPPORTED, f"Imagent cannot open {suffix} pictures on this computer. "
-                                    "Convert the picture to JPEG or PNG and keep the copy in the same folder.",
+        return problem(UNSUPPORTED, "unsupported_format", params={"suffix": suffix},
                        detail=f"no decoder is installed for {suffix} files", retry_when="on_request")
-    return problem(UNREADABLE, "The picture file is damaged or incomplete. Copy it again from the original, "
-                               "or open it in a photo app and save it as a new file.",
+    return problem(UNREADABLE, "damaged_picture",
                    detail=f"{type(exc).__name__}: {exc}", retry_when="file_changed")

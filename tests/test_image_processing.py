@@ -377,7 +377,7 @@ class AnalyseImageOrderTests(unittest.TestCase):
 
     def test_when_the_text_cannot_be_read_the_model_is_never_asked(self):
         def fail(*args, **kwargs):
-            raise ImageProblem(OCR_FAILED, "no text for you")
+            raise ImageProblem(OCR_FAILED, "text_unreadable", params={"steps": "none"})
         result, calls = self.run_analysis(extract_text_blocks=fail)
         self.assertIsInstance(result, ImageProblem)
         self.assertNotIn("model", calls)
@@ -424,7 +424,7 @@ class LargeImageFreesTheModelsTests(unittest.TestCase):
         return seen
 
     def too_large(self):
-        return problem(TOO_LARGE, "The picture has 900 megapixels, more than the memory free right now allows.", park=False)
+        return problem(TOO_LARGE, "picture_too_large", params={"megapixels": "900"}, park=False)
 
     def test_every_loaded_model_is_unloaded_and_the_size_is_checked_again(self):
         seen = self.plan([self.too_large(), None])
@@ -461,7 +461,7 @@ class LargeImageFreesTheModelsTests(unittest.TestCase):
         self.assertEqual((seen["problem"].kind, seen["asked"]), (TOO_LARGE, 2))
 
     def test_another_problem_after_the_models_are_gone_stops_the_steps(self):
-        seen = self.plan([self.too_large(), problem(UNREADABLE, "damaged", retry_when="file_changed")])
+        seen = self.plan([self.too_large(), problem(UNREADABLE, "damaged_picture", retry_when="file_changed")])
         self.assertEqual((seen["problem"].kind, seen["asked"]), (UNREADABLE, 2))
 
     def test_an_image_that_fits_leaves_the_models_alone(self):
@@ -471,7 +471,7 @@ class LargeImageFreesTheModelsTests(unittest.TestCase):
         seen["sleep"].assert_not_called()
 
     def test_another_problem_with_the_image_does_not_unload_anything(self):
-        seen = self.plan([problem(UNREADABLE, "damaged", retry_when="file_changed")])
+        seen = self.plan([problem(UNREADABLE, "damaged_picture", retry_when="file_changed")])
         self.assertEqual((seen["problem"].kind, seen["unloaded"], seen["asked"]), (UNREADABLE, [], 1))
         seen["running"].assert_not_called()
 

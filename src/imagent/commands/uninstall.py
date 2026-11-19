@@ -223,8 +223,8 @@ def show_plan(stats: dict, plan: dict) -> None:
     if stats["analysis_ms"]:
         row("Time spent analysing", _fmt_duration(stats["analysis_ms"]), "(you would have to run it all again)")
     print("  " + "-" * 62)
-    row("Index database", _fmt_bytes(plan["db_size"]), str(config.DB_PATH))
-    row("Imagent data folder", _fmt_bytes(plan["data_size"]), str(plan["data_dir"] or "(none)"))
+    row("Index database", _fmt_bytes(plan["db_size"]))
+    row("Imagent data folder", _fmt_bytes(plan["data_size"]), "" if plan["data_dir"] else "(none)")
     row("Ollama models", _fmt_bytes(plan["models_size"]), "downloaded by Imagent" if plan["models"] else "(none to remove)")
     for name, size in plan["models"]:
         print(f"{'':<26}{name}  ({_fmt_bytes(size)})")
@@ -291,11 +291,11 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
             problems.append(f"Could not remove the Ollama model {name} ({exc}). Remove it with: ollama rm {name}")
     if plan["data_dir"]:
         if config.IMAGENT_HOME.name.lower() != "imagent":  # never delete a folder this program did not name itself
-            problems.append(f"Did not delete {config.IMAGENT_HOME}: it is not named like Imagent's own folder.")
+            problems.append("Did not delete the data folder: it is not named like Imagent's own folder.")
         elif _remove_tree(config.IMAGENT_HOME):
-            print(f"  ✓ Deleted the data folder {config.IMAGENT_HOME}")
+            print("  ✓ Deleted the data folder")
         else:
-            problems.append(f"Could not delete everything in {config.IMAGENT_HOME}. Delete the folder yourself.")
+            problems.append("Could not delete everything in the data folder. Delete the folder yourself.")
     return problems
 
 

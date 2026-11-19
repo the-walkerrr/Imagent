@@ -124,6 +124,5 @@ def extract_text_blocks(image_path: str) -> list[str]:
             if found is not None and not (found.kind == TOO_LARGE and name == "whole image"):  # too little memory for the whole image: try tiles
                 raise found from exc  # the image itself cannot be read; no other way of reading it helps
             attempts.append(attempt_record(name, OCR_FAILED, f"{type(exc).__name__}: {exc}"))
-    message = "The text in the image could not be read, in any of the ways tried: " + "; ".join(
-        f"{a['step']}: {a['detail']}" for a in attempts)
-    raise ImageProblem(OCR_FAILED, message, attempts, service=True)
+    steps = "; ".join(f"{a['step']}: {a['detail']}" for a in attempts)
+    raise ImageProblem(OCR_FAILED, "text_unreadable", attempts, params={"steps": steps}, service=True)

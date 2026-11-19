@@ -11,8 +11,8 @@ from PIL import Image
 
 from imagent import config
 from imagent.db.connection import init_db
-from imagent.image_processing.hashing import compute_hash
-from imagent.image_processing.metadata import iso_utc
+from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
+from imagent.image_processing.metadata import extract_file_metadata, iso_utc
 
 
 # What setup measured about a computer (db/operations.set_device_settings).
@@ -56,11 +56,16 @@ class IsolatedHome(unittest.TestCase):
 
 
 def add_indexed(conn, root_id: int, path: Path) -> None:
-    """Record ``path`` as indexed, the way a finished index run leaves it (no model involved)."""
+    """Record ``path`` as indexed, the way a finished index run leaves it (no model involved): its hashes and facts about the file."""
+    details = extract_file_metadata(str(path))
     with conn:
         conn.execute(
-            "INSERT INTO image_data(root_id, file_path, hash, vlm_metadata_json, modified_at) VALUES (?, ?, ?, ?, ?)",
-            (root_id, str(path), compute_hash(str(path)), "{}", iso_utc(os.stat(path).st_mtime)),
+            """INSERT INTO image_data(root_id, file_path, hash, pixel_hash, vlm_metadata_json, modified_at,
+                   width, height, file_size, taken_at, camera_make, camera_model, gps_lat, gps_lon)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (root_id, str(path), compute_hash(str(path)), compute_pixel_hash(str(path)), "{}", iso_utc(os.stat(path).st_mtime),
+             details["width"], details["height"], details["file_size"], details["taken_at"], details["camera_make"],
+             details["camera_model"], details["gps_lat"], details["gps_lon"]),
         )
 
 

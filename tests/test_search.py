@@ -86,6 +86,52 @@ class SearchTests(IsolatedHome):
             search.main("anything")
         ask.assert_not_called()
 
+    def _describe(self, name, **columns):
+        """Give the indexed image ``name`` the descriptions and facts that a finished index run stores."""
+        values = {"short_description": "a short line", "description": "the long description\n\nsecond paragraph",
+                  "vlm_metadata_json": '{"vlm": {"tags": ["dog", "beach"]}}', "width": 4032, "height": 3024, "file_size": 3_250_000,
+                  "mime_type": "image/png", "taken_at": "2026-09-06T07:24:12", "camera_make": "iQOO", "camera_model": "Neo9 Pro",
+                  "gps_lat": 12.97, "gps_lon": 77.59, **columns}
+        conn = self.connect()
+        with conn:
+            conn.execute(f"UPDATE image_data SET {', '.join(f'{key} = ?' for key in values)} WHERE file_path = ?",
+                         (*values.values(), str(self.paths[name])))
+
+    def _shown(self, full=False):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search._show("anything", search.search("anything"), full)
+        return out.getvalue()
+
+    def test_a_result_shows_its_summary_and_facts_but_not_the_long_description_tags_or_scores(self):
+        self._describe("closest")
+        shown = self._shown()
+        self.assertIn("a short line", shown)
+        self.assertIn("2026-09-06 07:24 \u00b7 iQOO Neo9 Pro \u00b7 4032\u00d73024 \u00b7 3.1 MB", shown)
+        self.assertNotIn("the long description", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("tags", shown)
+        self.assertNotIn("score", shown)
+
+    def test_full_shows_the_long_description_in_place_of_the_summary_with_location_and_folder(self):
+        self._describe("closest")
+        shown = self._shown(full=True)
+        self.assertEqual(shown.count("the long description"), 1)  # only "closest" was described above
+        self.assertIn("   second paragraph", shown)
+        self.assertNotIn("a short line", shown)
+        self.assertIn("Location: 12.97000, 77.59000", shown)
+        self.assertIn(f"Folder: {self.work}", shown)
+        self.assertNotIn("tags", shown)
+        self.assertNotIn("score", shown)
+
+    def test_what_an_image_does_not_have_is_left_out(self):
+        self._describe("closest", taken_at=None, camera_make=None, camera_model=None, width=None, height=None, file_size=None,
+                       gps_lat=None, gps_lon=None)
+        shown = self._shown(full=True)
+        self.assertIn("   modified ", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("None", shown)
+
     def _busy(self, others):
         return mock.patch.object(search, "other_models_running", return_value=others)
 

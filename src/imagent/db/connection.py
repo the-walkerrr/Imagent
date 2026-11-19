@@ -14,6 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from imagent import config
+from imagent.pipeline.error_messages import all_messages
 
 # schema.sql sits next to this file
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -58,23 +59,22 @@ class DatabaseProblem(RuntimeError):
     """The database cannot be used; the message says why and what to do, in plain words."""
 
 
-def describe_db_error(exc: Exception, path=None) -> str:
-    """Explain an ``sqlite3.Error`` to the user, with what they can do about it (``path``: the database, default the usual one)."""
+def describe_db_error(exc: Exception) -> str:
+    """Explain an ``sqlite3.Error`` to the user, with what they can do about it. It never says where the files are."""
     text = str(exc).lower()
-    path = path or config.DB_PATH
     if "locked" in text or "busy" in text:
         return "The Imagent database is busy because another Imagent program is writing to it. Wait a moment and try again."
     if "full" in text:
         return "The disk is full, so nothing more can be saved. Free up some space and run again; finished work is kept."
     if "readonly" in text or "read-only" in text:
-        return f"The Imagent database is read-only: {path}. Check the permissions of that file and its folder."
+        return "The Imagent database is read-only. Check the permissions of its file and its folder."
     if "unable to open" in text:
-        return f"Imagent cannot open its database at {path}. Check that the folder exists and that you can write to it."
+        return "Imagent cannot open its database. Check that its data folder exists and that you can write to it."
     if "disk i/o" in text:
         return "The disk reported an input/output error. If the data lives on an external or network drive, check it is connected."
     if "not a database" in text or "malformed" in text or "corrupt" in text:
-        return (f"The Imagent database is damaged: {path}. If you have a copy of it, restore the copy. "
-                f"Otherwise rename or delete that file, run {config.SETUP_COMMAND} again, and scan your folders again. "
+        return (f"The Imagent database is damaged. If you have a copy of it, restore the copy. "
+                f"Otherwise rename or delete the database file in Imagent's data folder, run {config.SETUP_COMMAND} again, and scan your folders again. "
                 "Your image files are not affected.")
     return f"The Imagent database reported an error ({type(exc).__name__}: {exc})."
 
@@ -132,6 +132,17 @@ def _upgrade(conn: sqlite3.Connection) -> None:
         conn.isolation_level = ""  # back to Python's default
 
 
+def _sync_error_messages(conn: sqlite3.Connection) -> None:
+    """Make the ``error_messages`` table the same as ``pipeline/error_messages.py``. It writes only when something differs,
+    so opening the database does not take the write lock when nothing has changed."""
+    wanted = all_messages()
+    if {row["error_id"]: row["message"] for row in conn.execute("SELECT error_id, message FROM error_messages")} == wanted:
+        return
+    with conn:
+        conn.execute("DELETE FROM error_messages")
+        conn.executemany("INSERT INTO error_messages (error_id, message) VALUES (?, ?)", wanted.items())
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     """Open (or create) the SQLite database and bring its schema up to date.
 
@@ -159,7 +170,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         if os.name == "posix":
             data_dir.chmod(0o700)  # the database holds file paths and GPS positions: this user only
     except OSError as exc:
-        raise DatabaseProblem(f"Imagent cannot use its data folder {data_dir} ({exc.strerror or exc}). "
+        raise DatabaseProblem(f"Imagent cannot use its data folder ({exc.strerror or exc}). "
                               "Check that you can write to it.") from exc
 
     conn = None
@@ -171,10 +182,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         _upgrade(conn)
+        _sync_error_messages(conn)
     except sqlite3.Error as exc:
         if conn is not None:
             conn.close()
-        raise DatabaseProblem(describe_db_error(exc, db_path)) from exc
+        raise DatabaseProblem(describe_db_error(exc)) from exc
     except BaseException:
         if conn is not None:
             conn.close()

@@ -133,14 +133,37 @@ class StoredImage(NamedTuple):
     file_id: int
     hash: str | None
     modified_at: str | None
+    pixel_hash: str | None = None
+    width: int | None = None
+    height: int | None = None
+    file_size: int | None = None
+
+
+_STORED_COLUMNS = "file_id, hash, modified_at, pixel_hash, width, height, file_size"
 
 
 def images_by_path(conn: sqlite3.Connection, root_id: int) -> dict[str, StoredImage]:
     """Every image stored under a root, by file path, for a scan to tell new, changed, moved and gone files apart.
 
     Built row by row from the cursor: no list of all the rows is held beside the result, and each image is one small tuple."""
-    return {row[0]: StoredImage(row[1], row[2], row[3]) for row in conn.execute(
-        "SELECT file_path, file_id, hash, modified_at FROM image_data WHERE root_id = ?", (root_id,))}
+    return {row[0]: StoredImage(*row[1:]) for row in conn.execute(
+        f"SELECT file_path, {_STORED_COLUMNS} FROM image_data WHERE root_id = ?", (root_id,))}
+
+
+def images_outside_root(conn: sqlite3.Connection, root_id: int) -> Iterator[tuple[int, str, StoredImage]]:
+    """Every image stored under the other folders, as ``(root_id, file_path, StoredImage)``, one row at a time: a scan looks
+    among them for the pictures that were moved into its folder."""
+    for row in conn.execute(f"SELECT root_id, file_path, {_STORED_COLUMNS} FROM image_data WHERE root_id != ?", (root_id,)):
+        yield row[0], row[1], StoredImage(*row[2:])
+
+
+_EXIF_FIELDS = ("taken_at", "camera_make", "camera_model", "gps_lat", "gps_lon")
+
+
+def get_exif_fields(conn: sqlite3.Connection, file_id: int) -> dict:
+    """The EXIF facts stored for an image (``taken_at``, ``camera_make``, ``camera_model``, ``gps_lat``, ``gps_lon``)."""
+    row = conn.execute(f"SELECT {', '.join(_EXIF_FIELDS)} FROM image_data WHERE file_id = ?", (file_id,)).fetchone()
+    return dict(row)
 
 
 def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
@@ -152,7 +175,7 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
     conn.execute(
         """
         INSERT INTO image_data (
-            root_id, file_path, hash,
+            root_id, file_path, hash, pixel_hash,
             short_description, description, vlm_metadata_json,
             width, height, file_size, mime_type,
             created_at, modified_at, indexed_at,
@@ -160,7 +183,7 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
             taken_at, camera_make, camera_model, gps_lat, gps_lon,
             vlm_digest, prompt_hash, schema_hash, search_text_version, ocr_version, ollama_version, app_version
         ) VALUES (
-            :root_id, :file_path, :hash,
+            :root_id, :file_path, :hash, :pixel_hash,
             :short_description, :description, :vlm_metadata_json,
             :width, :height, :file_size, :mime_type,
             :created_at, :modified_at, :indexed_at,
@@ -171,6 +194,7 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
         ON CONFLICT(file_path) DO UPDATE SET
             root_id             = excluded.root_id,
             hash                = excluded.hash,
+            pixel_hash          = excluded.pixel_hash,
             short_description   = excluded.short_description,
             description         = excluded.description,
             vlm_metadata_json   = excluded.vlm_metadata_json,
@@ -204,11 +228,25 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
     ).fetchone()["file_id"]
 
 
-def update_image_location(conn: sqlite3.Connection, file_id: int, file_path: str, modified_at: str) -> None:
-    """Point an already-indexed image at its new path (a move or rename of identical content)."""
+def update_image_location(conn: sqlite3.Connection, file_id: int, root_id: int, file_path: str, modified_at: str) -> None:
+    """Point an already-indexed image at its new path, under ``root_id`` (a move or rename of the same picture)."""
     conn.execute(
-        "UPDATE image_data SET file_path = ?, modified_at = ? WHERE file_id = ?",
-        (file_path, modified_at, file_id),
+        "UPDATE image_data SET root_id = ?, file_path = ?, modified_at = ? WHERE file_id = ?",
+        (root_id, file_path, modified_at, file_id),
+    )
+
+
+def refresh_image_file(conn: sqlite3.Connection, file_id: int, file_hash: str, details: dict) -> None:
+    """Bring what is stored about the file in line with the file, for a picture that did not change: its bytes hash, size,
+    timestamps and EXIF facts. ``details`` is what ``extract_file_metadata`` returns. Nothing about the analysis is touched."""
+    conn.execute(
+        """
+        UPDATE image_data SET hash = :hash, width = :width, height = :height, file_size = :file_size, mime_type = :mime_type,
+            created_at = :created_at, modified_at = :modified_at,
+            taken_at = :taken_at, camera_make = :camera_make, camera_model = :camera_model, gps_lat = :gps_lat, gps_lon = :gps_lon
+        WHERE file_id = :file_id
+        """,
+        {**details, "hash": file_hash, "file_id": file_id},
     )
 
 
@@ -218,6 +256,11 @@ def update_image_modified_at(conn: sqlite3.Connection, file_id: int, modified_at
         "UPDATE image_data SET modified_at = ? WHERE file_id = ?",
         (modified_at, file_id),
     )
+
+
+def count_images(conn: sqlite3.Connection) -> int:
+    """How many images are indexed, in every scanned folder."""
+    return conn.execute("SELECT COUNT(*) AS n FROM image_data").fetchone()["n"]
 
 
 def delete_images(conn: sqlite3.Connection, file_ids: list[int]) -> int:
@@ -234,6 +277,17 @@ def delete_images(conn: sqlite3.Connection, file_ids: list[int]) -> int:
 # backlog
 # ---------------------------------------------------------------------------
 
+def _dump_params(params: dict | None) -> str | None:
+    return json.dumps(params, sort_keys=True) if params else None
+
+
+def _with_error_params(row: sqlite3.Row) -> dict:
+    """``row`` as a dict whose ``error_params`` is the dict that was stored (empty when there were none)."""
+    item = dict(row)
+    item["error_params"] = json.loads(item["error_params"]) if item["error_params"] else {}
+    return item
+
+
 def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modified_at: str) -> None:
     """Queue a file for indexing. If the file changed since it was last queued, its failures are forgotten (a parked file is queued again)."""
     conn.execute(
@@ -246,7 +300,8 @@ def upsert_backlog(conn: sqlite3.Connection, file_path: str, root_id: int, modif
             status      = CASE WHEN backlog.modified_at != excluded.modified_at THEN 'queued' ELSE backlog.status END,
             park_kind   = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.park_kind END,
             retry_when  = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.retry_when END,
-            last_error  = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.last_error END,
+            error_id    = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.error_id END,
+            error_params = CASE WHEN backlog.modified_at != excluded.modified_at THEN NULL ELSE backlog.error_params END,
             modified_at = excluded.modified_at
         """,
         (file_path, root_id, modified_at, _now()),
@@ -263,14 +318,14 @@ def get_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
 
 
 def get_exhausted_backlog(conn: sqlite3.Connection, max_attempts: int) -> list[dict]:
-    """Return the backlog rows that could not be indexed, with their last error: parked, failed ``max_attempts`` times,
+    """Return the backlog rows that could not be indexed, with their last error (``error_id`` and its ``error_params`` as a dict): parked, failed ``max_attempts`` times,
     or left queued for the next run after every try for their kind of failure (``park_kind`` says which, see ``record_backlog_failure``)."""
     rows = conn.execute(
-        "SELECT file_path, last_error, park_kind FROM backlog "
+        "SELECT file_path, error_id, error_params, park_kind FROM backlog "
         "WHERE status = 'parked' OR attempts >= ? OR park_kind IS NOT NULL ORDER BY file_path",
         (max_attempts,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_with_error_params(row) for row in rows]
 
 
 def refund_backlog_attempts(conn: sqlite3.Connection, file_paths: list[str]) -> None:
@@ -281,17 +336,20 @@ def refund_backlog_attempts(conn: sqlite3.Connection, file_paths: list[str]) -> 
         conn.execute(f"UPDATE backlog SET attempts = MAX(attempts - 1, 0) WHERE file_path IN ({placeholders})", chunk)
 
 
-def park_backlog(conn: sqlite3.Connection, file_path: str, kind: str, message: str, retry_when: str,
-                 versions: dict | None = None) -> None:
+def park_backlog(conn: sqlite3.Connection, file_path: str, kind: str, error_id: str, retry_when: str,
+                 versions: dict | None = None, params: dict | None = None) -> None:
     """Set a file aside because every step for its kind of failure was tried.
+
+    ``error_id`` and ``params`` say why (see ``pipeline/error_messages.py``); only these are stored, not the wording.
 
     ``retry_when`` says what would make another try worthwhile ('model_changed': a different model or prompt, judged
     by ``versions``, the versions at the time; 'file_changed'; 'on_request'). The file is queued again when it changes
     (``upsert_backlog``), when its versions change (``requeue_changed_parked``) or on request (``requeue_parked``).
     """
     conn.execute(
-        "UPDATE backlog SET status = 'parked', park_kind = ?, last_error = ?, retry_when = ?, park_versions = ? WHERE file_path = ?",
-        (kind, message, retry_when, json.dumps(versions, sort_keys=True) if versions else None, file_path),
+        "UPDATE backlog SET status = 'parked', park_kind = ?, error_id = ?, error_params = ?, retry_when = ?, park_versions = ? "
+        "WHERE file_path = ?",
+        (kind, error_id, _dump_params(params), retry_when, json.dumps(versions, sort_keys=True) if versions else None, file_path),
     )
 
 
@@ -305,11 +363,11 @@ def requeue_changed_parked(conn: sqlite3.Connection, versions: dict) -> int:
 
 
 def list_parked(conn: sqlite3.Connection) -> list[dict]:
-    """Every parked file with the kind of failure and the message."""
+    """Every parked file with the kind of failure and the error (``error_id`` and its ``error_params`` as a dict)."""
     rows = conn.execute(
-        "SELECT file_path, park_kind, last_error, retry_when FROM backlog WHERE status = 'parked' ORDER BY park_kind, file_path"
+        "SELECT file_path, park_kind, error_id, error_params, retry_when FROM backlog WHERE status = 'parked' ORDER BY park_kind, file_path"
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_with_error_params(row) for row in rows]
 
 
 def requeue_parked(conn: sqlite3.Connection, kind: str | None = None, paths: list[str] | None = None) -> int:
@@ -319,7 +377,7 @@ def requeue_parked(conn: sqlite3.Connection, kind: str | None = None, paths: lis
         where += " AND park_kind = ?"
         params.append(kind)
     sql = ("UPDATE backlog SET status = 'queued', attempts = 0, park_kind = NULL, retry_when = NULL, "
-           "park_versions = NULL, last_error = NULL WHERE ")
+           "park_versions = NULL, error_id = NULL, error_params = NULL WHERE ")
     if paths is None:
         return conn.execute(sql + where, params).rowcount
     requeued = 0
@@ -368,15 +426,15 @@ def delete_backlog_paths(conn: sqlite3.Connection, file_paths: list[str]) -> Non
         conn.execute(f"DELETE FROM backlog WHERE file_path IN ({placeholders})", chunk)
 
 
-def record_backlog_failure(conn: sqlite3.Connection, file_path: str, message: str, count_attempt: bool,
-                           kind: str | None = None) -> None:
-    """Remember why indexing a file failed; ``count_attempt`` is False when the file is not to blame.
+def record_backlog_failure(conn: sqlite3.Connection, file_path: str, error_id: str, count_attempt: bool,
+                           kind: str | None = None, params: dict | None = None) -> None:
+    """Remember why indexing a file failed, as an ``error_id`` and the ``params`` for its message; ``count_attempt`` is False when the file is not to blame.
 
     ``kind`` is given when every try for the failure was made and the file stays queued for the next run all the same
     (the machine was to blame, not the file): it is what lets the user be told that the file could not be indexed."""
     conn.execute(
-        "UPDATE backlog SET attempts = attempts + ?, last_error = ?, park_kind = ? WHERE file_path = ?",
-        (1 if count_attempt else 0, message, kind, file_path),
+        "UPDATE backlog SET attempts = attempts + ?, error_id = ?, error_params = ?, park_kind = ? WHERE file_path = ?",
+        (1 if count_attempt else 0, error_id, _dump_params(params), kind, file_path),
     )
 
 
@@ -426,12 +484,15 @@ def iter_embedding_batches(conn: sqlite3.Connection, size: int) -> Iterator[list
 def get_image_summary(conn: sqlite3.Connection, file_id: int) -> dict | None:
     """Return display/reconstruction fields for a single image.
 
-    Used by search to present results (file_path, short_description).
+    Used by search to present results: its descriptions, the file's properties and EXIF facts, and the folder it was found under.
     """
     row = conn.execute(
         """
-        SELECT file_id, file_path, short_description, description, vlm_metadata_json
-        FROM image_data WHERE file_id = ?
+        SELECT i.file_id, i.file_path, i.short_description, i.description, i.vlm_metadata_json,
+               i.width, i.height, i.file_size, i.mime_type, i.taken_at, i.modified_at,
+               i.camera_make, i.camera_model, i.gps_lat, i.gps_lon, r.path AS root_path
+        FROM image_data i JOIN scan_roots r ON r.root_id = i.root_id
+        WHERE i.file_id = ?
         """,
         (file_id,),
     ).fetchone()

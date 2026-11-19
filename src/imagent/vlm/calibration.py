@@ -171,7 +171,7 @@ def _check_description(client: ollama.Client, model: str, edge: int) -> None:
         if exc.kind == INVALID_REPLY:
             raise NotPossible("did not answer in the form Imagent needs (a JSON description that fits its schema), even after "
                               "it was told what was wrong. A different model may.", model) from exc
-        raise ServiceTrouble(exc.kind, str(exc)) from exc
+        raise ServiceTrouble(exc.kind, exc.error_id, exc.params) from exc
 
 
 def _fit_context(client: ollama.Client, model: str, edge: int, use_mmap: bool, limit: int | None,

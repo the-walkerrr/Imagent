@@ -92,10 +92,10 @@ def check_image_size(path: str, share: float | None = None) -> None:
         megapixels = width * height / 1_000_000
         if available is None:
             detail = f"this computer does not say how much memory is free, and the picture is more than Pillow's own limit of {PIXEL_LIMIT_WHEN_MEMORY_UNKNOWN} pixels"
-            advice = "this computer does not say how much memory is free, so only a picture that is not very large can be read. Save a smaller copy of it from a photo app, then scan again."
+            error_id = "picture_too_large_memory_unknown"
         else:
             detail = (f"more than the memory free right now allows: it needs about {width * height * bytes_per_pixel // 10**6} MB "
                       f"and {int(available * share) // 10**6} MB can be used")
-            advice = "more than the memory free right now allows. Close other programs, then scan again."
-        raise problem(TOO_LARGE, f"The picture has {megapixels:.0f} megapixels, {advice}",
+            error_id = "picture_too_large"
+        raise problem(TOO_LARGE, error_id, params={"megapixels": f"{megapixels:.0f}"},
                       step="checked the size", detail=f"{megapixels:.0f} megapixels, {detail}", park=False)

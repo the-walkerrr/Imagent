@@ -75,7 +75,7 @@ class ConvertedCopyTests(unittest.TestCase):
 
 
 class AnalyseUnsupportedTests(unittest.TestCase):
-    unsupported = staticmethod(lambda: problem(UNSUPPORTED, "Imagent cannot open .heic pictures on this computer. Convert the picture to JPEG or PNG and keep the copy in the same folder."))
+    unsupported = staticmethod(lambda: problem(UNSUPPORTED, "unsupported_format", params={"suffix": ".heic"}))
 
     def analyse(self, converted):
         """analyse_image on a picture Pillow cannot open; ``converted`` is the copy's path, or an exception from making it."""
@@ -111,7 +111,7 @@ class AnalyseUnsupportedTests(unittest.TestCase):
 
     def test_other_problems_with_the_picture_are_not_converted(self):
         def analyse_file(*args):
-            raise problem("unreadable", "damaged")
+            raise problem("unreadable", "damaged_picture")
         with mock.patch.object(analyzer, "_analyse_file", analyse_file), mock.patch.object(analyzer, "converted_copy") as copy:
             with self.assertRaises(ImageProblem):
                 analyzer.analyse_image(object(), "vlm", "/a.png")

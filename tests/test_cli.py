@@ -54,24 +54,48 @@ class RunCliTests(IsolatedHome):
 
 class CommandLineTests(unittest.TestCase):
     def run_command(self, *argv, needs_setup=False):
-        with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
+        with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, mock.patch.object(scan, "add") as run_scan_add, \
                 mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu, \
                 mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall:
             cli.main(list(argv))
-        return {"search": run_search, "scan": run_scan, "failed": run_failed, "menu": run_menu, "setup": run_setup,
+        return {"search": run_search, "scan": run_scan, "scan add": run_scan_add, "failed": run_failed, "menu": run_menu, "setup": run_setup,
                 "uninstall": run_uninstall}
 
     def test_search_gets_the_words_typed_as_one_query(self):
         runs = self.run_command("search", "red", "car", "at", "night")
-        runs["search"].assert_called_once_with("red car at night")
+        runs["search"].assert_called_once_with("red car at night", full=False)
         self.assertEqual([name for name, run in runs.items() if run.called], ["search"])
 
-    def test_search_with_no_words_gets_an_empty_query(self):
-        self.run_command("search")["search"].assert_called_once_with("")
+    def test_search_full_is_passed_on(self):
+        self.run_command("search", "--full", "red", "car")["search"].assert_called_once_with("red car", full=True)
 
-    def test_scan_gets_the_folder_or_none(self):
-        self.run_command("scan", "/pictures")["scan"].assert_called_once_with("/pictures")
-        self.run_command("scan")["scan"].assert_called_once_with(None)
+    def test_search_full_can_come_after_the_query(self):
+        self.run_command("search", "bike in a cloudy weather", "--full")["search"].assert_called_once_with("bike in a cloudy weather", full=True)
+        self.run_command("search", "bike", "in", "cloudy", "--full")["search"].assert_called_once_with("bike in cloudy", full=True)
+
+    def test_search_with_no_words_gets_an_empty_query(self):
+        self.run_command("search")["search"].assert_called_once_with("", full=False)
+
+    def test_scan_takes_no_arguments(self):
+        runs = self.run_command("scan")
+        runs["scan"].assert_called_once_with()
+        self.assertEqual([name for name, run in runs.items() if run.called], ["scan"])
+
+    def test_scan_add_gets_the_folder(self):
+        runs = self.run_command("scan", "add", "/pictures")
+        runs["scan add"].assert_called_once_with("/pictures")
+        self.assertEqual([name for name, run in runs.items() if run.called], ["scan add"])
+
+    def test_scan_add_needs_a_folder(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stop:
+            self.run_command("scan", "add")
+        self.assertEqual(stop.exception.code, 2)
+
+    def test_scan_with_a_folder_is_gone(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
+            self.run_command("scan", "/pictures")
+        self.assertEqual(stop.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())
 
     def test_failed_takes_no_arguments(self):
         runs = self.run_command("failed")
@@ -87,6 +111,8 @@ class CommandLineTests(unittest.TestCase):
     def test_every_command_the_menu_offers_exists(self):
         for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.UNINSTALL):
             self.assertEqual(cli.build_parser().parse_args([command]).command, command)
+        added = cli.build_parser().parse_args([*menu.ADD_FOLDER[1].split(), "/pictures"])
+        self.assertEqual((added.command, added.scan_command, added.folder), ("scan", "add", "/pictures"))
 
     def test_no_command_opens_the_menu(self):
         runs = self.run_command()
@@ -155,6 +181,27 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
             self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
+
+    def _choose(self, choice, typed):
+        """Run the menu with ``choice`` picked and ``typed`` entered at the folder prompt; returns the arguments the command got."""
+        with mock.patch.object(menu.questionary, "select") as select, mock.patch.object(menu.questionary, "text") as text, \
+                mock.patch.object(menu, "failed_count", return_value=0), mock.patch.object(menu.subprocess, "Popen") as popen:
+            select.return_value.ask.return_value = choice
+            text.return_value.ask.return_value = typed
+            popen.return_value.wait.return_value = 0
+            with self.assertRaises(SystemExit):
+                menu.main()
+        return popen.call_args.args[0][3:] if popen.called else None
+
+    def test_adding_a_folder_asks_for_it_and_runs_scan_add(self):
+        self.assertEqual(self._choose(menu.ADD_FOLDER[1], "  /pictures "), ["scan", "add", "/pictures"])
+
+    def test_other_choices_run_without_asking_for_a_folder(self):
+        self.assertEqual(self._choose(menu.SCAN[1], None), ["scan"])
+
+    def test_no_folder_typed_runs_nothing(self):
+        for typed in (None, "   "):
+            self.assertIsNone(self._choose(menu.ADD_FOLDER[1], typed))
 
 
 if __name__ == "__main__":

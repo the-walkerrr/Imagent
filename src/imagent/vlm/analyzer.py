@@ -15,6 +15,7 @@ from imagent.image_processing.memory import check_image_size
 from imagent.image_processing.ocr import extract_text_blocks
 from imagent.image_processing.preprocess import preprocess_image
 from imagent.image_processing.problems import TOO_LARGE, UNSUPPORTED, ImageProblem, explain
+from imagent.pipeline.error_messages import describe
 from imagent.pipeline.failure import IndexingFailure, attempt_record
 
 # What went wrong; each has its own way of being put right.
@@ -42,16 +43,18 @@ class AnalysisFailed(IndexingFailure):
     ``kind`` is the last kind of trouble and ``attempts`` records every request made (see ``_request_analysis``).
     """
 
-    def __init__(self, kind: str, message: str, attempts: list[dict]):
-        super().__init__(kind, message, attempts, **_HANDLING[kind])
+    def __init__(self, kind: str, error_id: str, attempts: list[dict], params: dict | None = None):
+        super().__init__(kind, error_id, attempts, params=params, **_HANDLING[kind])
 
 
 class ServiceTrouble(Exception):
     """Reaching the model failed in a way the steps in ``send_request`` could not put right."""
 
-    def __init__(self, kind: str, message: str):
-        super().__init__(message)
+    def __init__(self, kind: str, error_id: str, params: dict | None = None):
+        super().__init__(describe(error_id, params))
         self.kind = kind
+        self.error_id = error_id
+        self.params = params or {}
 
 
 class Analysis(NamedTuple):
@@ -158,7 +161,7 @@ def send_request(client: ollama.Client, model: str, request: dict, note: Callabl
         except httpx.ReadTimeout as exc:
             note(TIMEOUT, f"no reply within {timeout:g} seconds")
             if raises >= config.OLLAMA_TIMEOUT_RAISES:
-                raise ServiceTrouble(TIMEOUT, "The model did not reply in time, even after waiting longer.") from exc
+                raise ServiceTrouble(TIMEOUT, "model_timeout") from exc
             raises += 1
             timeout *= config.OLLAMA_TIMEOUT_STEP
             client = make_client(timeout=timeout)
@@ -170,8 +173,7 @@ def send_request(client: ollama.Client, model: str, request: dict, note: Callabl
             kind = OUT_OF_MEMORY if out_of_memory else SERVER_CRASH
             note(kind, f"{type(exc).__name__}: {exc}")
             if recovered:
-                raise ServiceTrouble(kind, "Ollama ran out of memory, even after other models were unloaded." if out_of_memory
-                                     else "Ollama stopped responding, and starting it again did not help.") from exc
+                raise ServiceTrouble(kind, "model_out_of_memory" if out_of_memory else "model_stopped") from exc
             recovered = True
             if out_of_memory:
                 for name in other_models_running(client, [model]):
@@ -234,7 +236,7 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
             response, client = send_request(client, model, {"model": model, "messages": messages, "format": config.ANALYSIS_SCHEMA,
                                                      "options": options}, note, on_stage)
         except ServiceTrouble as trouble:
-            raise AnalysisFailed(trouble.kind, str(trouble), attempts) from trouble
+            raise AnalysisFailed(trouble.kind, trouble.error_id, attempts, trouble.params) from trouble
         content = response.message.content or ""
         reply, problems = check_reply(content, config.ANALYSIS_SCHEMA)
         prompt_tokens = getattr(response, "prompt_eval_count", None)
@@ -260,17 +262,14 @@ def _request_analysis(client: ollama.Client, model: str, image_bytes: bytes,
                 room = config.OLLAMA_NUM_CTX - (prompt_tokens or 0)  # the context window holds the prompt and the reply
                 larger = min(int(cap * config.ANALYSIS_CAP_STEP), room)
                 if raises >= config.ANALYSIS_CAP_RAISES or larger <= cap:
-                    raise AnalysisFailed(kind, "The model could not finish describing this picture, even after trying again with "
-                                               "different settings and with more room. Saving the picture again from a photo app, "
-                                               "as a new file, gives it a fresh try.", attempts)
+                    raise AnalysisFailed(kind, "reply_cut_off", attempts)
                 cap, changed_sampling, step = larger, False, "raised cap"
                 raises += 1
                 messages = first_messages
                 reason = f"the reply was cut off; asking again with room for {cap} tokens"
         else:
             if feedback_tries >= config.ANALYSIS_RETRIES:
-                raise AnalysisFailed(kind, "The model's answer was not in the expected form, even after it was told what was wrong. "
-                                           "Saving the picture again from a photo app, as a new file, gives it a fresh try.", attempts)
+                raise AnalysisFailed(kind, "reply_invalid", attempts)
             feedback_tries += 1
             retries += 1
             changed_sampling, step = True, "problems sent back"

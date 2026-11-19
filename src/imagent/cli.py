@@ -23,10 +23,16 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="find pictures by describing them", description="Show the pictures that best match a description.")
     search.add_argument("query", nargs="*", help="what to look for, for example: red car at night. "
                                                  "Leave it out to keep searching until you type exit")
+    search.add_argument("--full", action="store_true", help="also show each picture's full description, location and folder")
 
-    scan = commands.add_parser("scan", help="scan a folder and index its pictures",
-                               description="Scan a folder for new or changed pictures, then index them.")
-    scan.add_argument("folder", nargs="?", help="the folder to scan. Leave it out to choose one")
+    scan = commands.add_parser("scan", help="scan the folders you added and index their pictures",
+                               description="Scan every folder you added for new or changed pictures, then index them. "
+                                           "Add a folder with: scan add \"folder path\".")
+    scan_commands = scan.add_subparsers(dest="scan_command", metavar="command", title="commands")
+    scan_add = scan_commands.add_parser("add", help="add a folder, then scan and index it",
+                                        description="Add a folder to the folders that are scanned, scan it, then index its pictures. "
+                                                    "A folder added before is scanned again.")
+    scan_add.add_argument("folder", help="the folder to add")
 
     commands.add_parser("failed", help="list the pictures that could not be indexed",
                         description="List the pictures that could not be indexed, with the reason for each.")
@@ -42,10 +48,13 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "search":
         from imagent.commands import search
-        run_cli(lambda: search.main(" ".join(args.query)), cancelled="Search cancelled.")
+        run_cli(lambda: search.main(" ".join(args.query), full=args.full), cancelled="Search cancelled.")
     elif args.command == "scan":
         from imagent.commands import scan
-        run_cli(lambda: scan.main(args.folder))
+        if args.scan_command == "add":
+            run_cli(lambda: scan.add(args.folder))
+        else:
+            run_cli(scan.main)
     elif args.command == "failed":
         from imagent.commands import failed
         run_cli(failed.main)

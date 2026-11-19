@@ -29,8 +29,8 @@ class FailedImagesReportTests(IsolatedHome):
 
     def test_each_image_is_listed_with_its_reason_and_what_to_do_about_it(self):
         with self.conn:
-            park_backlog(self.conn, str(self.work / "a.png"), "unreadable", "The picture file is damaged or incomplete. Copy it again.", "file_changed")
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "Ollama stopped responding. Close other apps.", False, kind="server_crash")
+            park_backlog(self.conn, str(self.work / "a.png"), "unreadable", "damaged_picture", "file_changed")
+            record_backlog_failure(self.conn, str(self.work / "b.png"), "model_stopped", False, kind="server_crash", params={"tries": 3})
         count, text = self.report()
         self.assertEqual(count, 2)
         for expected in ("2 image(s) could not be indexed", "a.png", "damaged or incomplete", "b.png", "Close other apps"):
@@ -39,7 +39,7 @@ class FailedImagesReportTests(IsolatedHome):
 
     def test_an_image_leaves_the_list_when_it_is_indexed_later(self):
         with self.conn:
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "Ollama stopped responding.", False, kind="server_crash")
+            record_backlog_failure(self.conn, str(self.work / "b.png"), "model_stopped", False, kind="server_crash")
         self.assertEqual(self.report()[0], 1)
         with self.conn:
             self.conn.execute("DELETE FROM backlog WHERE file_path = ?", (str(self.work / "b.png"),))  # what a successful index does
@@ -48,7 +48,7 @@ class FailedImagesReportTests(IsolatedHome):
     def test_a_long_list_is_cut_short_at_the_end_of_a_run_but_complete_on_request(self):
         with self.conn:
             for name in ("a.png", "b.png", "c.png"):
-                record_backlog_failure(self.conn, str(self.work / name), "reason", False, kind="timeout")
+                record_backlog_failure(self.conn, str(self.work / name), "model_timeout", False, kind="timeout")
         self.assertIn("1 more", self.report(limit=2)[1])
         self.assertNotIn("more.", self.report(limit=None)[1])
 
@@ -63,7 +63,7 @@ class FailedImagesReportTests(IsolatedHome):
     def test_the_menu_counts_what_the_report_lists(self):
         self.assertEqual(menu.failed_count(), 0)
         with self.conn:
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "reason", False, kind="timeout")
+            record_backlog_failure(self.conn, str(self.work / "b.png"), "model_timeout", False, kind="timeout")
         self.assertEqual(menu.failed_count(), 1)
 
 

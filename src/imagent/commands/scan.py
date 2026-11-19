@@ -2,8 +2,9 @@
 """
 imagent/commands/scan.py — Imagent: scan folders for images, then index them.
 
-Scanning compares a folder with the index and queues the new or modified images (an image that moved or
-was renamed keeps its record, and one that disappeared is forgotten). Indexing then takes every file queued
+Scanning compares a folder with the index and queues the new images and those whose picture changed. A file
+whose EXIF facts changed keeps its analysis and only has them refreshed, an image that moved or was renamed keeps
+its record, and one that disappeared is forgotten. Indexing then takes every file queued
 in the ``backlog`` table, including any left over from an interrupted run, and runs each one through the
 full indexing pipeline:
 
@@ -37,6 +38,7 @@ from imagent import config
 from imagent.db.connection import describe_db_error, init_db
 from imagent.db.operations import (
     VERSION_COLUMNS,
+    StoredImage,
     add_failure_history,
     delete_backlog,
     delete_backlog_paths,
@@ -44,13 +46,16 @@ from imagent.db.operations import (
     get_backlog,
     get_backlog_paths_for_root,
     get_exhausted_backlog,
+    get_exif_fields,
     get_or_add_root,
     images_by_path,
+    images_outside_root,
     list_roots,
     lookup_by_path,
     mark_root_scanned,
     park_backlog,
     record_backlog_failure,
+    refresh_image_file,
     refund_backlog_attempts,
     requeue_changed_parked,
     update_image_location,
@@ -60,12 +65,14 @@ from imagent.db.operations import (
     upsert_text_embedding,
 )
 from imagent.image_processing import ocr
-from imagent.image_processing.hashing import compute_hash
+from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
+from imagent.image_processing.memory import check_image_size
 from imagent.image_processing.metadata import extract_file_metadata, iso_utc
-from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, ImageProblem, problem
+from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
 from imagent.os_specific.files import is_not_downloaded
 from imagent.pipeline.console import file_link, make_output_safe
 from imagent.pipeline.discovery import discover
+from imagent.pipeline.error_messages import describe
 from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.failure import IndexingFailure, RunStopped
 from imagent.pipeline.locking import AlreadyRunning, single_instance
@@ -179,8 +186,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     versions = settings.get("versions", {})
     on_stage("checking file")
     if is_not_downloaded(os.stat(path_str)):  # evicted to cloud storage since the scan: reading it would download it
-        raise problem(NOT_DOWNLOADED, "The picture is kept in cloud storage and is not on this computer, and Imagent does not use the internet. "
-                                      "Make it available offline (download it), then scan again.",
+        raise problem(NOT_DOWNLOADED, "not_downloaded",
                       step="checked the file", park=False)
 
     # ------------------------------------------------------------------
@@ -223,6 +229,8 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     embedding_bytes = serialize_embedding(embedding)
     elapsed_ms = int((time.perf_counter() - pipeline_start) * 1000)
 
+    pixel_hash = _pixel_hash_for_record(path_str, modified_at)
+
     vlm_metadata_json = build_vlm_metadata_json(analysis)
     short_description = str(analysis.reply[config.SUMMARY_FIELD]).strip()
 
@@ -233,6 +241,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
         "root_id": root_id,
         "file_path": path_str,
         "hash": file_hash,
+        "pixel_hash": pixel_hash,
         "short_description": short_description,
         "description": build_description(analysis.reply, config.SUMMARY_FIELD),
         "vlm_metadata_json": vlm_metadata_json,
@@ -253,6 +262,26 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # ↑ Commit point — image is now considered fully indexed in the database.
 
     return ("updated" if is_update else "indexed"), short_description
+
+
+def _pixel_hash_for_record(path: str, modified_at: str) -> str | None:
+    """The pixel hash to store with an image that was just analysed (see ``compute_pixel_hash``), or None for a picture Pillow
+    cannot read, which was analysed through a converted copy: a scan then counts every change of such a file as an edit.
+
+    Raises ``ImageProblem`` (``BUSY``, nothing held against the file) when the file changed since indexing began: its analysis
+    would then belong to other pixels than the ones hashed here, and the next scan would not see that."""
+    try:
+        pixel_hash = compute_pixel_hash(path)
+    except Exception as exc:
+        found = explain(exc, path)
+        if found is None:
+            raise
+        if found.kind != UNSUPPORTED:
+            raise found from exc
+        pixel_hash = None
+    if iso_utc(os.stat(path).st_mtime) != modified_at:
+        raise problem(BUSY, "changed_since_scan", step="checked the file did not change while it was analysed", park=False, report=False)
+    return pixel_hash
 
 
 def _index_with_tries(conn, client: ollama.Client, settings: dict, root_id: int, image_path: Path,
@@ -391,13 +420,14 @@ def _offer_lower_settings(conn, client: ollama.Client, settings: dict, failures:
                 with conn:
                     add_failure_history(conn, row["file_path"], exc.attempts)
                     if exc.park:
-                        park_backlog(conn, row["file_path"], exc.kind, str(exc), exc.retry_when, parked_versions)
+                        park_backlog(conn, row["file_path"], exc.kind, exc.error_id, exc.retry_when, parked_versions, exc.params)
                     else:
-                        record_backlog_failure(conn, row["file_path"], str(exc), count_attempt=False, kind=exc.kind if exc.report else None)
+                        record_backlog_failure(conn, row["file_path"], exc.error_id, count_attempt=False, kind=exc.kind if exc.report else None,
+                                               params=exc.params)
                 progress.done("FAILED", str(exc))
                 continue
             except sqlite3.Error as exc:
-                progress.done("FAILED", describe_db_error(exc, str(config.DB_PATH)))
+                progress.done("FAILED", describe_db_error(exc))
                 break
             except Exception as exc:
                 progress.done("FAILED", f"{type(exc).__name__}: {exc}")
@@ -422,18 +452,18 @@ def _offer_lower_settings(conn, client: ollama.Client, settings: dict, failures:
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
-def run() -> None:
-    """Index the backlog; only one indexing run can be active at a time (a second one says so and stops)."""
+def run(root_ids: set[int] | None = None) -> None:
+    """Index the backlog (only the files of the folders ``root_ids`` when given); only one indexing run can be active at a time (a second one says so and stops)."""
     make_output_safe()
     try:
         with single_instance("indexing", "Indexing"):
-            _index_backlog()
+            _index_backlog(root_ids)
     except AlreadyRunning as exc:
         sys.exit(f"{exc}")
 
 
-def _index_backlog() -> None:
-    """Initialise the database, pull pending files from the backlog, and index them.
+def _index_backlog(root_ids: set[int] | None = None) -> None:
+    """Initialise the database, pull pending files from the backlog (only those of the folders ``root_ids`` when given), and index them.
 
     Progress is printed for each image.  Failures are logged to ``error_logs``
     and their backlog row is kept (with the reason) so the file is retried on the
@@ -444,8 +474,6 @@ def _index_backlog() -> None:
     """
     db_path = str(config.DB_PATH)
     conn = init_db(db_path)
-
-    print(f"\nDatabase : {db_path}")
 
     try:
         client, settings = check_ready(conn, ("vlm", "embedding"))
@@ -462,6 +490,8 @@ def _index_backlog() -> None:
             print(f"{queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
 
     backlog_rows = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+    if root_ids is not None:
+        backlog_rows = [row for row in backlog_rows if row["root_id"] in root_ids]
     total = len(backlog_rows)
     print(f"Backlog  : {total} file(s) pending\n")
 
@@ -515,25 +545,24 @@ def _index_backlog() -> None:
                     raise  # the database is the problem, not this image: handled below
                 except IndexingFailure as exc:
                     if exc.kind == UNREADABLE and _changed_since_scan(image_path, row["modified_at"]):
-                        exc = ImageProblem(BUSY, "The file changed after it was scanned, so it may still be being written. It is tried again later.",
-                                           exc.attempts, park=False, report=False)
+                        exc = ImageProblem(BUSY, "changed_since_scan", exc.attempts, park=False, report=False)
                     # Every step for this kind of trouble was tried, so trying again would only repeat them. The file is set
                     # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
                     # fault is not the file's, left queued with its attempts untouched.
                     counts["failed"] += 1
-                    message = str(exc)
+                    params = dict(exc.params)
                     if exc.service:  # the machine's trouble: it was tried several times, and the user is told what to do about it
-                        message += (f" Imagent tried {config.SERVICE_TRIES} times without success. "
-                                    "Close other apps that use a lot of memory, then scan again.")
+                        params["tries"] = config.SERVICE_TRIES
+                    message = describe(exc.error_id, params)
                     log_error(conn, stage="pipeline", exc=exc, file_path=str(image_path),
                               metadata={"root_id": row["root_id"], "kind": exc.kind})
                     with conn:
                         add_failure_history(conn, row["file_path"], exc.attempts)
                         if exc.park:
-                            park_backlog(conn, row["file_path"], exc.kind, message, exc.retry_when, parked_versions)
+                            park_backlog(conn, row["file_path"], exc.kind, exc.error_id, exc.retry_when, parked_versions, params)
                         else:
-                            record_backlog_failure(conn, row["file_path"], message, count_attempt=False,
-                                                   kind=exc.kind if exc.report else None)
+                            record_backlog_failure(conn, row["file_path"], exc.error_id, count_attempt=False,
+                                                   kind=exc.kind if exc.report else None, params=params)
                     progress.done("FAILED", message)
                     io_failures.clear()
                     if exc.service:
@@ -568,7 +597,8 @@ def _index_backlog() -> None:
                         metadata={"root_id": row["root_id"]},
                     )
                     with conn:
-                        record_backlog_failure(conn, row["file_path"], f"{type(exc).__name__}: {exc}", counts_as_attempt)
+                        record_backlog_failure(conn, row["file_path"], "unexpected", counts_as_attempt,
+                                               params={"type": type(exc).__name__, "text": str(exc)})
                     progress.done("FAILED", f"{type(exc).__name__}: {exc}")
                     if ollama_problem:
                         in_a_row += 1
@@ -599,7 +629,7 @@ def _index_backlog() -> None:
                     break
             except sqlite3.Error as exc:
                 counts["failed"] += 1
-                message = describe_db_error(exc, db_path)
+                message = describe_db_error(exc)
                 progress.done("FAILED", message)
                 stopped = f"Indexing stopped. {message} Finished images are saved and the rest stays queued."
                 can_offer = False
@@ -661,9 +691,16 @@ def print_failed(conn, limit: int | None = 10) -> int:
         return 0
     print(f"\n{len(failed)} image(s) could not be indexed:")
     width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
-    for item in failed[:limit]:
-        print(f"\n  {file_link(item['file_path'], item['file_path'])}")
-        print(textwrap.fill(item["last_error"] or "No reason was recorded.", width, initial_indent="    ", subsequent_indent="    "))
+    by_folder = defaultdict(list)
+    for item in sorted(failed, key=lambda item: (os.path.dirname(item["file_path"]), os.path.basename(item["file_path"])))[:limit]:
+        by_folder[os.path.dirname(item["file_path"])].append(item)
+    bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+    for folder, items in by_folder.items():
+        heading = f"\033[1m{folder}\033[0m" if bold else folder
+        print(f"\n  {heading}")
+        for item in items:
+            print(f"    {file_link(os.path.basename(item['file_path']), item['file_path'])}")
+            print(textwrap.fill(describe(item["error_id"], item["error_params"]) or "No reason was recorded.", width, initial_indent="      ", subsequent_indent="      "))
     if limit is not None and len(failed) > limit:
         print(f"\n  … and {len(failed) - limit} more. Choose \"Show the images that could not be indexed\" in the menu to see them all.")
     return len(failed)
@@ -692,12 +729,168 @@ def _warn_about(items: list, problem: str, consequence: str, shown: int = 3) -> 
         print(f"  … and {len(items) - shown} more")
 
 
-def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
-    """Reconcile the index with the files under ``root``; files of other roots are never touched.
+def _pixel_hash_or_none(path: str) -> str | None:
+    """The pixel hash of the picture at ``path`` (see ``compute_pixel_hash``), or None when it cannot be told: the picture is too
+    large for the memory free, damaged, or in a format Pillow does not read. A scan never guesses from None: a file whose pixel
+    hash is unknown counts as edited, and one that cannot be compared is not taken for a moved file."""
+    try:
+        check_image_size(path)
+        return compute_pixel_hash(path)
+    except Exception:
+        return None
 
-    A file is: new (queued), modified (queued; the old record stays until the new one is
-    ready), moved or renamed (its record follows it, no re-analysis), touched only (timestamp
-    updated) or gone (its record is deleted). Three things protect the index from a scan that
+
+def _picture_size(path: str) -> tuple[int, int] | None:
+    """The sides of the picture, the shorter first (a picture turned by its orientation keeps them), read from the file's header."""
+    try:
+        with Image.open(path) as image:
+            return tuple(sorted(image.size))
+    except Exception:
+        return None
+
+
+def _is_missing(path: str) -> bool:
+    """True if nothing is at ``path``. A path that cannot be looked at (a folder without permission) is not missing, only unknown."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _pair_moves(new_by_key: dict[str, list[str]], gone_by_key: dict[str, list[str]], gone: dict[str, StoredImage],
+                on_disk: dict[str, str]) -> dict[str, str]:
+    """Pair each new path with the path it was moved from: ``new_by_key`` and ``gone_by_key`` list the new and the vanished paths
+    by the hash of what they hold, and each new path is paired with a vanished one of the same hash (``{new path: old path}``).
+
+    Of identical copies, the pair that looks most like a move is made first: the same modified time and name, then the same time
+    (a move keeps it), then the same name, then any. So when two copies of a picture exist and one was renamed, the one that was
+    renamed is the one the report says moved."""
+    ways = (lambda path, modified: (modified, os.path.basename(path)), lambda path, modified: modified,
+            lambda path, modified: os.path.basename(path), lambda path, modified: None)
+    pairs: dict[str, str] = {}
+    for key, new_paths in new_by_key.items():
+        old_paths, new_paths = list(gone_by_key.get(key, ())), list(new_paths)
+        for way in ways:
+            if not old_paths or not new_paths:
+                break
+            candidates = defaultdict(deque)
+            for old in old_paths:
+                candidates[way(old, gone[old].modified_at)].append(old)
+            unpaired = []
+            for new in new_paths:
+                if candidates.get(way(new, on_disk[new])):
+                    pairs[new] = candidates[way(new, on_disk[new])].popleft()
+                else:
+                    unpaired.append(new)
+            used = set(pairs.values())
+            old_paths = [old for old in old_paths if old not in used]
+            new_paths = unpaired
+    return pairs
+
+
+def _find_moves(conn, new_paths: list[str], gone: dict[str, StoredImage], on_disk: dict[str, str], sizes: dict[str, int],
+                file_hashes: dict[str, str | None], counts: dict[str, int]) -> dict[str, str]:
+    """Which of ``new_paths`` are pictures of ``gone`` (indexed, but no longer at their path) at another path: ``{new path: old path}``.
+
+    First by the bytes of the file (the hash of the whole file), then, for what is left, by the picture (the pixel hash), which also
+    finds a file whose EXIF or other embedded data was edited as it was moved. A file is only read when something that could be its
+    old self exists: by its size for the first, by the sides of the picture for the second, so a folder of new pictures is not read.
+    ``file_hashes`` keeps the hash of each new file read (None when it could not be), for the caller to use."""
+    if not gone or not new_paths:
+        return {}
+
+    def hash_of(path: str) -> str | None:
+        if path not in file_hashes:
+            try:
+                file_hashes[path] = compute_hash(path)
+            except OSError as exc:
+                counts["unreadable"] += 1
+                log_error(conn, stage="scan", exc=exc, file_path=path)
+                file_hashes[path] = None
+        return file_hashes[path]
+
+    gone_by_hash: dict[str, list[str]] = defaultdict(list)
+    for path, image in gone.items():
+        gone_by_hash[image.hash].append(path)
+    sizes_gone = {image.file_size for image in gone.values()}
+    new_by_hash: dict[str, list[str]] = defaultdict(list)
+    for path in new_paths:
+        if None in sizes_gone or sizes[path] in sizes_gone:
+            digest = hash_of(path)
+            if digest is not None:
+                new_by_hash[digest].append(path)
+    moved = _pair_moves(new_by_hash, gone_by_hash, gone, on_disk)
+
+    taken = set(moved.values())
+    left_gone = {path: image for path, image in gone.items() if path not in taken and image.pixel_hash}
+    left_new = [path for path in new_paths if path not in moved and file_hashes.get(path, "") is not None]
+    if left_gone and left_new:
+        gone_by_pixels: dict[str, list[str]] = defaultdict(list)
+        for path, image in left_gone.items():
+            gone_by_pixels[image.pixel_hash].append(path)
+        sides_gone = {tuple(sorted((image.width, image.height))) if image.width and image.height else None
+                      for image in left_gone.values()}
+        new_by_pixels: dict[str, list[str]] = defaultdict(list)
+        for path in left_new:
+            if None not in sides_gone and _picture_size(path) not in sides_gone:
+                continue
+            pixel_hash = _pixel_hash_or_none(path)
+            if pixel_hash is not None and hash_of(path) is not None:
+                new_by_pixels[pixel_hash].append(path)
+        moved.update(_pair_moves(new_by_pixels, gone_by_pixels, left_gone, on_disk))
+    return moved
+
+
+def _gone_from_other_folders(conn, root_id: int) -> dict[str, StoredImage]:
+    """The indexed images of the other scanned folders whose file is not there any more, while their folder is: pictures that may
+    have been moved into the folder being scanned. A folder that cannot be read now (a drive that is not connected) gives none:
+    its images are unknown, not gone."""
+    folders = {root["root_id"]: Path(root["path"]).is_dir() for root in list_roots(conn)}
+    return {path: image for other, path, image in images_outside_root(conn, root_id)
+            if folders.get(other) and _is_missing(path)}
+
+
+def _apply_moves(conn, moved: dict[str, str], gone: dict[str, StoredImage], root_id: int, on_disk: dict[str, str],
+                 file_hashes: dict[str, str | None], counts: dict[str, int]) -> None:
+    """Point the record of each moved picture at its new path (and folder). When the file's bytes differ from before (the same
+    picture with other embedded data) the facts stored about the file are refreshed too; the analysis is left as it is."""
+    for new_path, old_path in moved.items():
+        image = gone[old_path]
+        details = None
+        if file_hashes.get(new_path) != image.hash:
+            try:
+                details = {**extract_file_metadata(new_path), "modified_at": on_disk[new_path]}
+            except OSError as exc:
+                counts["unreadable"] += 1
+                log_error(conn, stage="scan", exc=exc, file_path=new_path)
+        with conn:
+            update_image_location(conn, image.file_id, root_id, new_path, on_disk[new_path])
+            if details is not None:
+                refresh_image_file(conn, image.file_id, file_hashes[new_path], details)
+
+
+def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
+    """Reconcile the index with the files under ``root``; the other folders' images are never deleted.
+
+    Every file is in exactly one of these states (the counts of the result). A file whose path is in the index is:
+      * up to date (``up_to_date``): nothing about its picture or its EXIF facts changed, even if its timestamp or other data in
+        the file did (what is stored about the file is brought up to date);
+      * details updated (``details_updated``): the picture is the same but its EXIF facts changed; they are refreshed in the
+        index, nothing is analysed or embedded again (the embedded text holds no EXIF);
+      * changed (``queued_modified``): its picture is not the one that was analysed, the pixels after the EXIF orientation
+        (queued; the old record stays until the new one is ready).
+    A file whose path is not in the index is:
+      * moved (``moved``): a picture indexed under another path, in another folder (a subfolder of this one, or another scanned
+        folder), that is gone from there. Its record follows it and nothing is analysed again. Found by the file's bytes, then by
+        its pixels;
+      * renamed (``renamed``): the same, but the old path is in the same folder as the new one (only the name changed). The
+        report shows it with the details updated;
+      * new (``queued_new``): anything else (queued).
+    An indexed file that is gone from its path and was not moved is removed (``deleted``).
+    Three things protect the index from a scan that
     cannot see what is really there:
       * what lies in a subfolder that could not be read is neither deleted nor treated as moved;
       * if the folder shows no images at all while some are indexed (a drive that is not
@@ -713,8 +906,10 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         "scanned": 0,
         "queued_new": 0,
         "queued_modified": 0,
+        "details_updated": 0,
         "moved": 0,
-        "unchanged": 0,
+        "renamed": 0,
+        "up_to_date": 0,
         "deleted": 0,
         "delete_blocked": 0,
         "unreadable": 0,
@@ -740,6 +935,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         _warn_about(found.bad_names, "file(s) have a name that is not valid text", "rename them to have them indexed:")
         unseen = [str(folder) for folder in found.unreadable_dirs]
         on_disk: dict[str, str] = {}
+        sizes: dict[str, int] = {}  # path -> size in bytes, for telling which new files could be an indexed one that moved
         not_downloaded: list[Path] = []  # in cloud storage, not on this computer: neither read (it would be downloaded) nor forgotten
         for file_path in found.images:
             try:
@@ -755,6 +951,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
                 counts["empty"] += 1
                 continue
             on_disk[str(file_path)] = iso_utc(status.st_mtime)
+            sizes[str(file_path)] = status.st_size
         counts["scanned"] = len(on_disk)
         counts["not_downloaded"] = len(not_downloaded)
         _warn_about(not_downloaded, "image(s) are in cloud storage and not downloaded to this computer",
@@ -766,51 +963,60 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         vanished = [path for path in stored if path not in on_disk and path not in away and not _inside(path, unseen)]
         new_paths = [path for path in on_disk if path not in stored]
 
-        # A new path whose content equals that of a vanished one is the same image moved or renamed.
-        # New files are only hashed when something vanished, so a first scan reads no file twice.
-        moved: dict[str, str] = {}  # new path -> old path
-        if vanished and new_paths:
-            vanished_by_hash = defaultdict(list)
-            for path in vanished:
-                vanished_by_hash[stored[path].hash].append(path)
-            for path in new_paths:
-                try:
-                    candidates = vanished_by_hash.get(compute_hash(path))
-                except OSError as exc:
-                    counts["unreadable"] += 1
-                    log_error(conn, stage="scan", exc=exc, file_path=path)
-                    continue
-                if candidates:
-                    moved[path] = candidates.pop(0)
-        with conn:
-            for new_path, old_path in moved.items():
-                update_image_location(conn, stored[old_path].file_id, new_path, on_disk[new_path])
-        counts["moved"] = len(moved)
+        # A new path holding a picture that is gone from its own path is that picture, moved or renamed: from this folder, or
+        # from another scanned one. Files are only read when something that could be their old self is gone (see _find_moves).
+        file_hashes: dict[str, str | None] = {}
+        gone_here = {path: stored[path] for path in vanished}
+        moved = _find_moves(conn, new_paths, gone_here, on_disk, sizes, file_hashes, counts)
+        _apply_moves(conn, moved, gone_here, root_id, on_disk, file_hashes, counts)
+        left = [path for path in new_paths if path not in moved]
+        gone_elsewhere = _gone_from_other_folders(conn, root_id) if left else {}
+        moved_in = _find_moves(conn, left, gone_elsewhere, on_disk, sizes, file_hashes, counts)
+        _apply_moves(conn, moved_in, gone_elsewhere, root_id, on_disk, file_hashes, counts)
+        for new_path, old_path in {**moved, **moved_in}.items():  # same folder, other name: renamed; another folder: moved
+            counts["renamed" if os.path.dirname(new_path) == os.path.dirname(old_path) else "moved"] += 1
 
-        # Files present before and now: unchanged, touched only, or modified.
+        # Files present before and now: up to date, or changed in some way. Only a file whose timestamp changed is looked at.
         for path, modified_at in on_disk.items():
             row = stored.get(path)
             if row is None:
                 continue
             if row.modified_at == modified_at:
-                counts["unchanged"] += 1
+                counts["up_to_date"] += 1
                 continue
             try:
-                content_changed = compute_hash(path) != row.hash
+                file_hash = compute_hash(path)
+            except OSError as exc:
+                counts["unreadable"] += 1
+                log_error(conn, stage="scan", exc=exc, file_path=path)
+                continue
+            if file_hash == row.hash:  # a touch or a sync changed the timestamp, not the file
+                with conn:
+                    update_image_modified_at(conn, row.file_id, modified_at)
+                counts["up_to_date"] += 1
+                continue
+            pixel_hash = _pixel_hash_or_none(path)
+            if pixel_hash is None or pixel_hash != row.pixel_hash:  # not the picture that was analysed (or not known to be)
+                with conn:
+                    upsert_backlog(conn, path, root_id, modified_at)
+                counts["queued_modified"] += 1
+                continue
+            try:  # the same picture in other bytes: the EXIF facts may differ, nothing else needs to be done about it
+                details = {**extract_file_metadata(path), "modified_at": modified_at}
             except OSError as exc:
                 counts["unreadable"] += 1
                 log_error(conn, stage="scan", exc=exc, file_path=path)
                 continue
             with conn:
-                if content_changed:
-                    upsert_backlog(conn, path, root_id, modified_at)
-                else:  # a touch or a sync changed the timestamp, not the picture
-                    update_image_modified_at(conn, row.file_id, modified_at)
-            counts["queued_modified" if content_changed else "unchanged"] += 1
+                stored_exif = get_exif_fields(conn, row.file_id)
+                exif_changed = any(value != details[field] for field, value in stored_exif.items())
+                refresh_image_file(conn, row.file_id, file_hash, details)
+            counts["details_updated" if exif_changed else "up_to_date"] += 1
 
+        moved_paths = set(moved) | set(moved_in)
         with conn:
             for path in new_paths:
-                if path not in moved:
+                if path not in moved_paths:
                     upsert_backlog(conn, path, root_id, on_disk[path])
                     counts["queued_new"] += 1
 
@@ -837,75 +1043,6 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         conn.close()
 
 
-def _prompt_folder() -> str | None:
-    """Prompt for the folder to scan, offering all folders and previously scanned folders as selectable options.
-
-    Returns the raw (unvalidated) path string entered by the user, or None if "All folders" was chosen.
-    """
-    conn = init_db(str(config.DB_PATH))
-    try:
-        saved: list[str] = [root["path"] for root in list_roots(conn)]
-    finally:
-        conn.close()
-
-    if not saved:
-        if questionary is not None and sys.stdin.isatty():
-            ans = questionary.text("Enter the folder path to scan:", style=STYLE).ask()
-            if ans is None:
-                sys.exit("\nScan cancelled.")
-            return ans.strip()
-        return input("Enter the folder path to scan: ").strip()
-
-    if questionary is not None and sys.stdin.isatty():
-        choices = [
-            questionary.Choice("All folders", value="__all__"),
-            questionary.Choice("Enter folder path...", value="__input__"),
-        ]
-        for i, folder in enumerate(saved):
-            title = f"{folder} (last used)" if i == 0 else folder
-            choices.append(questionary.Choice(title, value=folder))
-
-        selected = questionary.select(
-            "Select a folder to scan:",
-            choices=choices,
-            style=STYLE,
-        ).ask()
-
-        if selected is None:
-            sys.exit("\nScan cancelled.")
-
-        if selected == "__all__":
-            return None
-
-        if selected == "__input__":
-            raw = questionary.text("Enter the folder path to scan:", style=STYLE).ask()
-            if raw is None:
-                sys.exit("\nScan cancelled.")
-            return raw.strip()
-
-        return selected
-
-    # Fallback for non-interactive / non-TTY environments
-    print("\nSelect a folder to scan:")
-    print("  1. All folders")
-    print("  2. Enter folder path...")
-    for i, folder in enumerate(saved, 3):
-        tag = " (last used)" if i == 3 else ""
-        print(f"  {i}. {folder}{tag}")
-    print()
-
-    raw = input("Enter choice or folder path: ").strip()
-    if raw == "1":
-        return None
-    if raw == "2":
-        return input("Enter the folder path to scan: ").strip()
-    if raw.isdigit():
-        idx = int(raw) - 3
-        if 0 <= idx < len(saved):
-            return saved[idx]
-    return raw
-
-
 def _ask_yes_no(question: str) -> bool:
     try:
         return input(question).strip().lower() in ("y", "yes")
@@ -913,41 +1050,8 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
-def _ask_scope(root: Path, scanned_before: int) -> str:
-    """Ask whether to scan only the new folder ``root`` or all folders. Returns "one", "all" or "back"."""
-    one = f"Only this folder ({root})"
-    everything = f"All folders (this one and the {scanned_before} scanned before)"
-
-    if questionary is not None and sys.stdin.isatty():
-        choice = questionary.select(
-            "How do you want to scan?",
-            choices=[
-                questionary.Choice(one, value="one"),
-                questionary.Choice(everything, value="all"),
-                questionary.Choice("Back", value="back"),
-            ],
-            style=STYLE,
-        ).ask()
-        if choice is None:
-            sys.exit("\nScan cancelled.")
-        return choice
-
-    # Fallback for non-interactive / non-TTY environments
-    print("\nHow do you want to scan?")
-    print(f"  1. {one}")
-    print(f"  2. {everything}")
-    print("  3. Back\n")
-    while True:
-        try:
-            answer = input("Enter choice: ").strip()
-        except EOFError:  # no terminal attached: the safe answer is to cancel
-            sys.exit("\nScan cancelled.")
-        if answer in ("1", "2", "3"):
-            return ("one", "all", "back")[int(answer) - 1]
-
-
 def _scannable(saved: list[str]) -> list[Path]:
-    """The folders scanned before that can be read now; each of the others is skipped, with a warning."""
+    """The folders added before that can be read now; each of the others is skipped, with a warning."""
     folders = []
     for path in saved:
         folder = Path(path)
@@ -956,44 +1060,6 @@ def _scannable(saved: list[str]) -> list[Path]:
         else:
             print(f"Skipping {path}: the folder is missing or cannot be read. Its indexed images are kept.")
     return folders
-
-
-def _choose_roots() -> list[Path]:
-    """Prompt until the user has settled what to scan, and return those folders.
-
-    "All folders" in the list scans every folder scanned before. A folder scanned before, or the very first folder,
-    is scanned alone. For a new folder when others were scanned before, the user chooses between it alone and all
-    folders, or goes back to the folder list. A folder scanned before that is now missing or unreadable is skipped,
-    with a warning.
-    """
-    while True:
-        raw = _prompt_folder()
-        conn = init_db(str(config.DB_PATH))
-        try:
-            saved = [row["path"] for row in list_roots(conn)]
-        finally:
-            conn.close()
-        if raw is None:
-            roots = _scannable(saved)
-            if not roots:
-                sys.exit("Error: none of the folders scanned before can be read.")
-            return roots
-
-        root = validate_folder(raw)
-        if not saved or str(root) in saved:
-            return [root]
-
-        conflict = find_overlapping_root(root, saved)
-        if conflict:
-            raise RootOverlapError(f"{root} overlaps the folder already scanned: {conflict}")
-
-        scope = _ask_scope(root, len(saved))
-        if scope == "back":
-            continue
-        if scope == "one":
-            return [root]
-
-        return [root, *_scannable(saved)]
 
 
 def _scan_and_report(root: Path) -> None:
@@ -1010,51 +1076,46 @@ def _scan_and_report(root: Path) -> None:
     ):
         counts = scan(root, allow_mass_delete=True)
 
-    print(f"\nRoot     : {root}")
-    print(f"Database : {config.DB_PATH}")
-    print(f"Scanned  : {counts['scanned']}")
-    print(f"New      : {counts['queued_new']}")
-    print(f"Modified : {counts['queued_modified']}")
-    print(f"Moved    : {counts['moved']}")
-    print(f"Unchanged: {counts['unchanged']}")
-    print(f"Deleted  : {counts['deleted']}")
+    skip_reasons = (("empty", counts["empty"]), ("not downloaded", counts["not_downloaded"]),
+                    ("unreadable", counts["unreadable"] + counts["bad_names"]))
+    skipped = sum(number for _, number in skip_reasons)
+    why = ", ".join(f"{number} {reason}" for reason, number in skip_reasons if number)
+    states = (  # what the scan found, every state always shown: the files that are fine first, then what changed, then the problems
+        ("Already indexed", counts["up_to_date"] + counts["moved"] + counts["details_updated"] + counts["renamed"]),
+        ("To index", counts["queued_new"] + counts["queued_modified"]),
+        ("Deleted files", counts["deleted"]),
+        ("Not in folder", counts["delete_blocked"]),
+        ("Skipped", f"{skipped} ({why})" if why else skipped),
+    )
+    print(f"\n{root}")
+    for label, value in states:
+        print(f"  {label:<15} : {value}")
     if counts["delete_blocked"]:
-        print(f"Kept     : {counts['delete_blocked']} indexed file(s) not removed (they may be on a disconnected drive)")
-    if counts["empty"]:
-        print(f"Skipped  : {counts['empty']} empty file(s)")
-    if counts["not_downloaded"]:
-        print(f"Skipped  : {counts['not_downloaded']} image(s) in cloud storage that are not downloaded to this computer")
-    if counts["unreadable"]:
-        print(f"Unreadable: {counts['unreadable']} file(s) skipped (see error_logs)")
-    print()
+        print(f"\nNote: {counts['delete_blocked']} image(s) are no longer in this folder. Their index was kept in case they come back.\n"
+              f"  Moved them?       Scan their new folder ({config.SCAN_ADD_COMMAND} \"folder path\"). They are recognised\n"
+              f"                    and not analysed again, which can save hours.\n"
+              f"  Drive unplugged?  Reconnect it and run {config.SCAN_COMMAND}.\n"
+              f"  Deleted them?     Run {config.SCAN_COMMAND} and answer y to delete their index.")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def main(folder: str | None = None) -> None:
-    """Scan ``folder``, or the folders the user chooses when none is given, then offer to index what was found."""
-    make_output_safe()
-    if folder is not None:
-        roots = [validate_folder(folder)]
-    else:
-        try:
-            roots = _choose_roots()
-        except RootOverlapError as exc:
-            sys.exit(f"Error: {exc}")
+def _scan_folders(roots: list[Path]) -> None:
+    """List the folders being scanned, scan each one and print what changed in it, then offer to index what is pending."""
+    print("Folders added, being scanned:")
+    for root in roots:
+        print(f"  {root}")
     for root in roots:
         _scan_and_report(root)
+    print()
 
     conn = init_db(str(config.DB_PATH))
     try:
-        backlog_size = len(get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS))
+        backlog = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+        failed = {row["file_path"] for row in get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)}
     finally:
         conn.close()
-
+    backlog_size = len([row for row in backlog if row["file_path"] not in failed])  # a file left queued after its tries is failed, not pending
     if backlog_size == 0:
         return
-
     if _ask_yes_no(
         f"{backlog_size} file(s) in the backlog are pending indexing. "
         "Run indexing now? [y/N]: "
@@ -1063,3 +1124,28 @@ def main(folder: str | None = None) -> None:
     else:
         print(f"Skipping indexing. Run {config.SCAN_COMMAND} later to process the backlog.")
 
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Scan every folder that was added, then offer to index what was found."""
+    make_output_safe()
+    conn = init_db(str(config.DB_PATH))
+    try:
+        saved = [row["path"] for row in list_roots(conn)]
+    finally:
+        conn.close()
+    if not saved:
+        sys.exit(f'No folders have been added yet. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+    roots = _scannable(saved)
+    if not roots:
+        sys.exit("Error: none of the folders added before can be read.")
+    _scan_folders(roots)
+
+
+def add(folder: str) -> None:
+    """Add ``folder`` to the folders that are scanned (one added before is scanned again), scan it, then offer to index what was found."""
+    make_output_safe()
+    _scan_folders([validate_folder(folder)])

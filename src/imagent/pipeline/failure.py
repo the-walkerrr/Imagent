@@ -8,11 +8,15 @@ set it aside (``park``), or leave it queued without using up one of its attempts
 
 from __future__ import annotations
 
+from imagent.pipeline.error_messages import describe
+
 
 class IndexingFailure(Exception):
     """One image could not be indexed, even after the steps for its kind of trouble.
 
     ``kind``       what went wrong, in a word (``cut_off``, ``unreadable``, ``timeout`` ...).
+    ``error_id``   which message in ``pipeline/error_messages.py`` tells the user why, and ``params`` the values for its gaps.
+                   Only these are stored; ``str(failure)`` is the message built from them.
     ``attempts``   the record of what was tried, stored in ``failure_history``.
     ``park``       True: set the file aside (it is queued again when it changes); False: leave it queued, no attempt used.
     ``retry_when`` what would make another try worthwhile: ``file_changed``, ``model_changed`` or ``on_request``.
@@ -21,11 +25,13 @@ class IndexingFailure(Exception):
     ``report``     True: once the file is left (set aside, or queued for the next run) the user is told it could not be indexed, and why.
     """
 
-    def __init__(self, kind: str, message: str, attempts: list[dict] | None = None, *, park: bool = True,
-                 retry_when: str = "on_request", service: bool = False, model_trouble: bool = False,
+    def __init__(self, kind: str, error_id: str, attempts: list[dict] | None = None, *, params: dict | None = None,
+                 park: bool = True, retry_when: str = "on_request", service: bool = False, model_trouble: bool = False,
                  report: bool = True):
-        super().__init__(message)
+        super().__init__(describe(error_id, params))
         self.kind = kind
+        self.error_id = error_id
+        self.params = params or {}
         self.attempts = attempts or []
         self.park = park
         self.retry_when = retry_when

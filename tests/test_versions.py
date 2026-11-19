@@ -62,8 +62,8 @@ class DatabaseTests(IsolatedHome):
     def test_a_file_parked_for_the_model_is_queued_again_when_the_versions_change(self):
         v1, v2 = {"vlm_digest": "1", "prompt_hash": "p", "schema_hash": "s"}, {"vlm_digest": "2", "prompt_hash": "p", "schema_hash": "s"}
         with self.conn:
-            park_backlog(self.conn, "/a.png", "cut_off", "cut", "model_changed", v1)
-            park_backlog(self.conn, "/b.png", "unreadable", "damaged", "file_changed", v1)
+            park_backlog(self.conn, "/a.png", "cut_off", "reply_cut_off", "model_changed", v1)
+            park_backlog(self.conn, "/b.png", "unreadable", "damaged_picture", "file_changed", v1)
             self.assertEqual(requeue_changed_parked(self.conn, v1), 0)  # nothing changed
             self.assertEqual(requeue_changed_parked(self.conn, v2), 1)  # only the one parked for the model
         self.assertEqual([r["file_path"] for r in get_backlog(self.conn, 3)], ["/a.png", "/c.png"])
@@ -71,17 +71,17 @@ class DatabaseTests(IsolatedHome):
 
     def test_a_file_parked_without_known_versions_is_tried_again_once_they_are_known(self):
         with self.conn:
-            park_backlog(self.conn, "/a.png", "cut_off", "cut", "model_changed", None)
+            park_backlog(self.conn, "/a.png", "cut_off", "reply_cut_off", "model_changed", None)
             self.assertEqual(requeue_changed_parked(self.conn, {"vlm_digest": "1", "prompt_hash": "p", "schema_hash": "s"}), 1)
 
     def test_parked_files_are_queued_again_on_request_with_a_clean_slate(self):
         with self.conn:
-            park_backlog(self.conn, "/a.png", "cut_off", "cut", "model_changed")
-            park_backlog(self.conn, "/b.png", "unreadable", "damaged", "file_changed")
-            park_backlog(self.conn, "/c.png", "unreadable", "damaged", "file_changed")
+            park_backlog(self.conn, "/a.png", "cut_off", "reply_cut_off", "model_changed")
+            park_backlog(self.conn, "/b.png", "unreadable", "damaged_picture", "file_changed")
+            park_backlog(self.conn, "/c.png", "unreadable", "damaged_picture", "file_changed")
             self.assertEqual(requeue_parked(self.conn, kind="unreadable"), 2)
             self.assertEqual(requeue_parked(self.conn, paths=[]), 0)
-        row = self.conn.execute("SELECT status, attempts, park_kind, last_error FROM backlog WHERE file_path = '/b.png'").fetchone()
+        row = self.conn.execute("SELECT status, attempts, park_kind, error_id FROM backlog WHERE file_path = '/b.png'").fetchone()
         self.assertEqual(tuple(row), ("queued", 0, None, None))
         with self.conn:
             self.assertEqual(requeue_parked(self.conn), 1)  # the rest
@@ -103,13 +103,13 @@ class DatabaseTests(IsolatedHome):
         with self.conn:
             for path in paths:
                 upsert_backlog(self.conn, path, self.root, "t")
-                park_backlog(self.conn, path, "cut_off", "cut", "model_changed")
+                park_backlog(self.conn, path, "cut_off", "reply_cut_off", "model_changed")
             self.assertEqual(requeue_parked(Counting(self.conn), paths=paths), 1200)
         self.assertLessEqual(Counting.most, 999)  # the limit of the oldest SQLite Imagent supports
         self.assertEqual(list_parked(self.conn), [])
 
     def test_a_record_and_its_vector_say_what_made_them(self):
-        record = {"root_id": self.root, "file_path": "/a.png", "hash": "h", "short_description": "s", "description": "d",
+        record = {"root_id": self.root, "file_path": "/a.png", "hash": "h", "pixel_hash": "p", "short_description": "s", "description": "d",
                   "vlm_metadata_json": "{}", "width": 1, "height": 1, "file_size": 1, "mime_type": "image/png", "created_at": None,
                   "modified_at": "t", "indexed_at": "t", "processing_time_ms": 1, "metadata_version": 1, "vlm_model": "v",
                   "taken_at": None, "camera_make": None, "camera_model": None, "gps_lat": None, "gps_lon": None,
@@ -139,7 +139,7 @@ class IndexLoopVersionsTests(IsolatedHome):
                 mock.patch.object(scan, "unload_model"), mock.patch.object(scan, "Progress"), \
                 mock.patch.object(scan.ocr, "check_available"), \
                 mock.patch.object(scan, "collect_versions", side_effect=[versions, versions, {**versions, "prompt_hash": "p2"}]), \
-                mock.patch.object(scan, "index_image", side_effect=[AnalysisFailed("cut_off", "cut", []), ("indexed", "ok")]):
+                mock.patch.object(scan, "index_image", side_effect=[AnalysisFailed("cut_off", "reply_cut_off", []), ("indexed", "ok")]):
             scan._index_backlog()  # parks the file
             self.assertEqual([p["park_kind"] for p in list_parked(conn)], ["cut_off"])
             scan._index_backlog()  # same versions: nothing is queued

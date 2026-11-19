@@ -7,8 +7,8 @@ While an image is processed, two lines are shown on a terminal: its file name, a
 When it is finished they are replaced by four lines (file name, description, status, time taken), then a blank line.
 When output is not a terminal (a pipe or a file) only the finished blocks are printed.
 
-Search: the query, then one line per step. A finished step stays on screen with its time; the current step
-is a live line below them (spinner, name, time so far), shown on a terminal only.
+Search: one live line (spinner and what is being done, such as "Searching…") that changes as the search moves on
+and disappears when it is over. It is shown on a terminal only; nothing about the steps is printed when output is piped.
 """
 
 from __future__ import annotations
@@ -29,8 +29,6 @@ _REFRESH_SECONDS = 0.2
 _TIMED = ("indexed", "updated", "FAILED")  # results that took real work, so their time is shown
 _STATUS_COLOURS = {"indexed": "32", "updated": "32", "FAILED": "31"}  # anything else is dim
 _MIN_WIDTH = 40
-_STEP_WIDTH = 44
-_STEP_TIME_WIDTH = 6
 _PIPED_WIDTH = 120
 
 
@@ -159,41 +157,33 @@ class Progress:
 
 
 class SearchProgress:
-    """Shows the steps of a search: finished ones stay on screen with their time, the current one is a live line."""
+    """Shows what a search is doing as one live line that is replaced by the next step and removed at the end."""
 
-    def __init__(self, query: str = "", stream=None):
+    def __init__(self, stream=None):
         self._stream = stream or sys.stdout
         self._live = self._stream.isatty() and os.environ.get("TERM") != "dumb"
-        self._colour = self._live and "NO_COLOR" not in os.environ
         self._lock = threading.Lock()
         self._text: str | None = None  # the step in progress
-        self._started = 0.0
         self._live_shown = False
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         if self._live and platform.system() == "Windows":
             os.system("")  # makes the Windows console understand ANSI escape codes
-        if query:
-            lines = textwrap.wrap(query, self._width()) or [""]
-            self._stream.write("\n".join(self._paint(line, "1") for line in lines) + "\n\n")
-            self._stream.flush()
 
     def step(self, text: str) -> None:
-        """Finish the step in progress (as done) and begin ``text``."""
+        """Show ``text`` as what is being done now, in place of the step before it."""
         with self._lock:
-            self._finish("✓", "32")
             self._text = text
-            self._started = time.monotonic()
             if self._live:
                 self._redraw()
-                if self._ticker is None:  # keeps the spinner and the time moving during a long model call
+                if self._ticker is None:  # keeps the spinner moving during a long model call
                     self._ticker = threading.Thread(target=self._tick, daemon=True)
                     self._ticker.start()
 
     def fail(self, note: str = "") -> None:
-        """Finish the step in progress as failed; ``note`` says what happened instead."""
+        """Remove the live line because the step failed; ``note``, if given, says what happened instead."""
         with self._lock:
-            self._finish("✗", "31", note)
+            self._finish(note)
 
     def say(self, message: str) -> None:
         """Print a message without breaking the live line."""
@@ -205,12 +195,12 @@ class SearchProgress:
             self._stream.flush()
 
     def close(self) -> None:
-        """Finish the step in progress (as done) and remove the live line. Safe to call more than once."""
+        """Remove the live line. Safe to call more than once."""
         self._stop.set()
         if self._ticker is not None:
             self._ticker.join()
         with self._lock:
-            self._finish("✓", "32")
+            self._finish()
 
     def _tick(self) -> None:
         while not self._stop.wait(_REFRESH_SECONDS):
@@ -223,17 +213,14 @@ class SearchProgress:
             return _PIPED_WIDTH
         return max(shutil.get_terminal_size((80, 24)).columns - 1, _MIN_WIDTH)
 
-    def _paint(self, text: str, code: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self._colour and text and code else text
-
-    def _finish(self, mark: str, code: str, note: str = "") -> None:
+    def _finish(self, note: str = "") -> None:
+        """Remove the live line, and print ``note`` in its place if there is one."""
         if self._text is None:
             return
         self._erase()
-        seconds = _format_duration(time.monotonic() - self._started, decimals=True)
-        line = f"{self._paint(mark, code)} {_clip(self._text, _STEP_WIDTH):<{_STEP_WIDTH}}{seconds:>{_STEP_TIME_WIDTH}}"
-        self._stream.write(line + (f"  {self._paint(note, '2')}" if note else "") + "\n")
-        self._stream.flush()
+        if note:
+            self._stream.write(note + "\n")
+            self._stream.flush()
         self._text = None
 
     def _erase(self) -> None:
@@ -245,8 +232,6 @@ class SearchProgress:
     def _redraw(self) -> None:
         self._erase()
         spinner = _SPINNER[int(time.monotonic() / _REFRESH_SECONDS) % len(_SPINNER)]
-        elapsed = _format_duration(time.monotonic() - self._started)
-        text = _clip(self._text, _STEP_WIDTH - 1) + "…"
-        self._stream.write(f"{spinner} {text:<{_STEP_WIDTH}}{elapsed:>{_STEP_TIME_WIDTH}}")
+        self._stream.write(_clip(f"{spinner} {self._text}…", self._width()))
         self._stream.flush()
         self._live_shown = True

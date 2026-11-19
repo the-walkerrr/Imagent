@@ -36,13 +36,14 @@ imagent setup
 ```bash
 imagent search "red car at night"   # show the pictures that best match a description
 imagent search                      # keep searching until you type exit
-imagent scan ~/Pictures             # find new or changed pictures in a folder, then index them
-imagent scan                        # the same, choosing the folder when asked
+imagent search --full "red car"     # also show each result's full description, location and folder
+imagent scan add ~/Pictures         # add a folder, find its new or changed pictures, then index them
+imagent scan                        # scan every folder you added, then index what is pending
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent                             # open a menu (arrow keys and Enter) with the same choices
 ```
 
-`imagent --help` lists the commands. To index: run `imagent scan` with a folder, then `imagent search`.
+`imagent --help` lists the commands. To index: run `imagent scan add` with a folder (run it again for each folder you want), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
 
 ## When a model does not fit your computer
 
@@ -78,7 +79,7 @@ Your pictures, Ollama itself and any model you had before Imagent are never touc
 | Message | What to do |
 | --- | --- |
 | `Imagent is not set up yet` | Run `imagent setup`. |
-| `No indexed images found` | Run `imagent scan` with a folder first. |
+| `No indexed images found` | Run `imagent scan add` with a folder first. |
 | `The ... model ... is not the same version` | The models are locked. Put the original version back (`imagent setup` restores it when it can), or uninstall and set up again, which clears the index. |
 | `...is on a network drive` / `...external or removable drive` | Copy the pictures to your computer's own disk. |
 

@@ -641,12 +641,10 @@ def review_models(vlm: str, embedding: str, text_model: str, local: bool):
     choice = ask(questionary.select(
         "Ready to download?",
         choices=[
-            questionary.Choice("○ ← Go back and change the models", value="back"),
-            questionary.Separator(),
-            questionary.Choice("○ Continue: download the models" if enough_space else "Continue: download the models", value="go",
+            questionary.Choice("○ ✓ Continue: download the models" if enough_space else "Continue: download the models", value="go",
                                disabled=None if enough_space else "not enough disk space"),
+            questionary.Choice("○ ← Go back and change the models", value="back"),
         ],
-        default="go" if enough_space else "back",
         qmark=QMARK, pointer=POINTER, style=STYLE,
     ))
     return choice == "go", missing
@@ -1103,6 +1101,6 @@ def main() -> None:
     finally:
         conn.close()
     check_test_pictures()
-    say(f"\n✓ Setup complete. Your models are locked in {app_config.DB_PATH}", "fg:green")
+    say(f"\n✓ Setup complete. Your models are locked in.", "fg:green")
 
 
