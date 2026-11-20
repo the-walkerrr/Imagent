@@ -3,8 +3,9 @@
 imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is run with no command. Pick an entry with the arrow keys and Enter.
 
 Before it appears, ``cli.py`` runs setup if it has not been done (``needs_setup``).
-It runs the chosen command and ends with that command's exit code. "Show the images that could not be indexed" is only
+It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
+"Forget the deleted pictures Imagent remembers" is only offered when it remembers some.
 
 """
 
@@ -17,15 +18,17 @@ import questionary
 
 from imagent import config
 from imagent.db.connection import init_db
-from imagent.db.operations import get_device_settings, get_exhausted_backlog, get_model_settings
+from imagent.db.operations import count_deleted_analyses, get_device_settings, get_exhausted_backlog, get_model_settings
 from imagent.pipeline.console import make_output_safe
 
 UNINSTALL = "uninstall"
+EXIT = "exit"
 
 SEARCH = ("Search your images", "search")
 ADD_FOLDER = ("Add a folder", "scan add")
 SCAN = ("Scan folders and index images", "scan")
 FAILED_COMMAND = "failed"
+FORGET_COMMAND = "forget"
 
 STYLE = questionary.Style([
     ("qmark", "fg:ansidefault bold"),
@@ -49,6 +52,18 @@ def failed_count() -> int:
         return 0
 
 
+def remembered_count() -> int:
+    """How many deleted pictures Imagent remembers; 0 if that cannot be found out (the menu must always appear)."""
+    try:
+        conn = init_db(str(config.DB_PATH))
+        try:
+            return count_deleted_analyses(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
 def needs_setup() -> bool:
     """True when setup has not been completed: the models are not locked or this computer has not been measured.
 
@@ -64,19 +79,22 @@ def needs_setup() -> bool:
         return False
 
 
-def choices(failed: int = 0) -> list:
+def choices(failed: int = 0, remembered: int = 0) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
-    entries = [SEARCH, ADD_FOLDER, SCAN] + shown
+    forget = [(f"Forget the {remembered} deleted picture(s) Imagent remembers", FORGET_COMMAND)] if remembered else []
+    entries = [SEARCH, ADD_FOLDER, SCAN] + shown + forget + [("Exit", EXIT)]
     return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
 
 def main() -> None:
     make_output_safe()
-    choice = questionary.select("What would you like to do?", choices=choices(failed_count()), qmark="?",
+    choice = questionary.select("What would you like to do?", choices=choices(failed_count(), remembered_count()), qmark="?",
                                 pointer="»", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)
+    if choice == EXIT:
+        return
     command = choice.split()
     if choice == ADD_FOLDER[1]:  # the command needs the folder, so it is asked for here
         folder = questionary.text("Folder to add:", qmark="?", style=STYLE).ask()

@@ -199,6 +199,18 @@ class MenuTests(unittest.TestCase):
     def test_other_choices_run_without_asking_for_a_folder(self):
         self.assertEqual(self._choose(menu.SCAN[1], None), ["scan"])
 
+    def test_exit_closes_the_menu_without_running_anything(self):
+        with mock.patch.object(menu.questionary, "select") as select, mock.patch.object(menu, "failed_count", return_value=0), \
+                mock.patch.object(menu.subprocess, "Popen") as popen:
+            select.return_value.ask.return_value = menu.EXIT
+            menu.main()
+        popen.assert_not_called()
+
+    def test_exit_is_offered_just_above_uninstall(self):
+        for failed in (0, 3):
+            values = [choice.value for choice in menu.choices(failed)]
+            self.assertEqual(values[-2:], [menu.EXIT, menu.UNINSTALL])
+
     def test_no_folder_typed_runs_nothing(self):
         for typed in (None, "   "):
             self.assertIsNone(self._choose(menu.ADD_FOLDER[1], typed))

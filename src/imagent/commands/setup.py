@@ -24,7 +24,8 @@ import questionary
 
 from imagent import config as app_config
 from imagent.db.connection import init_db
-from imagent.db.operations import get_device_settings, get_model_settings, set_device_settings, set_model_settings
+from imagent.db.operations import (get_device_settings, get_keep_deleted, get_model_settings, set_device_settings, set_keep_deleted,
+                                   set_model_settings)
 from imagent.pipeline.console import make_output_safe
 
 DEFAULT_HOST = "http://localhost:11434"
@@ -33,6 +34,9 @@ INSTALL_TIMEOUT = 1800  # seconds allowed for installing Ollama
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
+KEEP_DELETED_CHOICES = (100, 500, 1000, 2000)  # how many deleted pictures to remember, offered at the end of setup
+KEEP_DELETED_DEFAULT = 1000
+ENTER_A_NUMBER = "enter a number"
 RED = "fg:ansibrightred"
 INDENT = "  "  # left padding for everything under a step heading
 QMARK = INDENT + "?"
@@ -343,6 +347,7 @@ def ensure_ollama_installed() -> None:
         fail(f"Ollama is required. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
     if not _succeeds(cmd):
         fail(f"The Ollama install did not finish. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
+    app_config.record_ollama_installed()
     if shutil.which("ollama"):
         say("✓ Ollama installed.", "fg:green")
     else:
@@ -1045,6 +1050,49 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
         conn.close()
 
 
+def _validate_keep_deleted(value: str):
+    return True if value.strip().isdigit() else "Enter a whole number, 0 or more."
+
+
+def ask_keep_deleted() -> int:
+    """Explain what remembering deleted pictures is for, and ask how many to remember: one of ``KEEP_DELETED_CHOICES``, or a number
+    typed in (0 remembers none)."""
+    say("When you delete a picture, Imagent forgets it at the next scan. It can instead remember what it learned about the picture:")
+    say("its description and search data (not the picture, and not where it was).")
+    say("If the same picture comes back later (restored from a backup, copied, or moved into a folder you add later), Imagent")
+    say("recognises it by its pixels and uses what it remembers, so it does not have to be analysed again. That saves time when")
+    say("indexing. When there are more than the number you choose, the oldest are forgotten first.\n")
+    choices = [questionary.Choice(f"{number} deleted pictures", value=number) for number in KEEP_DELETED_CHOICES]
+    choices.append(questionary.Choice("Enter a number", value=ENTER_A_NUMBER))
+    choice = ask(questionary.select(
+        "How many deleted pictures should Imagent remember?", choices=choices,
+        default=next(c for c in choices if c.value == KEEP_DELETED_DEFAULT), qmark=QMARK, pointer=POINTER, style=STYLE,
+    ))
+    if choice != ENTER_A_NUMBER:
+        return choice
+    return int(ask(questionary.text("How many deleted pictures should Imagent remember? (0 remembers none)",
+                                    validate=_validate_keep_deleted, qmark=QMARK, style=STYLE)).strip())
+
+
+def choose_keep_deleted() -> None:
+    """Ask what happens to the data of a deleted picture, and store the answer. When it was answered before, it is shown and only asked again if the user wants."""
+    conn = init_db(str(app_config.DB_PATH))
+    try:
+        current = get_keep_deleted(conn)
+        step("Deleted pictures")
+        if current is not None:
+            say(f"Imagent remembers the last {current} deleted pictures." if current else "Imagent does not remember deleted pictures.")
+            if not ask(questionary.confirm("Change it?", default=False, qmark=QMARK, style=STYLE)):
+                return
+        keep = ask_keep_deleted()
+        with conn:
+            set_keep_deleted(conn, keep)
+    finally:
+        conn.close()
+    say(f"✓ Imagent will remember the last {keep} deleted pictures." if keep else "✓ Imagent will not remember deleted pictures.",
+        "fg:green")
+
+
 # --- Main ---------------------------------------------------------------------
 
 def main() -> None:
@@ -1085,6 +1133,7 @@ def main() -> None:
         manage_models(settings, host)
         measure_again_if_needed(settings, host)
         check_test_pictures()
+        choose_keep_deleted()
         say("✓ Setup complete.", "fg:green")
         return
 
@@ -1101,6 +1150,7 @@ def main() -> None:
     finally:
         conn.close()
     check_test_pictures()
+    choose_keep_deleted()
     say(f"\n✓ Setup complete. Your models are locked in.", "fg:green")
 
 

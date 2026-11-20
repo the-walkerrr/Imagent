@@ -32,16 +32,22 @@ _MIN_WIDTH = 40
 _PIPED_WIDTH = 120
 
 
-def _format_duration(seconds: float, decimals: bool = False) -> str:
-    """12s, 2m 30s or 1h 05m; with ``decimals`` a time below a minute reads 12.3s."""
+def format_duration(seconds: float, decimals: int = 0) -> str:
+    """12s, 2m 30s, 1h 05m 30s or 2d 03h 05m 30s: minutes join once it is 60 seconds, hours at 60 minutes, days at 24 hours.
+    With ``decimals`` a time below a minute shows that many digits after the point: 12.3s."""
     if decimals and seconds < 60:
-        return f"{seconds:.1f}s"
+        return f"{seconds:.{decimals}f}s"
     total = int(seconds)
-    if total < 60:
-        return f"{total}s"
-    if total < 3600:
-        return f"{total // 60}m {total % 60:02d}s"
-    return f"{total // 3600}h {total % 3600 // 60:02d}m"
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours:02d}h {minutes:02d}m {secs:02d}s"
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 
 def _clip(text: str, width: int) -> str:
@@ -98,7 +104,7 @@ class Progress:
             seconds = time.monotonic() - self._started
             self._active = False
             self._erase()
-            timing = _format_duration(seconds, decimals=True) if result in _TIMED else "–"
+            timing = format_duration(seconds, decimals=1) if result in _TIMED else "–"
             self._write_block(" ".join(detail.split()) or "–", timing, result)
 
     def close(self) -> None:
@@ -150,7 +156,7 @@ class Progress:
         self._erase()
         width = self._width()
         spinner = _SPINNER[int(time.monotonic() / _REFRESH_SECONDS) % len(_SPINNER)]
-        elapsed = _format_duration(time.monotonic() - self._started)
+        elapsed = format_duration(time.monotonic() - self._started)
         self._stream.write(self._name_line(width) + "\n" + _clip(f"{spinner} {self._stage}…  {elapsed}", width))
         self._stream.flush()
         self._live_shown = True

@@ -21,14 +21,16 @@ All activity reads from the user-level database (``config.DB_PATH``).
 ``main`` is what ``imagent search`` runs. Given a query it answers it and ends. Without one it starts Ollama and loads
 the models once, then keeps asking for queries until the user types ``exit`` (or presses Ctrl+C), so later searches start at once.
 
-Each result shows its one-line summary, then its date, camera and size. With ``--full`` it shows the full description instead of the summary,
-and also the place it was taken and the folder it was found in.
+Each result shows its one-line summary, then its date, camera and size, then the full path of the file. With ``--full`` it shows
+the full description instead of the summary. On a terminal, a line that is too long continues under its own indent.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import textwrap
 from datetime import datetime
 
 import numpy as np
@@ -247,31 +249,53 @@ def _file_size(size: int) -> str:
         amount /= 1024
 
 
+def _day(moment: datetime) -> str:
+    """A date as people say it, e.g. ``9 May, 2024`` (the day is not padded, which strftime cannot do on every system)."""
+    return f"{moment.day} {moment:%b}, {moment.year}"
+
+
 def _when(result: dict) -> str | None:
     """When the picture was taken (its EXIF time), or else when the file was last changed."""
     if result["taken_at"]:
         try:
-            return datetime.fromisoformat(result["taken_at"]).strftime("%Y-%m-%d %H:%M")
+            taken = datetime.fromisoformat(result["taken_at"])
+            return f"{taken:%I:%M %p} {_day(taken)}"
         except ValueError:
             return result["taken_at"]
-    return f"modified {result['modified_at'][:10]}" if result["modified_at"] else None
+    if result["modified_at"]:
+        try:
+            return f"modified {_day(datetime.fromisoformat(result['modified_at'][:10]))}"
+        except ValueError:
+            return f"modified {result['modified_at'][:10]}"
+    return None
 
 
 def _facts(result: dict) -> str:
     """The date, camera, size in pixels and size on disk of an image on one line, leaving out what is not known."""
-    camera = " ".join(part for part in (result["camera_make"], result["camera_model"]) if part)
+    make, model = result["camera_make"], result["camera_model"]
+    if make and model and model.lower().startswith(make.lower()):  # many cameras already put the make in the model ("iQOO", "iQOO Neo9 Pro")
+        make = None
+    camera = " ".join(part for part in (make, model) if part)
     pixels = f"{result['width']}\u00d7{result['height']}" if result["width"] and result["height"] else None
     size = _file_size(result["file_size"]) if result["file_size"] is not None else None
     return " \u00b7 ".join(part for part in (_when(result), camera, pixels, size) if part)
 
 
-def _description(result: dict, full: bool) -> None:
-    """The one-line summary, or with ``full`` the whole description."""
-    if full:
-        if result["description"]:
-            print("\n".join(f"   {line}".rstrip() for line in result["description"].splitlines()))
-    elif result["short_description"]:
-        print(f"   {result['short_description']}")
+def _indented(text: str, break_long_words: bool = False) -> str:
+    """``text`` under the file name (three spaces in). On a terminal a line that is too long continues with the same indent,
+    instead of starting again at the left edge; piped output is not wrapped. A word longer than the line (a path) is
+    only cut when ``break_long_words``."""
+    lines = text.splitlines()
+    if not sys.stdout.isatty():
+        return "\n".join(f"   {line}".rstrip() for line in lines)
+    width = max(shutil.get_terminal_size().columns - 1, 20)  # the last column is left empty so a line never wraps by itself
+    return "\n".join(textwrap.fill(line, width, initial_indent="   ", subsequent_indent="   ", break_long_words=break_long_words,
+                                    break_on_hyphens=False) if line.strip() else "" for line in lines)
+
+
+def _description(result: dict, full: bool) -> str:
+    """The one-line summary, or with ``full`` the whole description; empty when there is none."""
+    return _indented((result["description"] if full else result["short_description"]) or "")
 
 
 def _show(query: str, results: list[dict], full: bool = False) -> None:
@@ -279,20 +303,15 @@ def _show(query: str, results: list[dict], full: bool = False) -> None:
         print(f"\nNo results for: {query!r}\n")
         return
 
-    print(f"\nTop {len(results)} result(s) for: {query!r}\n")
     bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+    print(f"\nTop {len(results)} result(s) for: " + (f"\033[1m{query!r}\033[0m" if bold else f"{query!r}") + "\n")
     for position, result in enumerate(results, start=1):
-        name = file_link(result["file_path"], result["file_path"])
+        name = file_link(os.path.basename(result["file_path"]), result["file_path"])
         name = f"\033[1m{name}\033[0m" if bold else name
-        print(f"{position}. {name}")
-        _description(result, full)
-        if _facts(result):
-            print(f"   {_facts(result)}")
-        if full:
-            if result["gps_lat"] is not None and result["gps_lon"] is not None:
-                print(f"   Location: {result['gps_lat']:.5f}, {result['gps_lon']:.5f}")
-            print(f"   Format: {result['mime_type'] or 'unknown'} \u00b7 Folder: {result['root_path']}")
-        print()
+        lines = [f"{position}. {name}", _description(result, full), _indented(_facts(result)),
+                 _indented(result["file_path"], break_long_words=True)]
+        print("\n\n".join(line for line in lines if line))  # a blank line between the lines of a result, two between results
+        print("\n")
 
 
 def _answer(query: str, session: tuple, full: bool) -> None:
@@ -302,7 +321,7 @@ def _answer(query: str, session: tuple, full: bool) -> None:
 def main(query: str = "", full: bool = False) -> None:
     """Answer ``query`` and end; with no query, keep asking for queries until the user types ``exit``.
 
-    ``full`` also shows every result's full description, location and folder."""
+    ``full`` shows every result's full description instead of its summary."""
     make_output_safe()
     query = query.strip()
     session = start_session()
@@ -311,9 +330,12 @@ def main(query: str = "", full: bool = False) -> None:
     if query:
         _answer(query, session, full)
         return
+    colour = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+    prompt = "Enter your search query (type exit to quit): "
+    prompt = f"\033[34m{prompt}\033[0m" if colour else prompt
     while True:
         try:
-            query = input("Enter your search query (type exit to quit): ").strip()
+            query = input(prompt).strip()
         except EOFError:  # Ctrl+D, or no terminal to type in
             return
         if query.lower() in ("exit", "quit"):

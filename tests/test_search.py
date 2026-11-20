@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -107,20 +108,103 @@ class SearchTests(IsolatedHome):
         self._describe("closest")
         shown = self._shown()
         self.assertIn("a short line", shown)
-        self.assertIn("2026-09-06 07:24 \u00b7 iQOO Neo9 Pro \u00b7 4032\u00d73024 \u00b7 3.1 MB", shown)
+        self.assertIn("07:24 AM 6 Sep, 2026 \u00b7 iQOO Neo9 Pro \u00b7 4032\u00d73024 \u00b7 3.1 MB", shown)
         self.assertNotIn("the long description", shown)
         self.assertNotIn("Location", shown)
         self.assertNotIn("tags", shown)
         self.assertNotIn("score", shown)
 
-    def test_full_shows_the_long_description_in_place_of_the_summary_with_location_and_folder(self):
+    def test_a_result_is_titled_with_its_file_name_and_the_link_opens_the_original_path(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        path = self.paths["closest"]
+        plain, terminal = io.StringIO(), Terminal()
+        for stream, env in ((plain, {}), (terminal, {"TERM": "xterm"})):
+            with contextlib.redirect_stdout(stream), mock.patch.dict(os.environ, env):
+                search._show("anything", search.search("anything"))
+        self.assertIn(f"1. {path.name}\n", plain.getvalue().replace("\033[1m", "").replace("\033[0m", ""))
+        self.assertIn(f"\033]8;;{path.absolute().as_uri()}\033\\{path.name}\033]8;;\033\\", terminal.getvalue())
+
+    def test_the_full_path_is_shown_in_the_normal_mode_too_on_its_own_line_after_the_facts(self):
+        self._describe("closest")
+        lines = self._shown().splitlines()
+        first = lines.index(next(line for line in lines if line.startswith("1. ")))
+        self.assertEqual(lines[first + 6], f"   {self.paths['closest']}")
+        self.assertEqual(lines[first + 7:first + 9], ["", ""])
+
+    def test_the_month_is_its_three_letter_name_and_the_day_is_not_padded(self):
+        for taken, shown in (("2024-05-09T08:00:00", "08:00 AM 9 May, 2024"), ("2024-01-31T20:30:00", "08:30 PM 31 Jan, 2024"),
+                             ("2024-12-01T13:00:00", "01:00 PM 1 Dec, 2024")):
+            self.assertEqual(search._when({"taken_at": taken, "modified_at": None}), shown)
+
+    def test_full_no_longer_shows_the_format(self):
+        self._describe("closest")
+        self.assertNotIn("Format", self._shown(full=True))
+        self.assertNotIn("image/png", self._shown(full=True))
+
+    def test_a_line_that_is_too_long_continues_under_the_same_indent_on_a_terminal(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        words = " ".join(f"word{number}" for number in range(30))
+        self._describe("closest", description=words)
+        out = Terminal()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"TERM": "xterm"}), \
+                mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((40, 24))):
+            search._show("anything", search.search("anything"), full=True)
+        wrapped = [line for line in out.getvalue().splitlines() if "word" in line]
+        self.assertGreater(len(wrapped), 2)
+        self.assertTrue(all(line.startswith("   word") and len(line) <= 39 for line in wrapped))
+        self.assertEqual(" ".join(line.strip() for line in wrapped), words)
+
+    def test_the_query_in_the_heading_is_bold_on_a_terminal_only(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        plain, terminal = io.StringIO(), Terminal()
+        for stream, env in ((plain, {}), (terminal, {"TERM": "xterm"})):
+            with contextlib.redirect_stdout(stream), mock.patch.dict(os.environ, env):
+                search._show("bike", search.search("anything"))
+        self.assertIn("Top 3 result(s) for: 'bike'\n", plain.getvalue())
+        self.assertIn("Top 3 result(s) for: \033[1m'bike'\033[0m\n", terminal.getvalue())
+
+    def test_the_make_is_not_repeated_when_the_model_already_starts_with_it(self):
+        base = {"taken_at": None, "modified_at": None, "width": None, "height": None, "file_size": None}
+        for make, model, shown in (("iQOO", "iQOO Neo9 Pro", "iQOO Neo9 Pro"), ("Canon", "CANON EOS R5", "CANON EOS R5"),
+                                   ("iQOO", "Neo9 Pro", "iQOO Neo9 Pro"), ("Apple", None, "Apple"), (None, "iPhone 15", "iPhone 15")):
+            self.assertEqual(search._facts({**base, "camera_make": make, "camera_model": model}), shown)
+
+    def test_the_time_is_shown_with_am_and_pm(self):
+        for taken, shown in (("2026-09-07T14:14:00", "02:14 PM 7 Sep, 2026"), ("2026-09-07T00:05:00", "12:05 AM 7 Sep, 2026"),
+                             ("2026-09-07T12:00:00", "12:00 PM 7 Sep, 2026")):
+            self.assertEqual(search._when({"taken_at": taken, "modified_at": None}), shown)
+        self.assertEqual(search._when({"taken_at": None, "modified_at": "2026-09-07T14:14:00+00:00"}), "modified 7 Sep, 2026")
+
+    def test_the_lines_of_a_result_are_separated_by_a_blank_line_and_results_by_two(self):
+        self._describe("closest")
+        lines = self._shown().splitlines()
+        first = lines.index(next(line for line in lines if line.startswith("1. ")))
+        self.assertEqual(lines[first + 1], "")
+        self.assertEqual(lines[first + 2], "   a short line")
+        self.assertEqual(lines[first + 3], "")
+        self.assertIn("\u00b7", lines[first + 4])
+        self.assertEqual(lines[first + 5], "")
+        self.assertEqual(lines[first + 6], f"   {self.paths['closest']}")
+        self.assertEqual(lines[first + 7:first + 9], ["", ""])
+        self.assertTrue(lines[first + 9].startswith("2. "))
+
+    def test_full_shows_the_long_description_in_place_of_the_summary_with_the_full_path(self):
         self._describe("closest")
         shown = self._shown(full=True)
         self.assertEqual(shown.count("the long description"), 1)  # only "closest" was described above
         self.assertIn("   second paragraph", shown)
         self.assertNotIn("a short line", shown)
-        self.assertIn("Location: 12.97000, 77.59000", shown)
-        self.assertIn(f"Folder: {self.work}", shown)
+        self.assertIn(f"   {self.paths['closest']}\n", shown)  # the full path, on its own line with no label
+        self.assertNotIn("Path", shown)
+        self.assertNotIn("Folder", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("12.97", shown)
         self.assertNotIn("tags", shown)
         self.assertNotIn("score", shown)
 

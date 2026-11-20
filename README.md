@@ -9,23 +9,21 @@
 
 ## Requirements
 
-Python 3.9 to 3.14, [pipx](https://pipx.pypa.io) (or `uv`) and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
+Python 3.9 to 3.14 and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
 
 ## Install
 
-Install the `imagent` command (once):
-
 ```bash
-pipx install git+https://github.com/the-walkerrr/Imagent.git
+git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
+python3 -m venv .venv
+source .venv/bin/activate                  # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip        # editable installs need pip 21.3 or newer
+python -m pip install -e .
 ```
 
-If your default Python is newer than 3.14, the install stops with a message that the package requires a different Python. Install Python 3.12 and tell pipx to use it:
+This adds the `imagent` command inside the virtual environment, and your edits to the code take effect straight away. Activate the environment (`source .venv/bin/activate`) in each new terminal before using `imagent`. If your default Python is newer than 3.14, create the environment with Python 3.12 instead: `python3.12 -m venv .venv`.
 
-```bash
-pipx install --python python3.12 git+https://github.com/the-walkerrr/Imagent.git
-```
-
-Then set it up (once). It checks Ollama, downloads the three models, locks them and measures your computer:
+Then set it up (once). It checks Ollama, downloads the three models, locks them, measures your computer and asks how many deleted pictures to remember (see below):
 
 ```bash
 imagent setup
@@ -36,14 +34,26 @@ imagent setup
 ```bash
 imagent search "red car at night"   # show the pictures that best match a description
 imagent search                      # keep searching until you type exit
-imagent search --full "red car"     # also show each result's full description, location and folder
+imagent search --full "red car"     # show each result's full description instead of its one-line summary
 imagent scan add ~/Pictures         # add a folder, find its new or changed pictures, then index them
 imagent scan                        # scan every folder you added, then index what is pending
 imagent failed                      # list the pictures that could not be indexed, and why
+imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
 imagent                             # open a menu (arrow keys and Enter) with the same choices
 ```
 
 `imagent --help` lists the commands. To index: run `imagent scan add` with a folder (run it again for each folder you want), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
+
+## Pictures that come back
+
+A picture is recognised by its pixels, whatever its name, folder or embedded details (EXIF) are. The vision model looks at each picture once:
+
+- **Copies and renames:** a new file with the same pixels as a picture already indexed gets that picture's description and search data again, so it is not analysed a second time. A renamed or moved file keeps its index.
+- **Deleted pictures:** when a scan finds that a picture was deleted, Imagent can remember what it learned about it (its description and search data; not the picture, and not where it was). If the same picture comes back later (restored from a backup, copied, or moved into a folder you add later), it is not analysed again. Search never shows remembered pictures.
+
+Setup asks how many deleted pictures to remember: 100, 500, 1000, 2000, or a number you type (0 remembers none). When there are more than that, the oldest are forgotten first. Run `imagent setup` again to see your choice and change it. Until you have answered, nothing is remembered. To delete what is remembered now, run `imagent forget` (or choose it in the menu); your indexed pictures and your choice are not touched.
+
+A description is only used again when it was made with the same models, prompt and text-reading engine as a new one would be; otherwise the picture is analysed again.
 
 ## When a model does not fit your computer
 
@@ -86,12 +96,8 @@ Your pictures, Ollama itself and any model you had before Imagent are never touc
 ## Development
 
 ```bash
-git clone https://github.com/the-walkerrr/Imagent.git && cd Imagent
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip   # editable installs need pip 21.3 or newer
-.venv/bin/python -m pip install -e .
-.venv/bin/python -m unittest                    # run the tests
-git config core.hooksPath .githooks             # run the tests before every commit
+python -m unittest                    # run the tests (with the environment from Install active)
+git config core.hooksPath .githooks   # run the tests before every commit
 ```
 
 ```

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import secrets
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -35,6 +37,10 @@ from imagent.pipeline.locking import AlreadyRunning, single_instance
 DEFAULT_HOST = "http://localhost:11434"
 FINAL_CODE_LENGTH = 10
 CANCELLED = "Uninstall cancelled. Nothing was deleted."
+LINUX_SERVICE_FILE = Path("/etc/systemd/system/ollama.service")  # where Ollama's Linux install script puts the service
+LINUX_DATA_DIR = Path("/usr/share/ollama")  # what that service stores, models included
+LINUX_BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")  # where the script may put the program
+LINUX_DOCS = "https://github.com/ollama/ollama/blob/main/docs/linux.md"
 REMOVE_PROGRAM = "To finish, remove the program itself with: pipx uninstall imagent   (or: pip uninstall imagent, if you used pip)"
 
 
@@ -62,12 +68,29 @@ def _fmt_bytes(n: float) -> str:
 
 
 def _fmt_duration(milliseconds: int) -> str:
-    seconds = milliseconds // 1000
-    hours, rest = divmod(seconds, 3600)
+    days, rest = divmod(milliseconds // 1000, 86400)
+    hours, rest = divmod(rest, 3600)
     minutes, seconds = divmod(rest, 60)
+    if days:
+        return f"{days} d {hours} h {minutes} min {seconds} s"
     if hours:
-        return f"{hours} h {minutes} min"
+        return f"{hours} h {minutes} min {seconds} s"
     return f"{minutes} min {seconds} s" if minutes else f"{seconds} s"
+
+
+def _style(text: str, code: str) -> str:
+    """``text`` with the ANSI style ``code`` when printing to a terminal that understands it, otherwise unchanged."""
+    if not sys.stdout.isatty() or os.environ.get("TERM") == "dumb":
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _bold(text: str) -> str:
+    return _style(text, "1")
+
+
+def _green(text: str) -> str:
+    return _style(text, "32")
 
 
 # --- What is in the database ---------------------------------------------------
@@ -184,6 +207,7 @@ def make_plan(base: str | None, stats: dict) -> dict:
         "models": [], "models_unreachable": [], "models_gone": [],
         "not_recorded": [m for m in stats["locked_models"] if m not in recorded],
         "data_dir": config.IMAGENT_HOME if config.IMAGENT_HOME.exists() else None,
+        "ollama_installed": config.load_install_record().get("ollama_installed") is True,
     }
     for name in recorded:
         if present is None:
@@ -205,34 +229,21 @@ def nothing_to_remove(plan: dict) -> bool:
 
 
 def show_plan(stats: dict, plan: dict) -> None:
-    def row(label: str, value: str, detail: str = "") -> None:
-        print(f"  {label:<24}{value}" + (f"   {detail}" if detail else ""))
-
     unknown = "unknown"
-    print("\n" + "=" * 64)
-    print("  UNINSTALLING IMAGENT DELETES ALL OF THIS, AND IT CANNOT BE UNDONE")
-    print("=" * 64)
-    row("Indexed images", str(stats["images"]) if stats["images"] is not None else unknown,
-        "(descriptions, tags, text and search vectors)")
+    width = 22  # the label column; values and folder paths start right after it
+
+    def row(label: str, value: str) -> None:
+        print(f"  {_bold(label)}{' ' * (width - len(label))}{value}")
+
+    print("\n  Uninstalling Imagent deletes all of this, and it cannot be undone.")
+    print(f"  {_green('Your images are not affected and stay the same.')}\n")
+    row("Indexed images", str(stats["images"]) if stats["images"] is not None else unknown)
     folders = stats["folders"]
     row("Scanned folders", str(len(folders)) if folders or stats["images"] is not None else unknown)
     for folder in folders:
-        print(f"{'':<26}{folder}")
-    row("Waiting to be indexed", str(stats["queued"]) if stats["queued"] is not None else unknown)
-    row("Logged errors", str(stats["errors"]) if stats["errors"] is not None else unknown)
-    if stats["analysis_ms"]:
-        row("Time spent analysing", _fmt_duration(stats["analysis_ms"]), "(you would have to run it all again)")
-    print("  " + "-" * 62)
-    row("Index database", _fmt_bytes(plan["db_size"]))
-    row("Imagent data folder", _fmt_bytes(plan["data_size"]), "" if plan["data_dir"] else "(none)")
-    row("Ollama models", _fmt_bytes(plan["models_size"]), "downloaded by Imagent" if plan["models"] else "(none to remove)")
-    for name, size in plan["models"]:
-        print(f"{'':<26}{name}  ({_fmt_bytes(size)})")
-    total = plan["data_size"] + plan["models_size"]
-    print("  " + "-" * 62)
-    row("Disk space freed", _fmt_bytes(total))
-    print("=" * 64)
-    print("  Not touched: your image files, Ollama itself and every Ollama model that Imagent did not download.")
+        print(f"  {' ' * width}{folder}")
+    row("Total time analyzed", _fmt_duration(stats["analysis_ms"]) if stats["analysis_ms"] is not None else unknown)
+    row("Storage used", _fmt_bytes(plan["data_size"] + plan["models_size"]))
     if plan["models_unreachable"]:
         print("\n  Could not reach Ollama, so these models will NOT be removed (remove them yourself with")
         print("  `ollama rm <name>` on the computer where Ollama runs): " + ", ".join(plan["models_unreachable"]))
@@ -252,15 +263,15 @@ def make_final_code() -> str:
 
 def confirm_three_times(stats: dict) -> bool:
     """Ask three different questions; any wrong answer cancels everything."""
-    if input("\n  Confirmation 1 of 3. Do you want to uninstall Imagent and delete everything above? Type yes: "
-             ).strip().lower() != "yes":
+    print(f"\n  {_bold('Confirmation')}")
+    if input("  1/3  Do you want to uninstall Imagent and delete everything above? Type yes: ").strip().lower() != "yes":
         return False
     expected = str(stats["images"] if stats["images"] is not None else 0)
-    if input("  Confirmation 2 of 3. How many indexed images will be lost? (see the list above): ").strip() != expected:
+    if input("  2/3  How many indexed images will be lost? (see the list above): ").strip() != expected:
         print("  That is not the number in the list.")
         return False
     code = make_final_code()
-    if input(f"  Confirmation 3 of 3. This is the last chance. Type exactly \"{code}\": ").strip() != code:
+    if input(f"  3/3  This is the last chance. Type exactly \"{code}\": ").strip() != code:
         return False
     return True
 
@@ -299,6 +310,57 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
     return problems
 
 
+# --- Ollama itself (only when setup installed it) --------------------------------------
+
+def ollama_removal_command() -> list[str] | None:
+    """The one command that removes the Ollama that setup installed, or None when this computer does not look the way
+    setup left it (then the user is told how to remove it by hand). Linux has no uninstall command, so the documented
+    steps are joined into one ``sudo sh -c`` line; it ends by checking that the program and the service are gone."""
+    system = platform.system()
+    if system == "Darwin" and shutil.which("brew"):
+        return ["brew", "uninstall", "ollama"]
+    if system == "Windows" and shutil.which("winget"):
+        return ["winget", "uninstall", "--id", "Ollama.Ollama", "-e"]
+    if system != "Linux" or not shutil.which("systemctl") or not LINUX_SERVICE_FILE.exists():
+        return None
+    program = shutil.which("ollama")
+    if program is None or str(Path(program).parent) not in LINUX_BIN_DIRS:
+        return None
+    sudo = [] if hasattr(os, "geteuid") and os.geteuid() == 0 else ["sudo"]
+    if sudo and not shutil.which("sudo"):
+        return None
+    libraries = Path(program).parent.parent / "lib" / "ollama"
+    paths = [str(LINUX_SERVICE_FILE), program]
+    folders = [str(LINUX_DATA_DIR)] + ([str(libraries)] if libraries.is_dir() else [])
+    steps = ["systemctl stop ollama", "systemctl disable ollama",
+             "rm -f " + " ".join(map(shlex.quote, paths)), "rm -rf " + " ".join(map(shlex.quote, folders)),
+             "userdel ollama", "groupdel ollama 2>/dev/null",
+             "test ! -e " + shlex.quote(str(LINUX_SERVICE_FILE)) + " && test ! -e " + shlex.quote(program)]
+    return sudo + ["sh", "-c", "; ".join(steps)]
+
+
+def remove_ollama() -> list[str]:
+    """Ask whether to remove the Ollama that setup installed, and do it if the answer is yes. Returns the problems."""
+    command = ollama_removal_command()
+    if command is None:
+        print("\n  Imagent installed Ollama itself, and it was not removed. Remove it the way you would remove any program"
+              + (f" (on Linux: see the Uninstall section of {LINUX_DOCS})." if platform.system() == "Linux" else "."))
+        return []
+    shown = shlex.join(command)
+    print("\n  Imagent installed Ollama itself, and it is still on this computer.")
+    if platform.system() == "Linux":
+        print(f"  Removing it stops the Ollama service and deletes Ollama, its \"ollama\" user and everything in {LINUX_DATA_DIR},")
+        print("  including models you downloaded yourself. It asks for your password (sudo).")
+    print(f"  Command: {shown}")
+    if input("  Remove Ollama too? Type yes (anything else keeps it): ").strip().lower() != "yes":
+        print(f"  Ollama was kept. To remove it later: {shown}")
+        return []
+    if subprocess.run(command).returncode == 0:
+        print("  ✓ Removed Ollama")
+        return []
+    return [f"Could not remove Ollama. Remove it yourself with: {shown}"]
+
+
 # --- Entry point -------------------------------------------------------------------------
 
 def main() -> None:
@@ -326,6 +388,9 @@ def main() -> None:
                 sys.exit(f"\n{exc} Nothing was deleted.")
         print()
         problems = delete_everything(plan, base)
+
+    if plan["ollama_installed"]:  # after the block above, so a server started only for the models is stopped first
+        problems += remove_ollama()
 
     print()
     if problems:

@@ -398,3 +398,54 @@ CREATE INDEX IF NOT EXISTS idx_error_logs_stage ON error_logs(stage);
 
 -- Index on created_at to support time-range queries and chronological browsing of errors.
 CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
+
+
+-- ============================================================================
+-- TABLE: index_preferences
+--
+-- What: What the user chose at setup about the index (a single row).
+-- Why:  keep_deleted is how many deleted pictures' analyses are kept (see deleted_analyses); 0 keeps none.
+-- When: Written at the end of setup. No row means the question was not answered yet, and nothing is kept.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS index_preferences (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    keep_deleted INTEGER NOT NULL CHECK (keep_deleted >= 0)
+);
+
+
+-- ============================================================================
+-- TABLE: deleted_analyses
+--
+-- What: The analysis of pictures whose file was deleted, one row per picture (by its pixel hash), newest deletions only.
+-- Why:  A picture that comes back later (copied, restored from a backup, moved into a folder added later) is recognised by its
+--       pixels and gets this analysis again, so the vision model does not have to look at it a second time.
+-- When: A row is added by a scan that finds an indexed image gone (the image_data row is deleted); at most
+--       index_preferences.keep_deleted rows are kept, the oldest deletions first to go. A row is removed when it is used again.
+--       Search never reads it. Only what an analysis is made of is kept: no path, no file hash, no EXIF, no GPS.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS deleted_analyses (
+    -- SHA-256 of the picture's pixels (see image_data.pixel_hash).
+    pixel_hash TEXT PRIMARY KEY,
+
+    -- The same columns as image_data, with the same meaning.
+    short_description TEXT,
+    description TEXT,
+    vlm_metadata_json TEXT NOT NULL,
+    metadata_version INTEGER NOT NULL,
+    vlm_model TEXT,
+    vlm_digest TEXT,
+    prompt_hash TEXT,
+    schema_hash TEXT,
+    search_text_version INTEGER,
+    ocr_version TEXT,
+    ollama_version TEXT,
+    app_version TEXT,
+
+    -- The same columns as text_embeddings.
+    embedding BLOB NOT NULL,
+    embedding_model TEXT,
+    embedding_digest TEXT,
+    embedding_dim INTEGER,
+
+    deleted_at DATETIME NOT NULL
+);

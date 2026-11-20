@@ -15,7 +15,8 @@ import ollama
 
 from imagent import config
 from imagent.commands import scan
-from imagent.db.operations import get_backlog, get_exhausted_backlog, get_or_add_root, upsert_backlog
+from imagent.db.operations import (delete_images, get_backlog, get_exhausted_backlog, get_or_add_root, keep_analyses_of,
+                                    upsert_backlog)
 from tests.support import IsolatedHome
 from imagent.image_processing.hashing import compute_pixel_hash
 from imagent.image_processing.problems import BUSY, TOO_LARGE, UNREADABLE, ImageProblem, problem
@@ -124,6 +125,105 @@ class IndexedRecordTests(IsolatedHome):
         scan.index_image(self.conn, object(), self.settings, self.root_id, image)
         self.assertEqual(self.stored(image)["pixel_hash"], compute_pixel_hash(str(image)))
 
+    VERSIONS = {"vlm_digest": "v1", "prompt_hash": "p1", "schema_hash": "s1", "search_text_version": 1, "ocr_version": "o1",
+                "embedding_digest": "e1", "ollama_version": "0.1", "app_version": "1.0"}
+
+    def copy_with_other_bytes(self, source, target):
+        """The same pixels in another file: another name, and a text chunk the first does not have."""
+        from PIL import Image, PngImagePlugin
+        info = PngImagePlugin.PngInfo()
+        info.add_text("Comment", "edited metadata")
+        Image.open(source).save(target, pnginfo=info)
+        return target
+
+    def index_with(self, image, versions):
+        settings = {**self.settings, "versions": versions}
+        return scan.index_image(self.conn, object(), settings, self.root_id, image)
+
+    def test_the_analysis_of_the_same_pixels_in_another_file_is_used_again(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        second = self.copy_with_other_bytes(first, self.work / "b.png")
+        self.assertEqual(self.index_with(first, self.VERSIONS), ("indexed", "A cat."))
+        self.assertEqual(self.index_with(second, self.VERSIONS)[0], "indexed")
+        self.analyse.assert_called_once()  # the second picture was not analysed
+        one, two = self.stored(first), self.stored(second)
+        self.assertNotEqual(one["hash"], two["hash"])  # it is its own file, with its own facts
+        self.assertEqual((two["pixel_hash"], two["file_size"]), (one["pixel_hash"], os.stat(second).st_size))
+        for column in ("short_description", "description", "vlm_metadata_json", "vlm_digest", "prompt_hash", "schema_hash", "vlm_model"):
+            self.assertEqual(two[column], one[column], column)
+        rows = {row["file_id"]: bytes(row["embedding"]) for row in self.conn.execute("SELECT file_id, embedding FROM text_embeddings")}
+        self.assertEqual(rows[one["file_id"]], rows[two["file_id"]])
+
+    def test_the_analysis_is_not_used_again_when_it_was_made_with_another_version(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        self.index_with(first, self.VERSIONS)
+        for number, changed in enumerate(({"vlm_digest": "v2"}, {"prompt_hash": "p2"}, {"embedding_digest": "e2"}, {"ocr_version": "o2"})):
+            copy = self.copy_with_other_bytes(first, self.work / f"copy{number}.png")  # a new file each time: one indexed is skipped
+            self.analyse.reset_mock()
+            self.index_with(copy, {**self.VERSIONS, **changed})
+            self.analyse.assert_called_once()
+
+    def delete_first_keeping_its_analysis(self, first):
+        """What a scan does when it finds ``first`` deleted, with the user having chosen to keep deleted pictures' analyses."""
+        with self.conn:
+            ids = [self.stored(first)["file_id"]]
+            keep_analyses_of(self.conn, ids, 10)
+            delete_images(self.conn, ids)
+        first.unlink()
+
+    def test_the_kept_analysis_of_a_deleted_picture_is_used_when_it_comes_back(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        again = self.copy_with_other_bytes(first, self.work / "back.png")
+        self.index_with(first, self.VERSIONS)
+        original = self.stored(first)
+        self.delete_first_keeping_its_analysis(first)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deleted_analyses").fetchone()[0], 1)
+        self.analyse.reset_mock()
+        self.assertEqual(self.index_with(again, self.VERSIONS), ("indexed", "A cat."))
+        self.analyse.assert_not_called()
+        for column in ("short_description", "description", "vlm_metadata_json", "vlm_digest", "prompt_hash"):
+            self.assertEqual(self.stored(again)[column], original[column], column)
+        self.assertIsNotNone(self.conn.execute("SELECT 1 FROM text_embeddings WHERE file_id = ?", (self.stored(again)["file_id"],)).fetchone())
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deleted_analyses").fetchone()[0], 0)  # it is a live picture again
+
+    def test_a_kept_analysis_made_with_another_version_is_not_used_and_stays_kept(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        again = self.copy_with_other_bytes(first, self.work / "back.png")
+        self.index_with(first, self.VERSIONS)
+        self.delete_first_keeping_its_analysis(first)
+        self.analyse.reset_mock()
+        self.index_with(again, {**self.VERSIONS, "prompt_hash": "p2"})
+        self.analyse.assert_called_once()
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deleted_analyses").fetchone()[0], 1)
+
+    def test_the_analysis_is_not_used_again_when_the_versions_are_not_known(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        second = self.copy_with_other_bytes(first, self.work / "b.png")
+        self.index_with(first, {})
+        self.index_with(second, {})
+        self.assertEqual(self.analyse.call_count, 2)
+
+    def test_another_picture_is_analysed_even_with_a_similar_one_indexed(self):
+        self.index_with(self.make_image(self.work / "a.png", shade=3), self.VERSIONS)
+        self.index_with(self.make_image(self.work / "b.png", shade=4), self.VERSIONS)
+        self.assertEqual(self.analyse.call_count, 2)
+
+    def test_a_file_that_changed_before_the_reused_analysis_is_stored_is_not_stored(self):
+        first = self.make_image(self.work / "a.png", shade=3)
+        second = self.copy_with_other_bytes(first, self.work / "b.png")
+        self.index_with(first, self.VERSIONS)
+        original = scan._analysis_of_same_pixels
+
+        def edited_meanwhile(*args, **kwargs):
+            found = original(*args, **kwargs)
+            later = os.stat(second).st_mtime + 100
+            os.utime(second, (later, later))
+            return found
+
+        with mock.patch.object(scan, "_analysis_of_same_pixels", edited_meanwhile), self.assertRaises(ImageProblem):
+            self.index_with(second, self.VERSIONS)
+        self.assertIsNone(self.stored(second))
+
     def test_a_picture_pillow_cannot_read_is_stored_without_one(self):
         image = self.work / "a.xyz"
         image.write_bytes(b"not a picture Pillow knows")  # analysed through a converted copy, which is mocked here
@@ -162,6 +262,7 @@ class RunTests(IsolatedHome):
         for target, replacement in (
             ("check_ready", mock.Mock(return_value=(object(), settings))),
             ("unload_model", mock.Mock()),
+            ("load_model", mock.Mock()),
             ("collect_versions", mock.Mock(return_value={})),
             ("Progress", mock.MagicMock()),
         ):

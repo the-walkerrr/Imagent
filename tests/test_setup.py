@@ -11,7 +11,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from imagent import config
-from imagent.db.operations import get_device_settings, set_device_settings
+from imagent.db.operations import get_device_settings, get_keep_deleted, set_device_settings
 from imagent.commands import setup
 from tests.support import DEVICE, IsolatedHome
 
@@ -397,3 +397,74 @@ class MeasureComputerTests(unittest.TestCase):
         self.assertIsNone(device)
         self.assertEqual(list(problems), ["vlm"])
         self.assertIn("RuntimeError: boom", problems["vlm"])
+
+
+class KeepDeletedQuestionTests(IsolatedHome):
+    """The question at the end of setup: how many deleted pictures Imagent remembers."""
+
+    def answers(self, *given):
+        """Answer the questions in turn; ``questions`` collects what was asked (the question objects are built, not shown)."""
+        self.questions = []
+
+        def ask(question):
+            self.questions.append(question)
+            return given[len(self.questions) - 1]
+
+        patcher = mock.patch.object(setup, "ask", side_effect=ask)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        output = mock.patch.object(setup, "say")
+        self.said = output.start()
+        self.addCleanup(output.stop)
+        step = mock.patch.object(setup, "step")
+        step.start()
+        self.addCleanup(step.stop)
+
+    def stored(self):
+        conn = self.connect()
+        try:
+            return get_keep_deleted(conn)
+        finally:
+            conn.close()
+
+    def test_the_choices_are_the_offered_numbers_and_one_to_type_in(self):
+        self.answers(500)
+        self.assertEqual(setup.ask_keep_deleted(), 500)
+        self.assertEqual(setup.KEEP_DELETED_CHOICES, (100, 500, 1000, 2000))
+
+    def test_a_number_can_be_typed_in(self):
+        self.answers(setup.ENTER_A_NUMBER, " 250 ")
+        self.assertEqual(setup.ask_keep_deleted(), 250)
+        self.assertEqual(len(self.questions), 2)
+
+    def test_zero_remembers_none_and_other_text_is_refused(self):
+        self.assertTrue(setup._validate_keep_deleted("0"))
+        for refused in ("", "-1", "ten", "1.5"):
+            self.assertIsInstance(setup._validate_keep_deleted(refused), str, refused)
+
+    def test_the_explanation_says_why_remembering_helps(self):
+        self.answers(100)
+        setup.ask_keep_deleted()
+        text = " ".join(call.args[0] for call in self.said.call_args_list)
+        self.assertIn("does not have to be analysed again", text)
+        self.assertIn("oldest are forgotten first", text)
+
+    def test_the_answer_is_stored(self):
+        self.answers(2000)
+        setup.choose_keep_deleted()
+        self.assertEqual(self.stored(), 2000)
+
+    def test_an_answer_given_before_is_kept_unless_the_user_wants_to_change_it(self):
+        self.answers(2000)
+        setup.choose_keep_deleted()
+        self.answers(False)  # "Change it?" no
+        setup.choose_keep_deleted()
+        self.assertEqual((self.stored(), len(self.questions)), (2000, 1))
+        self.answers(True, 100)  # "Change it?" yes, then the new number
+        setup.choose_keep_deleted()
+        self.assertEqual(self.stored(), 100)
+
+    def test_zero_is_stored_as_remembering_none(self):
+        self.answers(setup.ENTER_A_NUMBER, "0")
+        setup.choose_keep_deleted()
+        self.assertEqual(self.stored(), 0)

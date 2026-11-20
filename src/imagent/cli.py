@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="find pictures by describing them", description="Show the pictures that best match a description.")
     search.add_argument("query", nargs="*", help="what to look for, for example: red car at night. "
                                                  "Leave it out to keep searching until you type exit")
-    search.add_argument("--full", action="store_true", help="also show each picture's full description, location and folder")
+    search.add_argument("--full", action="store_true", help="show each picture's full description instead of its one-line summary")
 
     scan = commands.add_parser("scan", help="scan the folders you added and index their pictures",
                                description="Scan every folder you added for new or changed pictures, then index them. "
@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("failed", help="list the pictures that could not be indexed",
                         description="List the pictures that could not be indexed, with the reason for each.")
+    commands.add_parser("forget", help="forget the deleted pictures Imagent remembers",
+                        description="Delete what Imagent remembers about pictures that were deleted (their descriptions and search data), after two confirmations. "
+                                    "Your indexed pictures are not touched.")
     commands.add_parser("setup", help="choose the models and prepare this computer (once)",
                         description="Check Ollama, download and lock the three models, and measure this computer. "
                                     "Run it once after installing. Run again, it shows the models and restores a missing one.")
@@ -58,6 +61,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "failed":
         from imagent.commands import failed
         run_cli(failed.main)
+    elif args.command == "forget":
+        from imagent.commands import forget
+        run_cli(forget.main, cancelled=forget.CANCELLED)
     elif args.command == "setup":
         from imagent.commands import setup
         run_cli(setup.main, cancelled=setup.CANCELLED)

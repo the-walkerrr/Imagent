@@ -23,7 +23,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MIN_SQLITE_VERSION = (3, 24, 0)
 
 # The version of the schema in schema.sql. Raise it, and add the steps to _MIGRATIONS, with every schema change.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Version 1 is the schema of databases made before versions were recorded (user_version 0 with tables).
 # _MIGRATIONS[n] holds the statements that turn version n - 1 into version n.
@@ -51,6 +51,33 @@ _MIGRATIONS: dict[int, list[str]] = {
     # 4: whether the vision and embedding models fit in memory together.
     4: [
         "ALTER TABLE device_settings ADD COLUMN one_model_at_a_time INTEGER CHECK (one_model_at_a_time IN (0, 1))",
+    ],
+    # 5: how many deleted pictures' analyses are kept, and those analyses.
+    5: [
+        """CREATE TABLE IF NOT EXISTS index_preferences (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            keep_deleted INTEGER NOT NULL CHECK (keep_deleted >= 0)
+        )""",
+        """CREATE TABLE IF NOT EXISTS deleted_analyses (
+            pixel_hash TEXT PRIMARY KEY,
+            short_description TEXT,
+            description TEXT,
+            vlm_metadata_json TEXT NOT NULL,
+            metadata_version INTEGER NOT NULL,
+            vlm_model TEXT,
+            vlm_digest TEXT,
+            prompt_hash TEXT,
+            schema_hash TEXT,
+            search_text_version INTEGER,
+            ocr_version TEXT,
+            ollama_version TEXT,
+            app_version TEXT,
+            embedding BLOB NOT NULL,
+            embedding_model TEXT,
+            embedding_digest TEXT,
+            embedding_dim INTEGER,
+            deleted_at DATETIME NOT NULL
+        )""",
     ],
 }
 

@@ -87,6 +87,11 @@ def record_pinned_model(pinned: str, base: str) -> None:
     save_install_record({**record, "ollama_models": models, "pinned_models": {**pins, pinned: base}})
 
 
+def record_ollama_installed() -> None:
+    """Note that setup installed Ollama itself (it was missing), so the uninstaller can tell you how to remove it."""
+    save_install_record({**load_install_record(), "ollama_installed": True})
+
+
 # User preferences written by imagent setup.
 OLLAMA_HOST: str = load_config().get("ollama_host", "")
 

@@ -37,19 +37,23 @@ from PIL import Image
 from imagent import config
 from imagent.db.connection import describe_db_error, init_db
 from imagent.db.operations import (
+    REUSED_COLUMNS,
     VERSION_COLUMNS,
     StoredImage,
     add_failure_history,
     delete_backlog,
     delete_backlog_paths,
     delete_images,
+    find_analysis_by_pixels,
     get_backlog,
     get_backlog_paths_for_root,
     get_exhausted_backlog,
     get_exif_fields,
+    get_keep_deleted,
     get_or_add_root,
     images_by_path,
     images_outside_root,
+    keep_analyses_of,
     list_roots,
     lookup_by_path,
     mark_root_scanned,
@@ -63,6 +67,7 @@ from imagent.db.operations import (
     upsert_backlog,
     upsert_image_data,
     upsert_text_embedding,
+    use_deleted_analysis,
 )
 from imagent.image_processing import ocr
 from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
@@ -76,13 +81,13 @@ from imagent.pipeline.error_messages import describe
 from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.failure import IndexingFailure, RunStopped
 from imagent.pipeline.locking import AlreadyRunning, single_instance
-from imagent.pipeline.progress import Progress
+from imagent.pipeline.progress import Progress, format_duration
 from imagent.pipeline.serialisation import serialize_embedding
 from imagent.pipeline.versions import collect_versions, model_versions
 from imagent.pipeline.validation import find_overlapping_root, validate_folder
 from imagent.text_processing.formatters import build_description, build_search_text
 from imagent.vlm.analyzer import OUT_OF_MEMORY, SERVER_CRASH, TIMEOUT, analyse_image, embed_search_text
-from imagent.vlm.client import NotReady, check_ready, make_client, unload_model
+from imagent.vlm.client import NotReady, check_ready, load_model, make_client, unload_model
 
 try:
     import questionary
@@ -207,6 +212,29 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     # Stage 2: metadata_extraction — VLM analysis
     # ------------------------------------------------------------------
     pipeline_start = time.perf_counter()
+    pixel_hash, source = _analysis_of_same_pixels(conn, settings, path_str)
+    if source is not None:  # the same picture is indexed already, whatever its name and metadata: its analysis is used again
+        on_stage("reusing the analysis of the same picture")
+        pixel_hash = _pixel_hash_for_record(path_str, modified_at, pixel_hash)  # also checks the file did not change meanwhile
+        record = {
+            "root_id": root_id,
+            "file_path": path_str,
+            "hash": file_hash,
+            "pixel_hash": pixel_hash,
+            **{column: source[column] for column in REUSED_COLUMNS},
+            **file_meta,
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "processing_time_ms": int((time.perf_counter() - pipeline_start) * 1000),
+        }
+        on_stage("saving")
+        with conn:
+            file_id = upsert_image_data(conn, record)
+            upsert_text_embedding(conn, file_id, source["embedding"], settings["embedding_model"], source["embedding_digest"],
+                                  source["embedding_dim"])
+            if source["from_deleted"]:  # the picture is indexed again: its kept analysis is no longer one of a deleted picture
+                use_deleted_analysis(conn, pixel_hash)
+        return ("updated" if is_update else "indexed"), source["short_description"]
+
     analysis = analyse_image(client, settings["vlm_model"], path_str, on_stage, on_retry)
 
     # ------------------------------------------------------------------
@@ -229,7 +257,7 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     embedding_bytes = serialize_embedding(embedding)
     elapsed_ms = int((time.perf_counter() - pipeline_start) * 1000)
 
-    pixel_hash = _pixel_hash_for_record(path_str, modified_at)
+    pixel_hash = _pixel_hash_for_record(path_str, modified_at, pixel_hash)
 
     vlm_metadata_json = build_vlm_metadata_json(analysis)
     short_description = str(analysis.reply[config.SUMMARY_FIELD]).strip()
@@ -264,14 +292,36 @@ def index_image(conn, client: ollama.Client, settings: dict, root_id: int, image
     return ("updated" if is_update else "indexed"), short_description
 
 
-def _pixel_hash_for_record(path: str, modified_at: str) -> str | None:
-    """The pixel hash to store with an image that was just analysed (see ``compute_pixel_hash``), or None for a picture Pillow
-    cannot read, which was analysed through a converted copy: a scan then counts every change of such a file as an edit.
+def _analysis_of_same_pixels(conn, settings: dict, path: str) -> tuple[str | None, dict | None]:
+    """``(pixel hash, analysis)`` for the picture at ``path``: the analysis is that of another indexed image with the same pixels
+    (see ``find_analysis_by_pixels``), None when there is none, or when the picture's pixel hash or what an analysis made now
+    would be made with is not known. The pixel hash is None when it could not be told; it is not the last word on the picture:
+    ``_pixel_hash_for_record`` makes it final."""
+    versions = settings.get("versions", {})
+    wanted = {
+        "vlm_model": settings["vlm_model"], "vlm_digest": versions.get("vlm_digest"), "prompt_hash": versions.get("prompt_hash"),
+        "schema_hash": versions.get("schema_hash"), "search_text_version": versions.get("search_text_version"),
+        "ocr_version": versions.get("ocr_version"), "metadata_version": METADATA_VERSION,
+        "embedding_model": settings["embedding_model"], "embedding_digest": versions.get("embedding_digest"),
+        "embedding_dim": settings["embedding_dim"],
+    }
+    if any(value is None for value in wanted.values()):
+        return None, None
+    pixel_hash = _pixel_hash_or_none(path)  # a picture that cannot be hashed here is analysed, and its failure (if any) reported, as always
+    if pixel_hash is None:
+        return None, None
+    return pixel_hash, find_analysis_by_pixels(conn, pixel_hash, path, wanted)
+
+
+def _pixel_hash_for_record(path: str, modified_at: str, known: str | None = None) -> str | None:
+    """The pixel hash to store with an image that was just analysed (see ``compute_pixel_hash``; ``known`` is the one already
+    worked out, which saves reading the picture again), or None for a picture Pillow cannot read, which was analysed through a
+    converted copy: a scan then counts every change of such a file as an edit.
 
     Raises ``ImageProblem`` (``BUSY``, nothing held against the file) when the file changed since indexing began: its analysis
     would then belong to other pixels than the ones hashed here, and the next scan would not see that."""
     try:
-        pixel_hash = compute_pixel_hash(path)
+        pixel_hash = known or compute_pixel_hash(path)
     except Exception as exc:
         found = explain(exc, path)
         if found is None:
@@ -493,7 +543,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
     if root_ids is not None:
         backlog_rows = [row for row in backlog_rows if row["root_id"] in root_ids]
     total = len(backlog_rows)
-    print(f"Backlog  : {total} file(s) pending\n")
 
     if total == 0:
         print("Nothing to index.")
@@ -503,6 +552,7 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
 
     # Text in images is read by OCR. Without its models an image would be stored without its text and never
     # read again, so this is settled before the first image, not found out image by image.
+    print()
     print("Loading the text-reading (OCR) engine…")
     try:
         ocr.check_available()
@@ -510,6 +560,13 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
         conn.close()
         sys.exit(f"The text-reading (OCR) engine could not be loaded ({type(exc).__name__}: {exc}). "
                  f"Run: {config.SETUP_COMMAND}. Nothing was indexed; the backlog is kept.")
+    # The models load here, so the time of the first image is not the time of loading them. When setup found that the two do not
+    # fit in memory together, only the vision model is loaded: the embedding model comes after it, for each image (index_image).
+    print("Loading the vision and embedding models…")
+    load_model(client, settings["vlm_model"])
+    if not config.ONE_MODEL_AT_A_TIME:
+        load_model(client, settings["embedding_model"], embedding=True)
+    print()
 
     counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
     wall_start = time.perf_counter()
@@ -653,10 +710,10 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
     print(f"  Updated           : {counts['updated']}")
     print(f"  Skipped           : {counts['skipped']}")
     print(f"  Failed            : {counts['failed']}")
-    print(f"  Total elapsed     : {elapsed:.2f}s")
+    print(f"  Total elapsed     : {format_duration(elapsed, decimals=2)}")
     processed = counts["indexed"] + counts["updated"]
     if processed:
-        print(f"  Average per image : {elapsed / processed:.2f}s")
+        print(f"  Average per image : {format_duration(elapsed / processed, decimals=2)}")
     print(f"{'─' * 52}")
     if stopped:
         print(f"\n{stopped}")
@@ -1032,8 +1089,10 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
             gone = []
         stale_queue = [path for path in get_backlog_paths_for_root(conn, root_id)
                        if path not in on_disk and path not in away and not _inside(path, unseen)]
+        gone_ids = [stored[path].file_id for path in gone]
         with conn:
-            counts["deleted"] = delete_images(conn, [stored[path].file_id for path in gone])
+            keep_analyses_of(conn, gone_ids, get_keep_deleted(conn))  # what the user chose at setup: the analysis may be used again if the picture comes back
+            counts["deleted"] = delete_images(conn, gone_ids)
             delete_backlog_paths(conn, stale_queue)
 
         with conn:
@@ -1084,10 +1143,12 @@ def _scan_and_report(root: Path) -> None:
         ("Already indexed", counts["up_to_date"] + counts["moved"] + counts["details_updated"] + counts["renamed"]),
         ("To index", counts["queued_new"] + counts["queued_modified"]),
         ("Deleted files", counts["deleted"]),
-        ("Not in folder", counts["delete_blocked"]),
         ("Skipped", f"{skipped} ({why})" if why else skipped),
-    )
-    print(f"\n{root}")
+    )  # images kept after a declined mass deletion have no row: the note below explains them
+    bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ  # as in Progress
+    if bold:
+        os.system("")  # makes the Windows console understand ANSI escape codes
+    print(f"\n\033[1m{root}\033[0m" if bold else f"\n{root}")
     for label, value in states:
         print(f"  {label:<15} : {value}")
     if counts["delete_blocked"]:
@@ -1099,10 +1160,7 @@ def _scan_and_report(root: Path) -> None:
 
 
 def _scan_folders(roots: list[Path]) -> None:
-    """List the folders being scanned, scan each one and print what changed in it, then offer to index what is pending."""
-    print("Folders added, being scanned:")
-    for root in roots:
-        print(f"  {root}")
+    """Scan each folder and print what changed in it, then offer to index what is pending."""
     for root in roots:
         _scan_and_report(root)
     print()

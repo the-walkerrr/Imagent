@@ -228,6 +228,114 @@ def upsert_image_data(conn: sqlite3.Connection, record: dict) -> int:
     ).fetchone()["file_id"]
 
 
+REUSED_COLUMNS = ("short_description", "description", "vlm_metadata_json", "metadata_version", "vlm_model", *VERSION_COLUMNS)
+
+
+def find_analysis_by_pixels(conn: sqlite3.Connection, pixel_hash: str, file_path: str, wanted: dict) -> dict | None:
+    """The analysis of another picture with the same pixels (same ``pixel_hash``), if it was made exactly the way a new one
+    would be now, so that it can be used again instead of analysing the picture a second time; None when there is none.
+
+    The indexed images are looked at first, then the analyses kept of deleted ones (``deleted_analyses``).
+
+    ``wanted`` is what an analysis made now would be made with: ``vlm_model``, ``vlm_digest``, ``prompt_hash``, ``schema_hash``,
+    ``search_text_version``, ``ocr_version``, ``metadata_version``, ``embedding_model``, ``embedding_digest`` and ``embedding_dim``.
+    A value that is None (not known) matches nothing. The image at ``file_path`` itself is not a candidate; of the others the one
+    indexed most recently is used. Returns the ``REUSED_COLUMNS`` of its row, with its ``embedding``, ``embedding_digest`` and
+    ``embedding_dim``, and ``from_deleted``: whether it is a kept analysis of a deleted picture (``use_deleted_analysis`` then
+    takes it out of the table)."""
+    params = {**wanted, "pixel_hash": pixel_hash, "file_path": file_path}
+    row = conn.execute(
+        f"""
+        SELECT {', '.join('i.' + column for column in REUSED_COLUMNS)}, e.embedding, e.embedding_digest, e.embedding_dim, 0 AS from_deleted
+        FROM image_data i JOIN text_embeddings e ON e.file_id = i.file_id
+        WHERE i.pixel_hash = :pixel_hash AND i.file_path != :file_path
+          AND i.vlm_model = :vlm_model AND i.vlm_digest = :vlm_digest AND i.prompt_hash = :prompt_hash
+          AND i.schema_hash = :schema_hash AND i.search_text_version = :search_text_version AND i.ocr_version = :ocr_version
+          AND i.metadata_version = :metadata_version
+          AND e.embedding_model = :embedding_model AND e.embedding_digest = :embedding_digest AND e.embedding_dim = :embedding_dim
+        ORDER BY i.indexed_at DESC LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            f"""
+            SELECT {', '.join(REUSED_COLUMNS)}, embedding, embedding_digest, embedding_dim, 1 AS from_deleted
+            FROM deleted_analyses
+            WHERE pixel_hash = :pixel_hash
+              AND vlm_model = :vlm_model AND vlm_digest = :vlm_digest AND prompt_hash = :prompt_hash
+              AND schema_hash = :schema_hash AND search_text_version = :search_text_version AND ocr_version = :ocr_version
+              AND metadata_version = :metadata_version
+              AND embedding_model = :embedding_model AND embedding_digest = :embedding_digest AND embedding_dim = :embedding_dim
+            """,
+            params,
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# deleted_analyses, index_preferences
+# ---------------------------------------------------------------------------
+
+def get_keep_deleted(conn: sqlite3.Connection) -> int | None:
+    """How many deleted pictures' analyses the user chose to keep (0: none), or None when the question was not answered yet."""
+    row = conn.execute("SELECT keep_deleted FROM index_preferences WHERE id = 1").fetchone()
+    return None if row is None else row["keep_deleted"]
+
+
+def set_keep_deleted(conn: sqlite3.Connection, keep: int) -> None:
+    """Store how many deleted pictures' analyses to keep, and forget the oldest ones beyond it."""
+    conn.execute("INSERT OR REPLACE INTO index_preferences (id, keep_deleted) VALUES (1, ?)", (keep,))
+    _prune_deleted_analyses(conn, keep)
+
+
+def _prune_deleted_analyses(conn: sqlite3.Connection, keep: int) -> None:
+    conn.execute(
+        "DELETE FROM deleted_analyses WHERE pixel_hash NOT IN "
+        "(SELECT pixel_hash FROM deleted_analyses ORDER BY deleted_at DESC, rowid DESC LIMIT ?)",
+        (keep,),
+    )
+
+
+def keep_analyses_of(conn: sqlite3.Connection, file_ids: list[int], keep: int | None) -> None:
+    """Keep the analysis of the images ``file_ids`` (about to be deleted) in ``deleted_analyses``, the newest ``keep`` deletions
+    in all. Nothing is kept when ``keep`` is None (not chosen yet) or 0, and an image without a pixel hash is not kept: it could
+    not be found again. Call it before ``delete_images``, in the same transaction."""
+    if not keep:
+        return
+    now = _now()
+    columns = ", ".join(REUSED_COLUMNS)
+    for start in range(0, len(file_ids), _CHUNK):
+        chunk = file_ids[start:start + _CHUNK]
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO deleted_analyses
+                (pixel_hash, {columns}, embedding, embedding_model, embedding_digest, embedding_dim, deleted_at)
+            SELECT i.pixel_hash, {', '.join('i.' + column for column in REUSED_COLUMNS)},
+                   e.embedding, e.embedding_model, e.embedding_digest, e.embedding_dim, ?
+            FROM image_data i JOIN text_embeddings e ON e.file_id = i.file_id
+            WHERE i.pixel_hash IS NOT NULL AND i.file_id IN ({", ".join("?" for _ in chunk)})
+            """,
+            [now, *chunk],
+        )
+    _prune_deleted_analyses(conn, keep)
+
+
+def count_deleted_analyses(conn: sqlite3.Connection) -> int:
+    """How many deleted pictures' analyses are kept."""
+    return conn.execute("SELECT COUNT(*) FROM deleted_analyses").fetchone()[0]
+
+
+def clear_deleted_analyses(conn: sqlite3.Connection) -> int:
+    """Forget every kept analysis of a deleted picture (the user's choice of how many to keep is left as it is). Returns how many were forgotten."""
+    return conn.execute("DELETE FROM deleted_analyses").rowcount
+
+
+def use_deleted_analysis(conn: sqlite3.Connection, pixel_hash: str) -> None:
+    """Take a kept analysis out of ``deleted_analyses``: its picture is indexed again, so it is no longer a deleted one."""
+    conn.execute("DELETE FROM deleted_analyses WHERE pixel_hash = ?", (pixel_hash,))
+
+
 def update_image_location(conn: sqlite3.Connection, file_id: int, root_id: int, file_path: str, modified_at: str) -> None:
     """Point an already-indexed image at its new path, under ``root_id`` (a move or rename of the same picture)."""
     conn.execute(

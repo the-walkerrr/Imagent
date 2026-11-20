@@ -9,7 +9,7 @@ from unittest import mock
 from PIL import Image, PngImagePlugin
 
 from imagent.commands import scan
-from imagent.db.operations import get_backlog, get_or_add_root, images_by_path, list_roots
+from imagent.db.operations import get_backlog, get_or_add_root, images_by_path, list_roots, set_keep_deleted
 from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
 from imagent.pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed
@@ -513,15 +513,15 @@ class ScanCommandTests(ScanBase):
             self._call(scan.main)
         self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
 
-    def test_scan_lists_the_folders_then_scans_all_of_them(self):
+    def test_scan_reports_every_folder_without_listing_them_first(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()
         self._index(first, ["a.png", "b.png"])
         self._index(second, ["c.png"])
         self.make_image(second / "d.png", 4)
         report, _, _ = self._call(scan.main)
-        self.assertIn("Folders added, being scanned:", report)
+        self.assertNotIn("Folders added", report)
         for folder in (first, second):
-            self.assertLess(report.index(f"  {folder}"), report.index(f"\n{folder}\n"))
+            self.assertNotIn(f"  {folder}", report)  # each folder is named once, as its report's heading
         self.assertEqual(report.count("Already indexed :"), 2)
         self.assertIn(f"\n{first}\n  Already indexed : 2\n  To index        : 0", report)
         self.assertIn(f"\n{second}\n  Already indexed : 1\n  To index        : 1", report)  # d.png
@@ -532,7 +532,6 @@ class ScanCommandTests(ScanBase):
         report, _, _ = self._call(scan.main)
         self.assertIn(f"Skipping {second}", report)
         self.assertEqual(report.count("Already indexed :"), 1)
-
     def test_scan_indexes_the_whole_backlog_when_the_user_agrees(self):
         self._scan_two_folders()
         _, run, yes_no = self._call(scan.main, answer=True)
@@ -608,11 +607,32 @@ class ScanReportTests(ScanBase):
         self.assertIn(f"\n{root}\n  Already indexed : 0\n", report)  # a state with no files is shown too
         self.assertIn("  To index        : 2\n", report)
         self.assertIn("  Skipped         : 0\n", report)  # no reasons when nothing was skipped
-        labels = ("Already indexed", "To index", "Deleted files", "Not in folder", "Skipped")
+        labels = ("Already indexed", "To index", "Deleted files", "Skipped")
         positions = [report.index(f"  {label:<15} :") for label in labels]
         self.assertEqual(positions, sorted(positions))
-        for gone in ("Root", "Up to date", "Removed", "Not found", "Unreadable", "Note:"):
+        for gone in ("Root", "Up to date", "Removed", "Not found", "Not in folder", "Unreadable", "Note:"):
             self.assertNotIn(gone, report)
+
+    def test_the_folder_name_is_bold_on_a_terminal_only(self):
+        import contextlib
+        import io
+        root = (self.work / "pictures").resolve()
+        self.make_image(root / "a.png", 1)
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        for no_color, bold in ((False, True), (True, False)):
+            out = Terminal()
+            with mock.patch.dict(os.environ, {"TERM": "xterm"}), contextlib.redirect_stdout(out), \
+                    mock.patch.object(scan.os, "system"), mock.patch.object(scan, "_ask_yes_no", return_value=False):
+                os.environ.pop("NO_COLOR", None)
+                if no_color:
+                    os.environ["NO_COLOR"] = "1"
+                scan.add(str(root))
+            self.assertEqual(f"\n\033[1m{root}\033[0m\n" in out.getvalue(), bold)
+        self.assertIn(f"\n{root}\n  Already indexed", self._report(root))  # not a terminal: plain
 
     def test_deleted_files_are_reported_when_there_are_some(self):
         root = (self.work / "pictures").resolve()  # main() stores the resolved path
@@ -647,7 +667,7 @@ class ScanReportTests(ScanBase):
         for name in names[:10]:
             (root / name).unlink()
         report = self._report(root)  # the user answers no to deleting them
-        self.assertIn("Not in folder   : 10\n", report)
+        self.assertNotIn("Not in folder", report)  # no row: the note explains them
         self.assertIn("Deleted files   : 0\n", report)
         self.assertIn("Note: 10 image(s) are no longer in this folder.", report)
         for case in ("Moved them?", "Drive unplugged?", "Deleted them?"):
@@ -667,5 +687,89 @@ class ScanReportTests(ScanBase):
             scan.add(str(root))
         report = out.getvalue()
         self.assertIn("Deleted files   : 10\n", report)
-        self.assertIn("Not in folder   : 0\n", report)
         self.assertNotIn("Note:", report)
+
+
+class KeepDeletedTests(ScanBase):
+    """What a scan keeps of the images it finds deleted: their analyses, as many as the user chose at setup."""
+
+    def _analysed(self) -> None:
+        """Give every indexed image an analysis and an embedding, which a finished index run would have stored."""
+        conn = self.connect()
+        with conn:
+            conn.execute("UPDATE image_data SET description = 'd', short_description = 's', metadata_version = 1, vlm_model = 'v', "
+                         "vlm_digest = 'vd', prompt_hash = 'p', schema_hash = 's', search_text_version = 1, ocr_version = 'o'")
+            conn.execute("INSERT INTO text_embeddings(file_id, embedding, embedding_model, embedding_digest, embedding_dim) "
+                         "SELECT file_id, x'0000', 'e', 'ed', 2 FROM image_data")
+
+    def _keep(self, number: int | None) -> None:
+        if number is not None:
+            conn = self.connect()
+            with conn:
+                set_keep_deleted(conn, number)
+
+    def _kept(self) -> list[str]:
+        return [row[0] for row in self.connect().execute("SELECT pixel_hash FROM deleted_analyses ORDER BY deleted_at, rowid")]
+
+    def _pictures(self, keep: int | None):
+        root = self.work / "pictures"
+        self._index(root, ["a.png", "b.png", "c.png"])  # one is always left: a folder that shows nothing is not wiped unasked
+        self._analysed()
+        self._keep(keep)
+        return root, {name: compute_pixel_hash(str(root / name)) for name in ("a.png", "b.png", "c.png")}
+
+    def test_the_analysis_of_a_deleted_picture_is_kept_by_its_pixels(self):
+        root, pixels = self._pictures(keep=5)
+        (root / "a.png").unlink()
+        self.assertEqual(scan.scan(root)["deleted"], 1)
+        self.assertEqual(self._kept(), [pixels["a.png"]])
+        row = self.connect().execute("SELECT description, vlm_digest, embedding_digest, embedding_dim FROM deleted_analyses").fetchone()
+        self.assertEqual(tuple(row), ("d", "vd", "ed", 2))
+
+    def test_nothing_is_kept_before_the_user_chose(self):
+        root, _ = self._pictures(keep=None)
+        (root / "a.png").unlink()
+        scan.scan(root)
+        self.assertEqual(self._kept(), [])
+
+    def test_nothing_is_kept_when_the_user_chose_none(self):
+        root, _ = self._pictures(keep=0)
+        (root / "a.png").unlink()
+        scan.scan(root)
+        self.assertEqual(self._kept(), [])
+
+    def test_only_the_newest_deletions_up_to_the_chosen_number_are_kept(self):
+        root, pixels = self._pictures(keep=1)
+        (root / "a.png").unlink()
+        scan.scan(root)
+        (root / "b.png").unlink()
+        scan.scan(root)
+        self.assertEqual(self._kept(), [pixels["b.png"]])
+
+    def test_choosing_fewer_forgets_the_oldest_at_once(self):
+        root, pixels = self._pictures(keep=5)
+        (root / "a.png").unlink()
+        scan.scan(root)
+        (root / "b.png").unlink()
+        scan.scan(root)
+        self.assertEqual(self._kept(), [pixels["a.png"], pixels["b.png"]])
+        self._keep(1)
+        self.assertEqual(self._kept(), [pixels["b.png"]])
+        self._keep(0)
+        self.assertEqual(self._kept(), [])
+
+    def test_a_picture_without_a_pixel_hash_is_not_kept(self):
+        root, _ = self._pictures(keep=5)
+        conn = self.connect()
+        with conn:
+            conn.execute("UPDATE image_data SET pixel_hash = NULL")
+        (root / "a.png").unlink()
+        scan.scan(root)
+        self.assertEqual(self._kept(), [])
+
+    def test_a_picture_that_was_moved_is_not_kept_as_deleted(self):
+        root, _ = self._pictures(keep=5)
+        (root / "a.png").rename(root / "renamed.png")
+        counts = scan.scan(root)
+        self.assertEqual((counts["renamed"], counts["deleted"]), (1, 0))
+        self.assertEqual(self._kept(), [])

@@ -43,7 +43,8 @@ class MigrationTests(IsolatedHome):
     def test_new_database_gets_the_latest_schema(self):
         conn = self.connect()
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertTrue({"image_data", "backlog", "text_embeddings", "scan_roots", "model_settings"} <= _tables(conn))
+        self.assertTrue({"image_data", "backlog", "text_embeddings", "scan_roots", "model_settings", "index_preferences",
+                         "deleted_analyses"} <= _tables(conn))
         self.assertFalse({"image_search_fts", "image_text_fts"} & _tables(conn))
 
     def test_opening_twice_changes_nothing(self):
@@ -74,6 +75,7 @@ class MigrationTests(IsolatedHome):
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         self.assertFalse({"image_search_fts", "image_text_fts", "trg_image_data_delete_fts"} & _tables(conn))
         self.assertEqual(conn.execute("SELECT file_path FROM image_data").fetchone()[0], "/pictures/a.jpg")
+        self.assertTrue({"index_preferences", "deleted_analyses"} <= _tables(conn))
 
     def test_a_failing_migration_changes_nothing(self):
         self._old_database()
