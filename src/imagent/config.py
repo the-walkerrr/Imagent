@@ -13,7 +13,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _data_dir() -> Path:
-    """Per-user folder for the database and config.json, following each OS's convention.
+    """Per-user folder for the database and config.json: ``~/.imagent`` on every OS.
 
     It must be on a local disk: SQLite's WAL mode is not safe on network drives.
     """
@@ -21,12 +21,7 @@ def _data_dir() -> Path:
         home = Path.home()
     except (RuntimeError, KeyError):  # no HOME / user profile, as in some containers and services
         raise SystemExit("Error: cannot find your home folder, where Imagent keeps its data.")
-    system = platform.system()
-    if system == "Darwin":
-        return home / "Library" / "Application Support" / "Imagent"
-    if system == "Windows":
-        return home / "AppData" / "Local" / "Imagent"  # Local, not Roaming: the database must not sync between PCs
-    return home / ".local" / "share" / "imagent"  # Linux and other Unix systems
+    return home / ".imagent"
 
 
 IMAGENT_HOME: Path = _data_dir()
@@ -121,25 +116,56 @@ def installed_tools() -> list[dict]:
 
 # --- Ollama program ------------------------------------------------------------
 # The Ollama that setup installs when the computer has none (or an older one than Imagent needs): the official standalone build
-# for this OS and CPU, from Ollama's own release, pinned to one version and checked against these SHA-256 sums.
-# Running it needs no administrator rights and no change to PATH, and removing it is deleting its folder.
+# for this OS and CPU, from Ollama's own release, pinned to one version. The release lists the SHA-256 of every file in its
+# sha256sum.txt; that list is checked against the one sum pinned here, so the file names and their sums are read from the list
+# and none of them is written in this code. Running it needs no administrator rights and no change to PATH, and removing it is
+# deleting its folder.
 OLLAMA_VERSION = "0.40.17"
+OLLAMA_MANIFEST_SHA256 = "dc2f480e48d4f8dfd37d127e6a54347cf7f3fd80a52beb1e1ca611d47bdf4dcd"  # of sha256sum.txt in that release
+OLLAMA_MANIFEST = "sha256sum.txt"
 OLLAMA_RELEASE_URL = "https://github.com/ollama/ollama/releases/download/v{version}/{file}"
-OLLAMA_DOWNLOADS: dict = {  # (system, cpu) -> (file name, sha256)
-    ("Darwin", "arm64"): ("ollama-darwin.tgz", "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653"),
-    ("Darwin", "x86_64"): ("ollama-darwin.tgz", "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653"),
-    ("Linux", "x86_64"): ("ollama-linux-amd64.tar.zst", "1df9d6228bac5a22e420b242708c0d10e5b886db97bab99d446a41760f4e79af"),
-    ("Linux", "arm64"): ("ollama-linux-arm64.tar.zst", "0ec632480057cef6300459d1fa7dbbb3fc188b9a7d56cd0b0a72d05927d90ecc"),
-    ("Windows", "x86_64"): ("ollama-windows-amd64.zip", "3dd80f6e3a9699f2eadf4ac418f00529cee594df9557541806eda1f1f3f5588a"),
-    ("Windows", "arm64"): ("ollama-windows-arm64.zip", "f5eab93c7e6dca27f47d556489fa89f760979c6f6f83e0bf1cb26d38630ce83a"),
-}
+OLLAMA_ARCHIVE_ENDINGS = (".tgz", ".tar.zst", ".zip")
 
 
-def ollama_download() -> tuple[str, str, str] | None:
-    """(url, file name, sha256) of the Ollama build for this computer, or None when there is none for its OS or CPU."""
-    cpu = {"amd64": "x86_64", "aarch64": "arm64"}.get(platform.machine().lower(), platform.machine().lower())
-    entry = OLLAMA_DOWNLOADS.get((platform.system(), cpu))
-    return (OLLAMA_RELEASE_URL.format(version=OLLAMA_VERSION, file=entry[0]), entry[0], entry[1]) if entry else None
+def ollama_release_url(file: str) -> str:
+    return OLLAMA_RELEASE_URL.format(version=OLLAMA_VERSION, file=file)
+
+
+def ollama_build_prefix() -> str | None:
+    """The start of the file names of Ollama's build for this OS and CPU (``ollama-linux-amd64``), or None when it has none.
+    The macOS build is one file for both CPUs, so its name has no CPU in it."""
+    system = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}.get(platform.system())
+    cpu = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine().lower())
+    if system is None or cpu is None:
+        return None
+    return "ollama-darwin" if system == "darwin" else f"ollama-{system}-{cpu}"
+
+
+def ollama_checksums(manifest: str) -> dict:
+    """File name -> SHA-256 from the text of a release's sha256sum.txt (lines like ``<sum>  ./<name>``)."""
+    sums = {}
+    for line in manifest.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and len(parts[0]) == 64 and all(c in "0123456789abcdef" for c in parts[0].lower()):
+            sums[parts[1].strip().lstrip("*").removeprefix("./")] = parts[0].lower()
+    return sums
+
+
+def ollama_downloads(manifest: str, extras: tuple[str, ...] = ()) -> list[tuple[str, str, str]]:
+    """(url, file name, sha256) of every file to install, from the text of the release's sha256sum.txt: the build for this computer
+    first, then the extra file of each name in ``extras`` (``rocm``, ``jetpack6``…) that the release has, to be unpacked over it.
+    Empty when the release has no build for this computer's OS and CPU."""
+    prefix, sums = ollama_build_prefix(), ollama_checksums(manifest)
+    if prefix is None:
+        return []
+    found = []
+    for stem in (prefix, *(f"{prefix}-{extra}" for extra in extras)):
+        name = next((stem + ending for ending in OLLAMA_ARCHIVE_ENDINGS if stem + ending in sums), None)
+        if name is not None:
+            found.append((ollama_release_url(name), name, sums[name]))
+        elif stem == prefix:
+            return []  # without the build itself an extra file has nothing to go over
+    return found
 
 
 def private_ollama_binary() -> str | None:

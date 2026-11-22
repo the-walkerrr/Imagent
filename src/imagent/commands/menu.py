@@ -2,7 +2,7 @@
 """
 imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is run with no command. Pick an entry with the arrow keys and Enter.
 
-It always appears, even when setup has not been done; the command picked runs setup first by itself (``cli.py``, ``needs_setup``).
+It only opens once setup is complete: when it is not, ``cli.py`` runs setup first (``needs_setup``), then opens the menu.
 It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
 "Forget the deleted pictures Imagent remembers" is only offered when it remembers some.
@@ -96,13 +96,6 @@ def main() -> None:
     if choice == EXIT:
         return
     command = choice.split()
-    if choice == ADD_FOLDER[1]:  # the command needs the folder, so it is asked for here
-        folder = questionary.text("Folder to add:", qmark="?", style=STYLE).ask()
-        if folder is None:  # Ctrl+C
-            sys.exit(1)
-        if not folder.strip():
-            sys.exit("No folder entered.")
-        command.append(folder.strip())
     process = subprocess.Popen([sys.executable, "-m", "imagent", *command])
     while True:
         try:

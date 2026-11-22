@@ -1,6 +1,6 @@
 """imagent/cli.py — The ``imagent`` command: read the command line and run the command it names.
 
-``imagent`` with no command opens the menu. The menu always appears, set up or not; every command except ``setup`` and ``uninstall`` runs setup first if it has not been done (so a command picked in the menu does). Each command is a module in ``imagent/commands``; it is imported only when it is
+``imagent`` with no command opens the menu. The menu, like every command except ``setup`` and ``uninstall``, runs setup first if it has not been done, so it only opens once Imagent is set up. Each command is a module in ``imagent/commands``; it is imported only when it is
 run, so ``imagent --help`` and a mistyped command answer at once, without loading the image and model libraries.
 """
 
@@ -32,13 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     scan_add = scan_commands.add_parser("add", help="add a folder, then scan and index it",
                                         description="Add a folder to the folders that are scanned, scan it, then index its pictures. "
                                                     "A folder added before is scanned again.")
-    scan_add.add_argument("folder", help="the folder to add")
+    scan_add.add_argument("folder", nargs="?", help="the folder to add (without it you pick one from a list of suggestions)")
 
     commands.add_parser("failed", help="list the pictures that could not be indexed",
                         description="List the pictures that could not be indexed, with the reason for each.")
     commands.add_parser("forget", help="forget the deleted pictures Imagent remembers",
                         description="Delete what Imagent remembers about pictures that were deleted (their descriptions and search data), after two confirmations. "
                                     "Your indexed pictures are not touched.")
+    delete = commands.add_parser("delete", help="remove folders you added, and what was indexed from them",
+                                 description="Remove folders you added and delete what was indexed from them, after showing what will be lost and two questions. "
+                                             "Your pictures are never touched. You can choose to keep the analysis, so adding a folder again does not analyse its pictures again.")
+    delete.add_argument("folder", nargs="*", help="the folders to remove; put a path with spaces in quotes (without any, you choose from the folders you added)")
     commands.add_parser("setup", help="choose the models and prepare this computer (once)",
                         description="Check Ollama, download and lock the three models, and measure this computer. "
                                     "Run it once after installing. Run again, it shows the models and restores a missing one.")
@@ -48,9 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _set_up_first() -> None:
-    """Run setup before the command if it has not been done, so the user is told at the start, not after the command has done its work.
+    """Run setup before the command (or the menu) if it has not been done, so the user is told at the start, not after the command has done its work.
 
-    Setup ends the program if it fails or is cancelled, so the command only runs once Imagent is set up."""
+    Setup ends the program if it fails or is cancelled, so the command or menu only runs once Imagent is set up."""
     from imagent.commands import menu
     if menu.needs_setup():
         from imagent.commands import setup
@@ -60,7 +64,7 @@ def _set_up_first() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command not in (None, "setup", "uninstall"):  # the menu always appears; setup is the fix itself, and uninstall must work on a broken install
+    if args.command not in ("setup", "uninstall"):  # setup is the fix itself, and uninstall must work on a broken install
         _set_up_first()
     if args.command == "search":
         from imagent.commands import search
@@ -71,6 +75,9 @@ def main(argv: list[str] | None = None) -> None:
             run_cli(lambda: scan.add(args.folder))
         else:
             run_cli(scan.main)
+    elif args.command == "delete":
+        from imagent.commands import delete
+        run_cli(lambda: delete.main(args.folder), cancelled=delete.CANCELLED)
     elif args.command == "failed":
         from imagent.commands import failed
         run_cli(failed.main)

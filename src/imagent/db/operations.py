@@ -381,6 +381,37 @@ def delete_images(conn: sqlite3.Connection, file_ids: list[int]) -> int:
     return deleted
 
 
+def root_stats(conn: sqlite3.Connection, root_id: int) -> dict:
+    """What the index holds for one scanned folder: ``images`` indexed, their ``bytes`` on disk, the ``analysis_ms`` spent
+    analysing them, and the files ``queued`` to be indexed."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS images, COALESCE(SUM(file_size), 0) AS bytes, COALESCE(SUM(processing_time_ms), 0) AS analysis_ms "
+        "FROM image_data WHERE root_id = ?", (root_id,)).fetchone()
+    queued = conn.execute("SELECT COUNT(*) FROM backlog WHERE root_id = ?", (root_id,)).fetchone()[0]
+    return {**dict(row), "queued": queued}
+
+
+def count_keepable_analyses(conn: sqlite3.Connection, root_ids: list[int]) -> int:
+    """How many different pictures of the folders ``root_ids`` ``keep_analyses_of`` could keep (those with a pixel hash and an embedding)."""
+    marks = ", ".join("?" for _ in root_ids)
+    return conn.execute(
+        f"SELECT COUNT(DISTINCT i.pixel_hash) FROM image_data i JOIN text_embeddings e ON e.file_id = i.file_id "
+        f"WHERE i.pixel_hash IS NOT NULL AND i.root_id IN ({marks})", root_ids).fetchone()[0]
+
+
+def image_ids_in_roots(conn: sqlite3.Connection, root_ids: list[int]) -> list[int]:
+    """The file_id of every indexed image of the folders ``root_ids``."""
+    marks = ", ".join("?" for _ in root_ids)
+    return [row[0] for row in conn.execute(f"SELECT file_id FROM image_data WHERE root_id IN ({marks})", root_ids)]
+
+
+def delete_roots(conn: sqlite3.Connection, root_ids: list[int]) -> int:
+    """Remove the folders ``root_ids`` from the scanned folders; their images (with embeddings and error logs) and queued files go with them.
+    Returns how many folders were removed. To keep the analyses of the images, call ``keep_analyses_of`` first, in the same transaction."""
+    marks = ", ".join("?" for _ in root_ids)
+    return conn.execute(f"DELETE FROM scan_roots WHERE root_id IN ({marks})", root_ids).rowcount
+
+
 # ---------------------------------------------------------------------------
 # backlog
 # ---------------------------------------------------------------------------

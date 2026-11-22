@@ -359,8 +359,8 @@ def _check_tar_member(destination: Path, member: tarfile.TarInfo) -> None:
 
 
 def _unpack(archive: Path, destination: Path) -> None:
-    """Unpack Ollama's .zip, .tgz or .tar.zst into the new folder ``destination``."""
-    destination.mkdir(parents=True)
+    """Unpack Ollama's .zip, .tgz or .tar.zst into the folder ``destination``, over what an earlier archive put there."""
+    destination.mkdir(parents=True, exist_ok=True)
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as bundle:
             bundle.extractall(destination)  # removes any ../ or absolute path from the names itself
@@ -383,26 +383,81 @@ def _unpack(archive: Path, destination: Path) -> None:
             bundle.extract(member, destination, **options)
 
 
+TEGRA_RELEASE = Path("/etc/nv_tegra_release")  # exists on NVIDIA Jetson boards; names the JetPack generation (R35, R36)
+DRM_DIR = Path("/sys/class/drm")  # the graphics cards on Linux, each with the vendor id of its maker
+AMD_VENDOR_ID = "0x1002"
+
+
+def _nvidia_gpu_present() -> bool:
+    return bool(shutil.which("nvidia-smi")) and "GPU" in _run(["nvidia-smi", "-L"])
+
+
+def _amd_gpu_present() -> bool:
+    if platform.system() == "Windows":
+        names = _run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"]).lower()
+        return "amd" in names or "radeon" in names
+    try:
+        return any(card.read_text().strip().lower() == AMD_VENDOR_ID for card in DRM_DIR.glob("card*/device/vendor"))
+    except OSError:
+        return False
+
+
+def _ollama_extras() -> dict:
+    """The extra Ollama files this computer's GPU needs on top of the main build, as {name in the release's file names: what it is for}.
+    Ollama's own installer does the same: AMD GPUs and NVIDIA Jetson boards need an extra file, an NVIDIA GPU needs none (its driver
+    is what must be installed), and a Mac needs none."""
+    system = platform.system()
+    if system == "Linux" and TEGRA_RELEASE.is_file():
+        text = TEGRA_RELEASE.read_text(errors="replace")
+        for generation, extra in (("R36", "jetpack6"), ("R35", "jetpack5")):
+            if generation in text:
+                return {extra: "an NVIDIA Jetson board"}
+        return {}
+    if system in ("Linux", "Windows") and not _nvidia_gpu_present() and _amd_gpu_present():  # with both, the NVIDIA one is used
+        return {"rocm": "an AMD GPU"}
+    return {}
+
+
 def install_ollama() -> None:
-    """Download Ollama's own build for this computer into Imagent's tools folder. It needs no administrator rights and no change
-    to PATH, and uninstalling removes it by deleting the folder. Stops setup, with the reason, when it cannot be done."""
+    """Download Ollama's own build for this computer into Imagent's tools folder, plus the extra file its GPU needs (AMD, Jetson).
+    It needs no administrator rights and no change to PATH, and uninstalling removes it by deleting the folder. Stops setup, with the
+    reason, when it cannot be done."""
     manual = f"Install Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again."
-    download = app_config.ollama_download()
-    if download is None:
+    if app_config.ollama_build_prefix() is None:
         fail(f"Imagent has no Ollama build for this computer ({platform.system()} on {platform.machine()}). {manual}")
-    url, file_name, expected = download
     root = app_config.OLLAMA_DIR
-    program, partial, archive = root / "program", root / "program.partial", root / file_name
-    say(f"Installing Ollama {app_config.OLLAMA_VERSION} for Imagent only. It needs no administrator rights: {root}")
+    program, partial, manifest = root / "program", root / "program.partial", root / app_config.OLLAMA_MANIFEST
+    archive = None
+    say("Installing Ollama for this project.")
     swapped = False
     try:
         root.mkdir(parents=True, exist_ok=True)
         _remove(partial)
-        _remove(archive)
-        if _download_file(url, archive) != expected:
-            raise OllamaInstallError("The download is not the file Ollama published (its checksum is different).")
-        say("Unpacking…")
-        _unpack(archive, partial)
+        _remove(manifest)
+        # The release's list of files and their sums is trusted only when it is the one pinned in config.py; the sums in it are
+        # then what each file is checked against.
+        if _download_file(app_config.ollama_release_url(app_config.OLLAMA_MANIFEST), manifest) != app_config.OLLAMA_MANIFEST_SHA256:
+            raise OllamaInstallError("The list of Ollama's files is not the one Imagent was made for (its checksum is different).")
+        extras = _ollama_extras()
+        downloads = app_config.ollama_downloads(manifest.read_text(encoding="utf-8", errors="replace"), tuple(extras))
+        if not downloads:
+            raise OllamaInstallError(f"Ollama {app_config.OLLAMA_VERSION} has no build for this computer ({platform.system()} on {platform.machine()}).")
+        files = {file_name for _, file_name, _ in downloads}
+        for extra, purpose in extras.items():
+            stem = f"{app_config.ollama_build_prefix()}-{extra}"
+            if any(stem + ending in files for ending in app_config.OLLAMA_ARCHIVE_ENDINGS):
+                say(f"This computer has {purpose}, so the extra files for it are installed too.")
+            else:
+                say(f"This computer has {purpose}, but Ollama {app_config.OLLAMA_VERSION} has no extra files for it, so it may not be used.",
+                    "fg:ansimagenta")
+        for url, file_name, expected in downloads:
+            archive = root / file_name
+            _remove(archive)
+            if _download_file(url, archive) != expected:
+                raise OllamaInstallError("The download is not the file Ollama published (its checksum is different).")
+            say("Unpacking…")
+            _unpack(archive, partial)  # the extra files go over the build, into the same folder
+            _remove(archive)
         _remove(program)
         os.replace(partial, program)  # a half-unpacked folder never looks installed
         swapped = True
@@ -422,7 +477,9 @@ def install_ollama() -> None:
     else:
         reason = None
     finally:
-        _remove(archive)
+        if archive is not None:
+            _remove(archive)
+        _remove(manifest)
         _remove(partial)
     if reason is not None:
         if swapped:
@@ -1161,10 +1218,14 @@ def ask_keep_deleted() -> int:
     say("indexing. When there are more than the number you choose, the oldest are forgotten first.\n")
     choices = [questionary.Choice(f"{number} deleted pictures", value=number) for number in KEEP_DELETED_CHOICES]
     choices.append(questionary.Choice("Enter a number", value=ENTER_A_NUMBER))
-    choice = ask(questionary.select(
+    question = questionary.select(
         "How many deleted pictures should Imagent remember?", choices=choices,
         default=next(c for c in choices if c.value == KEEP_DELETED_DEFAULT), qmark=QMARK, pointer=POINTER, style=STYLE,
-    ))
+    )
+    # questionary also marks the default as "selected", which the style underlines for good. Keep only the pointer on it.
+    control = next(w.content for w in question.application.layout.find_all_windows() if hasattr(w.content, "selected_options"))
+    control.selected_options.clear()
+    choice = ask(question)
     if choice != ENTER_A_NUMBER:
         return choice
     return int(ask(questionary.text("How many deleted pictures should Imagent remember? (0 remembers none)",

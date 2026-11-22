@@ -501,17 +501,28 @@ def _sha256(path: Path) -> str:
 
 
 class InstallOllamaTests(IsolatedHome):
-    """Ollama's own build is downloaded (here from a file:// address, so no network is used), checked, unpacked and tried."""
+    """Ollama's own build is downloaded (here from file:// addresses, so no network is used), checked, unpacked and tried."""
 
-    def install(self, archive: Path, sha=None):
-        download = (archive.as_uri(), archive.name, sha or _sha256(archive))
-        with mock.patch.object(config, "ollama_download", return_value=download), mock.patch.object(setup, "say"), \
-                contextlib.redirect_stdout(io.StringIO()):
+    def install(self, archive: Path, sha=None, extras=None, more=(), manifest_sha=None, listed=True, wrong=()):
+        """Install ``archive`` (and the ``more`` archives as its extras) from a release folder with a sha256sum.txt of its own."""
+        prefix = next(archive.name[:-len(ending)] for ending in config.OLLAMA_ARCHIVE_ENDINGS if archive.name.endswith(ending))
+        lines = [f"{'0' * 64 if file.name in wrong else (sha if file == archive and sha else _sha256(file))}  ./{file.name}"
+                 for file in (archive, *more) if listed or file != archive]
+        manifest = self.work / config.OLLAMA_MANIFEST
+        manifest.write_text("\n".join(lines) + "\n")
+        patches = (mock.patch.object(config, "OLLAMA_RELEASE_URL", self.work.as_uri() + "/{file}"),
+                   mock.patch.object(config, "OLLAMA_MANIFEST_SHA256", manifest_sha or _sha256(manifest)),
+                   mock.patch.object(config, "ollama_build_prefix", return_value=prefix),
+                   mock.patch.object(setup, "_ollama_extras", return_value=extras or {}),
+                   mock.patch.object(setup, "say"), contextlib.redirect_stdout(io.StringIO()))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
             setup.install_ollama()
 
-    def failure(self, archive: Path, sha=None) -> str:
+    def failure(self, archive: Path, **kwargs) -> str:
         with self.assertRaises(SystemExit) as raised:
-            self.install(archive, sha)
+            self.install(archive, **kwargs)
         return str(raised.exception.code)
 
     def leftovers(self):
@@ -589,9 +600,58 @@ class InstallOllamaTests(IsolatedHome):
         self.assertEqual(self.leftovers(), [])
 
     def test_a_computer_with_no_build_is_told_to_install_it_by_hand(self):
-        with mock.patch.object(config, "ollama_download", return_value=None), self.assertRaises(SystemExit) as raised:
+        with mock.patch.object(config, "ollama_build_prefix", return_value=None), self.assertRaises(SystemExit) as raised:
             setup.install_ollama()
         self.assertIn("https://ollama.com/download", str(raised.exception.code))
+
+    def test_a_list_of_files_that_is_not_the_pinned_one_installs_nothing(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        message = self.failure(archive, manifest_sha="0" * 64)
+        self.assertIn("list of Ollama's files", message)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_release_that_does_not_list_the_build_for_this_computer_installs_nothing(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        other = self.work / "ollama-windows-amd64.zip"
+        other.write_bytes(b"x")
+        message = self.failure(archive, more=(other,), listed=False)
+        self.assertIn("has no build for this computer", message)
+        self.assertEqual(self.leftovers(), [])
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_the_extra_file_for_the_gpu_is_unpacked_over_the_build(self):
+        import zstandard
+        build, extra = self.work / "ollama-linux-amd64.tar.zst", self.work / "ollama-linux-amd64-rocm.tar.zst"
+        for archive, entries in ((build, [("bin/", None, 0), ("bin/ollama", SCRIPT, 0o755), ("lib/ollama/libx.so", b"x", 0o644)]),
+                                 (extra, [("lib/ollama/rocm/librocm.so", b"amd", 0o644)])):
+            plain = self.work / "plain.tar"
+            _tar(plain, entries, mode="w")
+            archive.write_bytes(zstandard.ZstdCompressor().compress(plain.read_bytes()))
+        self.install(build, extras={"rocm": "an AMD GPU"}, more=(extra,))
+        program = config.OLLAMA_DIR / "program"
+        self.assertEqual(setup._ollama_command_version(config.private_ollama_binary()), (0, 40, 17))
+        self.assertEqual((program / "lib" / "ollama" / "libx.so").read_bytes(), b"x")  # the build is still there
+        self.assertEqual((program / "lib" / "ollama" / "rocm" / "librocm.so").read_bytes(), b"amd")
+        self.assertEqual(self.leftovers(), ["imagent-tool.json", "models", "program"])  # neither download is left
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_an_extra_file_that_is_not_the_published_one_installs_nothing(self):
+        build, extra = self.work / "ollama-darwin.tgz", self.work / "ollama-darwin-rocm.tgz"
+        _tar(build, [("ollama", SCRIPT, 0o755)])
+        _tar(extra, [("rocm", b"amd", 0o644)])
+        message = self.failure(build, extras={"rocm": "an AMD GPU"}, more=(extra,), wrong=(extra.name,))
+        self.assertIn("checksum", message)
+        self.assertEqual(self.leftovers(), [])  # the good build that was already unpacked is not left half-installed
+        self.assertIsNone(config.private_ollama_binary())
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_an_extra_file_the_release_lacks_is_skipped_and_the_build_still_installs(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        self.install(archive, extras={"rocm": "an AMD GPU"})
+        self.assertIsNotNone(config.private_ollama_binary())
 
     @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
     def test_installing_again_keeps_the_models_and_clears_what_an_earlier_try_left(self):
@@ -604,6 +664,45 @@ class InstallOllamaTests(IsolatedHome):
         self.install(archive)
         self.assertEqual((config.OLLAMA_DIR / "models" / "blob").read_bytes(), b"weights")
         self.assertFalse((config.OLLAMA_DIR / "program.partial").exists())
+
+
+class OllamaExtrasTests(IsolatedHome):
+    """Which extra Ollama files a computer's GPU needs: AMD and Jetson yes, NVIDIA and Mac no."""
+
+    def extras(self, system="Linux", nvidia=False, vendors=(), tegra=None, powershell=""):
+        cards = self.work / "drm"
+        for number, vendor in enumerate(vendors):
+            (cards / f"card{number}" / "device").mkdir(parents=True, exist_ok=True)
+            (cards / f"card{number}" / "device" / "vendor").write_text(vendor + "\n")
+        release = self.work / "nv_tegra_release"
+        if tegra is not None:
+            release.write_text(f"# {tegra} (release), REVISION: 3.1\n")
+        with mock.patch.object(setup.platform, "system", return_value=system), mock.patch.object(setup, "DRM_DIR", cards), \
+                mock.patch.object(setup, "TEGRA_RELEASE", release), \
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/nvidia-smi" if nvidia else None), \
+                mock.patch.object(setup, "_run", side_effect=lambda cmd: "GPU 0: NVIDIA" if cmd[0] == "nvidia-smi" else powershell):
+            return setup._ollama_extras()
+
+    def test_an_amd_gpu_gets_the_rocm_files_on_linux_and_windows(self):
+        self.assertEqual(list(self.extras(vendors=("0x1002",))), ["rocm"])
+        self.assertEqual(list(self.extras("Windows", powershell="AMD Radeon RX 7800 XT")), ["rocm"])
+
+    def test_an_nvidia_gpu_or_no_gpu_gets_no_extra_files(self):
+        self.assertEqual(self.extras(vendors=("0x10de",)), {})
+        self.assertEqual(self.extras(nvidia=True, vendors=("0x10de",)), {})
+        self.assertEqual(self.extras(), {})
+        self.assertEqual(self.extras("Windows", powershell="NVIDIA GeForce RTX 4090"), {})
+
+    def test_when_both_are_there_the_nvidia_one_is_used_so_nothing_extra_is_installed(self):
+        self.assertEqual(self.extras(nvidia=True, vendors=("0x1002", "0x10de")), {})
+
+    def test_a_jetson_board_gets_the_files_of_its_jetpack(self):
+        self.assertEqual(list(self.extras(tegra="R36")), ["jetpack6"])
+        self.assertEqual(list(self.extras(tegra="R35")), ["jetpack5"])
+        self.assertEqual(self.extras(tegra="R34"), {})  # a JetPack Ollama has no files for
+
+    def test_a_mac_needs_none(self):
+        self.assertEqual(self.extras("Darwin", vendors=("0x1002",)), {})
 
 
 class DownloadProgressTests(IsolatedHome):

@@ -80,6 +80,7 @@ from imagent.pipeline.discovery import discover
 from imagent.pipeline.error_messages import describe
 from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.failure import IndexingFailure, RunStopped
+from imagent.pipeline.folder_picker import ask_for_folder
 from imagent.pipeline.locking import AlreadyRunning, single_instance
 from imagent.pipeline.progress import Progress, format_duration
 from imagent.pipeline.serialisation import serialize_embedding
@@ -929,6 +930,16 @@ def _apply_moves(conn, moved: dict[str, str], gone: dict[str, StoredImage], root
                 refresh_image_file(conn, image.file_id, file_hashes[new_path], details)
 
 
+def _register_root(conn, root: Path) -> int:
+    """Add ``root`` to the scanned folders (nothing happens if it was added before) and return its id; raises ``RootOverlapError`` if
+    it contains, or lies inside, another added folder."""
+    conflict = find_overlapping_root(root, [r["path"] for r in list_roots(conn)])
+    if conflict:
+        raise RootOverlapError(f"{root} overlaps the folder already scanned: {conflict}")
+    with conn:
+        return get_or_add_root(conn, str(root))
+
+
 def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
     """Reconcile the index with the files under ``root``; the other folders' images are never deleted.
 
@@ -977,12 +988,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
     }
 
     try:
-        known = list_roots(conn)
-        conflict = find_overlapping_root(root, [r["path"] for r in known])
-        if conflict:
-            raise RootOverlapError(f"{root} overlaps the folder already scanned: {conflict}")
-        with conn:
-            root_id = get_or_add_root(conn, str(root))
+        root_id = _register_root(conn, root)
 
         # path -> modification time, for every image on disk right now.
         found = discover(root)
@@ -1187,24 +1193,36 @@ def _scan_folders(roots: list[Path]) -> None:
 # Entry points
 # ---------------------------------------------------------------------------
 
+def added_folders() -> list[str]:
+    """The folders that were added, the most recently scanned first."""
+    conn = init_db(str(config.DB_PATH))
+    try:
+        return [row["path"] for row in list_roots(conn)]
+    finally:
+        conn.close()
+
+
+def _ask_for_folder(added: list[str]) -> str:
+    """The folder to add, asked for in a terminal with suggestions; ends the program if there is no terminal or nothing was entered."""
+    if questionary is None or not sys.stdin.isatty():  # nobody to ask
+        sys.exit(f'No folder was given. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+    folder = ask_for_folder(added, STYLE)
+    if folder is None:  # Ctrl+C; already said so
+        sys.exit(1)
+    if not folder.strip():
+        sys.exit("No folder entered.")
+    return folder.strip()
+
+
 def main() -> None:
     """Scan every folder that was added, then offer to index what was found."""
     make_output_safe()
-    conn = init_db(str(config.DB_PATH))
-    try:
-        saved = [row["path"] for row in list_roots(conn)]
-    finally:
-        conn.close()
+    saved = added_folders()
     if not saved:
         if questionary is None or not sys.stdin.isatty():  # nobody to ask
             sys.exit(f'No folders have been added yet. Run: {config.SCAN_ADD_COMMAND} "folder path"')
         print("No folders have been added yet, so there is nothing to scan. Add one now and it is scanned and indexed.")
-        folder = questionary.text("Folder to add:", qmark="?", style=STYLE).ask()
-        if folder is None:  # Ctrl+C; questionary already said so
-            sys.exit(1)
-        if not folder.strip():
-            sys.exit("No folder entered.")
-        add(folder.strip())
+        add()
         return
     roots = _scannable(saved)
     if not roots:
@@ -1212,7 +1230,43 @@ def main() -> None:
     _scan_folders(roots)
 
 
-def add(folder: str) -> None:
-    """Add ``folder`` to the folders that are scanned (one added before is scanned again), scan it, then offer to index what was found."""
+def add_folder(folder: str | None = None) -> Path:
+    """Add ``folder`` (asked for, with suggestions, when not given) to the folders that are scanned, without scanning it; returns the folder.
+
+    Ends the program with a message if the folder cannot be used or overlaps one added before."""
+    if folder is None:
+        folder = _ask_for_folder(added_folders())
+    root = validate_folder(folder)
+    conn = init_db(str(config.DB_PATH))
+    try:
+        _register_root(conn, root)
+    except RootOverlapError as exc:
+        sys.exit(f"Error: {exc}")
+    finally:
+        conn.close()
+    return root
+
+
+def scan_and_index(root: Path) -> None:
+    """Scan the added folder ``root``, print what changed in it, then index the pictures it has pending."""
+    _scan_and_report(root)
+    print()
+    conn = init_db(str(config.DB_PATH))
+    try:
+        with conn:
+            root_id = get_or_add_root(conn, str(root))
+    finally:
+        conn.close()
+    run({root_id})
+
+
+def add(folder: str | None = None) -> None:
+    """Add ``folder`` (asked for, with suggestions, when not given) to the folders that are scanned, then offer what to do next (see after_add.py).
+
+    With no terminal to answer, nothing is offered: the folder is scanned and, as a script expects, the pictures found are indexed only if asked."""
     make_output_safe()
-    _scan_folders([validate_folder(folder)])
+    if questionary is None or not sys.stdin.isatty():
+        _scan_folders([validate_folder(_ask_for_folder([]) if folder is None else folder)])
+        return
+    from imagent.commands import after_add  # after_add uses this module's functions
+    after_add.run(add_folder(folder))

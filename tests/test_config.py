@@ -92,18 +92,44 @@ class OllamaProgramTests(IsolatedHome):
         program.write_bytes(b"x")
         return str(program)
 
+    MANIFEST = "\n".join(f"{i:x}" * 64 + f"  ./{name}" for i, name in enumerate((
+        "install.sh", "Ollama.dmg", "ollama-darwin.tgz", "Ollama-darwin.zip", "ollama-linux-amd64.tar.zst", "ollama-linux-amd64-rocm.tar.zst",
+        "ollama-linux-amd64-mlx.tar.zst", "ollama-linux-arm64.tar.zst", "ollama-linux-arm64-jetpack6.tar.zst", "ollama-windows-amd64.zip",
+        "ollama-windows-amd64-rocm.zip", "ollama-windows-arm64.zip")))
+
+    def downloads(self, system, cpu, extras=()):
+        with mock.patch.object(config.platform, "system", return_value=system), mock.patch.object(config.platform, "machine", return_value=cpu):
+            return config.ollama_downloads(self.MANIFEST, extras)
+
     def test_each_os_and_cpu_gets_its_own_build_and_unknown_ones_get_none(self):
         for system, cpu, file in (("Darwin", "arm64", "ollama-darwin.tgz"), ("Darwin", "x86_64", "ollama-darwin.tgz"),
                                   ("Linux", "x86_64", "ollama-linux-amd64.tar.zst"), ("Linux", "aarch64", "ollama-linux-arm64.tar.zst"),
                                   ("Windows", "AMD64", "ollama-windows-amd64.zip"), ("Windows", "ARM64", "ollama-windows-arm64.zip")):
-            with mock.patch.object(config.platform, "system", return_value=system), mock.patch.object(config.platform, "machine", return_value=cpu):
-                url, name, sha = config.ollama_download()
+            [(url, name, sha)] = self.downloads(system, cpu)
             self.assertEqual(name, file)
             self.assertEqual(url, f"https://github.com/ollama/ollama/releases/download/v{config.OLLAMA_VERSION}/{file}")
             self.assertRegex(sha, r"^[0-9a-f]{64}$")
         for system, cpu in (("Linux", "riscv64"), ("FreeBSD", "x86_64")):
+            self.assertEqual(self.downloads(system, cpu), [])
             with mock.patch.object(config.platform, "system", return_value=system), mock.patch.object(config.platform, "machine", return_value=cpu):
-                self.assertIsNone(config.ollama_download())
+                self.assertIsNone(config.ollama_build_prefix())
+
+    def test_the_sums_come_from_the_release_list_and_not_from_the_code(self):
+        self.assertEqual(config.ollama_checksums(self.MANIFEST)["ollama-darwin.tgz"], "2" * 64)
+        self.assertEqual(config.ollama_checksums("short  ./a\n" + "A" * 64 + " *b.zip\nnot a line"), {"b.zip": "a" * 64})
+
+    def test_an_extra_file_follows_the_build_and_one_the_release_lacks_is_left_out(self):
+        names = lambda found: [name for _, name, _ in found]
+        self.assertEqual(names(self.downloads("Linux", "x86_64", ("rocm",))), ["ollama-linux-amd64.tar.zst", "ollama-linux-amd64-rocm.tar.zst"])
+        self.assertEqual(names(self.downloads("Windows", "x86_64", ("rocm",))), ["ollama-windows-amd64.zip", "ollama-windows-amd64-rocm.zip"])
+        self.assertEqual(names(self.downloads("Linux", "arm64", ("jetpack6",))), ["ollama-linux-arm64.tar.zst", "ollama-linux-arm64-jetpack6.tar.zst"])
+        self.assertEqual(names(self.downloads("Linux", "arm64", ("jetpack5",))), ["ollama-linux-arm64.tar.zst"])  # not in this release
+        self.assertEqual(names(self.downloads("Linux", "x86_64", ("mlx",))), ["ollama-linux-amd64.tar.zst", "ollama-linux-amd64-mlx.tar.zst"])
+
+    def test_a_release_without_the_build_gives_nothing_even_with_extras(self):
+        manifest = "\n".join(line for line in self.MANIFEST.splitlines() if not line.endswith("ollama-linux-amd64.tar.zst"))
+        with mock.patch.object(config.platform, "system", return_value="Linux"), mock.patch.object(config.platform, "machine", return_value="x86_64"):
+            self.assertEqual(config.ollama_downloads(manifest, ("rocm",)), [])
 
     def test_the_program_is_found_where_each_os_unpacks_it(self):
         self.assertIsNone(config.private_ollama_binary())

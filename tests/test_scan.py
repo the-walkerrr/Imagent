@@ -488,7 +488,7 @@ class CloudAndHiddenTests(ScanBase):
 
 
 class ScanCommandTests(ScanBase):
-    """``scan`` scans every folder that was added, and ``scan add`` adds a folder and scans it; each then offers to index the backlog."""
+    """``scan`` scans every folder that was added, and ``scan add`` (with no terminal to answer in) adds a folder and scans it; each then offers to index the backlog."""
 
     def _scan_two_folders(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()
@@ -504,7 +504,7 @@ class ScanCommandTests(ScanBase):
         import io
         out = io.StringIO()
         with mock.patch.object(scan, "run") as run, mock.patch.object(scan, "_ask_yes_no", return_value=answer) as yes_no, \
-                contextlib.redirect_stdout(out):
+                mock.patch.object(scan.sys.stdin, "isatty", return_value=False), contextlib.redirect_stdout(out):  # no menu to answer
             function(*args)
         return out.getvalue(), run, yes_no
 
@@ -514,28 +514,96 @@ class ScanCommandTests(ScanBase):
         self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
 
     def _scan_with_no_folder_added(self, typed):
-        """Run ``scan.main`` in a terminal with no folder added and ``typed`` entered at the folder prompt; returns what ``add`` got and what was said."""
-        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch.object(scan.questionary, "text") as text, \
-                mock.patch.object(scan, "add") as add:
-            text.return_value.ask.return_value = typed
+        """Run ``scan.main`` in a terminal with no folder added and ``typed`` chosen at the folder prompt; returns what was validated as the
+        folder, what the menu after adding got, and what was said."""
+        folder = self.work / "pictures"
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch.object(scan, "ask_for_folder", return_value=typed), \
+                mock.patch.object(scan, "validate_folder", return_value=folder) as validate, \
+                mock.patch("imagent.commands.after_add.run") as menu:
             try:
-                report, _, _ = self._call(scan.main)
+                report, _, _ = self._call_in_terminal(scan.main)
                 stopped = None
             except SystemExit as stop:
                 report, stopped = "", stop.code
-        return add, report, stopped
+        return validate, menu, report, stopped
+
+    def _call_in_terminal(self, function, *args):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            function(*args)
+        return out.getvalue(), None, None
 
     def test_scan_with_no_folder_added_asks_for_one_and_adds_it(self):
-        add, report, stopped = self._scan_with_no_folder_added("  /pictures ")
-        add.assert_called_once_with("/pictures")
+        validate, menu, report, stopped = self._scan_with_no_folder_added("  /pictures ")
+        validate.assert_called_once_with("/pictures")
+        menu.assert_called_once_with(self.work / "pictures")
         self.assertIn("No folders have been added yet", report)
         self.assertIsNone(stopped)
+        self.assertEqual([root["path"] for root in list_roots(self.connect())], [str(self.work / "pictures")])  # added, not scanned
 
     def test_scan_with_no_folder_added_and_none_typed_adds_nothing(self):
         for typed, code in ((None, 1), ("   ", "No folder entered.")):
-            add, _, stopped = self._scan_with_no_folder_added(typed)
-            add.assert_not_called()
+            validate, menu, _, stopped = self._scan_with_no_folder_added(typed)
+            validate.assert_not_called()
+            menu.assert_not_called()
             self.assertEqual(stopped, code)
+
+    def test_add_without_a_folder_asks_with_the_folders_added_before(self):
+        folder = (self.work / "first").resolve()
+        self._index(folder, ["a.png"])
+        other = (self.work / "second").resolve()
+        other.mkdir()
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch.object(scan, "ask_for_folder", return_value=str(other)) as ask, \
+                mock.patch("imagent.commands.after_add.run") as menu:
+            scan.add()
+        self.assertEqual(ask.call_args.args[0], [str(folder)])
+        menu.assert_called_once_with(other)
+
+    def test_add_with_a_folder_does_not_ask(self):
+        folder = (self.work / "first").resolve()
+        folder.mkdir()
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch.object(scan, "ask_for_folder") as ask, \
+                mock.patch("imagent.commands.after_add.run") as menu:
+            scan.add(str(folder))
+        ask.assert_not_called()
+        menu.assert_called_once_with(folder)
+
+    def test_add_without_a_folder_and_no_terminal_says_how_to_give_one(self):
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
+            scan.add()
+        self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+
+    def test_add_in_a_terminal_only_adds_the_folder_and_scans_nothing(self):
+        folder = (self.work / "first").resolve()
+        self.make_image(folder / "a.png", 1)
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch("imagent.commands.after_add.run"), \
+                mock.patch.object(scan, "scan") as scanned:
+            scan.add(str(folder))
+        scanned.assert_not_called()
+        self.assertEqual([root["path"] for root in list_roots(self.connect())], [str(folder)])
+
+    def test_add_folder_refuses_a_folder_that_overlaps_one_added_before(self):
+        outer = (self.work / "outer").resolve()
+        self._index(outer, ["a.png"])
+        (outer / "inner").mkdir()
+        with self.assertRaises(SystemExit) as stop:
+            scan.add_folder(str(outer / "inner"))
+        self.assertIn("overlaps the folder already scanned", str(stop.exception.code))
+        self.assertEqual([root["path"] for root in list_roots(self.connect())], [str(outer)])
+
+    def test_scan_and_index_scans_the_folder_then_indexes_only_its_files(self):
+        first, second = self._scan_two_folders()
+        with mock.patch.object(scan, "run") as run:
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                scan.scan_and_index(first)
+        first_id = {root["path"]: root["root_id"] for root in list_roots(self.connect())}[str(first)]
+        run.assert_called_once_with({first_id})
+        self.assertIn(str(first), out.getvalue())
+        self.assertNotIn(str(second), out.getvalue())
 
     def test_scan_reports_every_folder_without_listing_them_first(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()

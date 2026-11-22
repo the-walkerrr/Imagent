@@ -15,9 +15,9 @@ MODULES = [
     "imagent.image_processing.metadata", "imagent.image_processing.ocr", "imagent.image_processing.preprocess", "imagent.image_processing.features",
     "imagent.text_processing.formatters", "imagent.vlm.analyzer", "imagent.vlm.client", "imagent.vlm.reply_validation",
     "imagent.image_processing.memory", "imagent.image_processing.problems", "imagent.pipeline.failure", "imagent.pipeline.storage", "imagent.pipeline.versions",
-    "imagent.commands.menu", "imagent.commands.failed", "imagent.image_processing.convert",
+    "imagent.commands.menu", "imagent.commands.failed", "imagent.commands.delete", "imagent.commands.after_add", "imagent.image_processing.convert",
     "imagent.os_specific", "imagent.os_specific.convert", "imagent.os_specific.files", "imagent.os_specific.locking", "imagent.os_specific.memory", "imagent.os_specific.process",
-    "imagent.os_specific.storage",
+    "imagent.os_specific.storage", "imagent.os_specific.folder_index", "imagent.pipeline.folder_picker",
 ]
 
 

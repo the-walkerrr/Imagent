@@ -35,14 +35,17 @@ imagent setup
 imagent search "red car at night"   # show the pictures that best match a description
 imagent search                      # keep searching until you type exit
 imagent search --full "red car"     # show each result's full description instead of its one-line summary
-imagent scan add ~/Pictures         # add a folder, find its new or changed pictures, then index them
+imagent scan add ~/Pictures         # add a folder, then choose what to do next: scan and index it, add another, delete folders, search
+imagent scan add                    # the same, picking the folder from suggestions as you type (macOS; elsewhere you type the path)
 imagent scan                        # scan every folder you added, then index what is pending (asks for a folder if none is added yet)
+imagent delete ~/Pictures           # remove a folder you added and what was indexed from it (several folders can be given; quote a path with spaces)
+imagent delete                      # the same, ticking the folders to remove from the ones you added
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
 imagent                             # open a menu (arrow keys and Enter) with the same choices
 ```
 
-`imagent --help` lists the commands. To index: run `imagent scan add` with a folder (run it again for each folder you want), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
+`imagent --help` lists the commands. To index: run `imagent scan add` with a folder, or without one to pick it from a list, then choose "Scan and index this folder" (the menu comes back after each choice, so you can add more folders), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
 
 ## Pictures that come back
 
@@ -67,25 +70,17 @@ If a picture cannot be indexed because Ollama ran out of memory, stopped or did 
 
 ## Where your data lives
 
-| OS | Folder |
-| --- | --- |
-| macOS | `~/Library/Application Support/Imagent` |
-| Windows | `%LOCALAPPDATA%\Imagent` |
-| Linux | `~/.local/share/imagent` |
+Everything is in `~/.imagent` (on Windows, `.imagent` in your user folder), on every OS.
 
 Holds `imagent.db`, `config.json`, the logs and `last_error.log`.
 
 ## Ollama
 
-If `imagent setup` finds no Ollama, or one older than Imagent needs, it downloads Ollama's official build for your computer (checked against a built-in checksum) into a folder of its own next to the data folder, with no administrator rights, no package manager and no change to `PATH`. The download is about 190 MB on macOS, 1.5 to 1.6 GB on Linux and 0.4 to 1.6 GB on Windows, and it unpacks to about 0.6 GB on macOS and up to about 2.3 GB on Linux and Windows, so keep up to about 4 GB free while it installs. This copy is used only by Imagent, and it keeps its models there too. An Ollama you already have, if it is recent enough, is used as it is and nothing is installed.
+If `imagent setup` finds no Ollama, or one older than Imagent needs, it downloads Ollama's official build for your computer into a folder of its own next to the data folder, with no administrator rights, no package manager and no change to `PATH`. The download is about 190 MB on macOS, 1.5 to 1.6 GB on Linux and 0.4 to 1.6 GB on Windows, and it unpacks to about 0.6 GB on macOS and up to about 2.3 GB on Linux and Windows, so keep up to about 4 GB free while it installs. Every file is checked against the sums in Ollama's own list for that release, and that list is checked against a checksum built into Imagent. This copy is used only by Imagent, and it keeps its models there too. An Ollama you already have, if it is recent enough, is used as it is and nothing is installed.
 
-| System | Imagent's own Ollama folder |
-| --- | --- |
-| macOS | `~/Library/Application Support/Imagent-tools/ollama` |
-| Windows | `%LOCALAPPDATA%\Imagent-tools\ollama` |
-| Linux | `~/.local/share/imagent-tools/ollama` |
+Imagent's own Ollama is in `~/.imagent-tools/ollama` (on Windows, `.imagent-tools\ollama` in your user folder), on every OS.
 
-On Linux the copy has no GPU drivers: an NVIDIA GPU is used if its driver is already installed, and AMD or Jetson GPUs are not supported by this copy (install Ollama yourself for those, and setup will use it).
+The copy has no GPU drivers, so an NVIDIA GPU is used only if its driver is already installed (the build itself holds the CUDA libraries). Setup looks at your GPU and adds the extra files Ollama publishes for it: for an AMD GPU (Linux or Windows) the ROCm files, about 1 GB more to download on Linux and 0.3 GB on Windows, and for an NVIDIA Jetson board the files for its JetPack version, about 0.3 GB. They are unpacked over the same folder, and they take more disk space than they download. A computer with an NVIDIA GPU gets no extra files, even when it has an AMD one too, and neither does a Mac.
 
 ## Uninstall
 
