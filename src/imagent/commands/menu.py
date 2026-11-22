@@ -2,7 +2,7 @@
 """
 imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is run with no command. Pick an entry with the arrow keys and Enter.
 
-Before it appears, ``cli.py`` runs setup if it has not been done (``needs_setup``).
+It always appears, even when setup has not been done; the command picked runs setup first by itself (``cli.py``, ``needs_setup``).
 It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
 "Forget the deleted pictures Imagent remembers" is only offered when it remembers some.

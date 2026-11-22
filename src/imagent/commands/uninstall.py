@@ -5,8 +5,9 @@ Run by ``imagent uninstall``. It removes:
   * the Ollama models that setup downloaded or copied (listed in install_record.json); a model you already had
     before Imagent is never removed;
   * Imagent's data folder (the index database, config.json, logs);
-  * Ollama itself, but only when setup installed it (listed in the plan and covered by the same three confirmations).
-It never touches your image files or any other Ollama model, and leaves a pre-existing Ollama alone. The program itself is removed afterwards
+and, last, each program setup installed for Imagent (its own copy of Ollama, when the computer had none): for each one it describes
+the program and asks whether to remove it too, and the answer is no unless you type y.
+It never touches your image files, any other Ollama model, or an Ollama you had before Imagent. The program itself is removed afterwards
 with ``pipx uninstall imagent`` (a running program cannot remove itself), and the last message says so.
 """
 
@@ -14,9 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import secrets
-import shlex
 import shutil
 import sqlite3
 import stat
@@ -38,10 +37,6 @@ from imagent.pipeline.locking import AlreadyRunning, single_instance
 DEFAULT_HOST = "http://localhost:11434"
 FINAL_CODE_LENGTH = 10
 CANCELLED = "Uninstall cancelled. Nothing was deleted."
-LINUX_SERVICE_FILE = Path("/etc/systemd/system/ollama.service")  # where Ollama's Linux install script puts the service
-LINUX_DATA_DIR = Path("/usr/share/ollama")  # what that service stores, models included
-LINUX_BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")  # where the script may put the program
-LINUX_DOCS = "https://github.com/ollama/ollama/blob/main/docs/linux.md"
 REMOVE_PROGRAM = "To finish, remove the program itself with: pipx uninstall imagent   (or: pip uninstall imagent, if you used pip)"
 
 
@@ -167,10 +162,10 @@ def _ollama(host: str):
     process = None
     try:
         if not _reachable(base):
-            if _is_local(host) and shutil.which("ollama"):
+            if _is_local(host) and config.ollama_binary():
                 try:
-                    process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                               env={**os.environ, "OLLAMA_HOST": host},
+                    process = subprocess.Popen([config.ollama_binary(), "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                               env=config.ollama_environment(host),
                                                **background_process_options())
                 except OSError:
                     process = None
@@ -208,11 +203,8 @@ def make_plan(base: str | None, stats: dict) -> dict:
         "models": [], "models_unreachable": [], "models_gone": [],
         "not_recorded": [m for m in stats["locked_models"] if m not in recorded],
         "data_dir": config.IMAGENT_HOME if config.IMAGENT_HOME.exists() else None,
-        "ollama_installed": config.load_install_record().get("ollama_installed") is True,
-        "ollama_command": None,
+        "tools": config.installed_tools(),
     }
-    if plan["ollama_installed"]:
-        plan["ollama_command"] = ollama_removal_command()
     for name in recorded:
         if present is None:
             plan["models_unreachable"].append(name)
@@ -248,17 +240,6 @@ def show_plan(stats: dict, plan: dict) -> None:
         print(f"  {' ' * width}{folder}")
     row("Total time analyzed", _fmt_duration(stats["analysis_ms"]) if stats["analysis_ms"] is not None else unknown)
     row("Storage used", _fmt_bytes(plan["data_size"] + plan["models_size"]))
-    if plan["ollama_installed"]:
-        command = plan["ollama_command"]
-        if command is None:
-            print("\n  Imagent installed Ollama itself, and it will not be removed. Remove it the way you would remove any program"
-                  + (f" (on Linux: see the Uninstall section of {LINUX_DOCS})." if platform.system() == "Linux" else "."))
-        else:
-            print("\n  Imagent installed Ollama itself, so Ollama is removed too.")
-            if platform.system() == "Linux":
-                print(f"  That stops the Ollama service and deletes Ollama, its \"ollama\" user and everything in {LINUX_DATA_DIR},")
-                print("  including models you downloaded yourself. It asks for your password (sudo).")
-            print(f"  Command: {shlex.join(command)}")
     if plan["models_unreachable"]:
         print("\n  Could not reach Ollama, so these models will NOT be removed (remove them yourself with")
         print("  `ollama rm <name>` on the computer where Ollama runs): " + ", ".join(plan["models_unreachable"]))
@@ -325,41 +306,31 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
     return problems
 
 
-# --- Ollama itself (only when setup installed it) --------------------------------------
+# --- Programs setup installed (asked about last) -----------------------------------------
 
-def ollama_removal_command() -> list[str] | None:
-    """The one command that removes the Ollama that setup installed, or None when this computer does not look the way
-    setup left it (then the user is told how to remove it by hand). Linux has no uninstall command, so the documented
-    steps are joined into one ``sudo sh -c`` line; it ends by checking that the program and the service are gone."""
-    system = platform.system()
-    if system == "Darwin" and shutil.which("brew"):
-        return ["brew", "uninstall", "ollama"]
-    if system == "Windows" and shutil.which("winget"):
-        return ["winget", "uninstall", "--id", "Ollama.Ollama", "-e", "--silent"]
-    if system != "Linux" or not shutil.which("systemctl") or not LINUX_SERVICE_FILE.exists():
-        return None
-    program = shutil.which("ollama")
-    if program is None or str(Path(program).parent) not in LINUX_BIN_DIRS:
-        return None
-    sudo = [] if hasattr(os, "geteuid") and os.geteuid() == 0 else ["sudo"]
-    if sudo and not shutil.which("sudo"):
-        return None
-    libraries = Path(program).parent.parent / "lib" / "ollama"
-    paths = [str(LINUX_SERVICE_FILE), program]
-    folders = [str(LINUX_DATA_DIR)] + ([str(libraries)] if libraries.is_dir() else [])
-    steps = ["systemctl stop ollama", "systemctl disable ollama",
-             "rm -f " + " ".join(map(shlex.quote, paths)), "rm -rf " + " ".join(map(shlex.quote, folders)),
-             "userdel ollama", "groupdel ollama 2>/dev/null",
-             "test ! -e " + shlex.quote(str(LINUX_SERVICE_FILE)) + " && test ! -e " + shlex.quote(program)]
-    return sudo + ["sh", "-c", "; ".join(steps)]
+def offer_tool_removal(tools: list[dict]) -> list[str]:
+    """For each program setup installed, say what it is and ask whether to remove it too. Returns the problems.
 
-
-def remove_ollama(command: list[str]) -> list[str]:
-    """Run the command that removes the Ollama that setup installed. Returns the problems."""
-    if subprocess.run(command).returncode == 0:
-        print("  ✓ Removed Ollama")
-        return []
-    return [f"Could not remove Ollama. Remove it yourself with: {shlex.join(command)}"]
+    Removing one is deleting its folder in the tools folder, so nothing else on the computer can be touched."""
+    problems = []
+    for tool in tools:
+        path = tool["path"]
+        version = f" {tool['version']}" if tool["version"] else ""
+        print(f"\n  {_bold(tool['name'] + version)}: {tool['description']}")
+        print(f"  It takes {_fmt_bytes(_folder_size(path))} at {path}")
+        if input(f"  Remove {tool['name']} too? [y/N]: ").strip().lower() not in ("y", "yes"):
+            print(f"  {tool['name']} was kept. To remove it later, delete the folder {path}")
+        elif path.resolve().parent != config.TOOLS_DIR.resolve():  # never delete a folder outside the tools folder
+            problems.append(f"Did not remove {tool['name']}: its folder is not inside Imagent's tools folder. Delete {path} yourself.")
+        elif _remove_tree(path):
+            print(f"  ✓ Removed {tool['name']}")
+        else:
+            problems.append(f"Could not remove everything of {tool['name']}. Delete the folder {path} yourself.")
+    try:
+        config.TOOLS_DIR.rmdir()  # only succeeds when nothing is left in it
+    except OSError:
+        pass
+    return problems
 
 
 # --- Entry point -------------------------------------------------------------------------
@@ -375,23 +346,26 @@ def main() -> None:
     with _ollama(host) as base:
         plan = make_plan(base, stats)
         if nothing_to_remove(plan):
-            print("\n  Nothing to uninstall: Imagent has not added anything to this computer (or it was already removed).")
-            print(f"  {REMOVE_PROGRAM}")
-            return
-        show_plan(stats, plan)
-        if not confirm_three_times(stats):
-            sys.exit(f"\n{CANCELLED}")
-        if config.IMAGENT_HOME.exists():
-            try:
-                with single_instance("indexing", "Indexing"):  # deleting under a running index would make it fail on every image
-                    pass
-            except AlreadyRunning as exc:
-                sys.exit(f"\n{exc} Nothing was deleted.")
-        print()
-        problems = delete_everything(plan, base)
+            if not plan["tools"]:
+                print("\n  Nothing to uninstall: Imagent has not added anything to this computer (or it was already removed).")
+                print(f"  {REMOVE_PROGRAM}")
+                return
+            print("\n  Imagent's data and models are already removed.")
+            problems = []
+        else:
+            show_plan(stats, plan)
+            if not confirm_three_times(stats):
+                sys.exit(f"\n{CANCELLED}")
+            if config.IMAGENT_HOME.exists():
+                try:
+                    with single_instance("indexing", "Indexing"):  # deleting under a running index would make it fail on every image
+                        pass
+                except AlreadyRunning as exc:
+                    sys.exit(f"\n{exc} Nothing was deleted.")
+            print()
+            problems = delete_everything(plan, base)
 
-    if plan["ollama_command"]:  # after the block above, so a server started only for the models is stopped first
-        problems += remove_ollama(plan["ollama_command"])
+    problems += offer_tool_removal(plan["tools"])  # after the block above, so a server started only for the models is stopped first
 
     print()
     if problems:

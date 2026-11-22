@@ -1,8 +1,14 @@
 """Reading one pasted model set from the AI's answer: tolerant of how it is written, strict about what it holds."""
 
 import contextlib
+import hashlib
+import io
+import sys
+import tarfile
 import threading
 import unittest
+import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -468,3 +474,145 @@ class KeepDeletedQuestionTests(IsolatedHome):
         self.answers(setup.ENTER_A_NUMBER, "0")
         setup.choose_keep_deleted()
         self.assertEqual(self.stored(), 0)
+
+
+SCRIPT = b"#!/bin/sh\necho 'ollama version is 0.40.17'\n"  # stands in for the program: it runs and says its version
+BROKEN = b"#!/bin/sh\nexit 1\n"
+
+
+def _tar(path: Path, entries, mode="w:gz") -> None:
+    """A tar archive of ``entries``: (name, content or None for a folder, file mode) or (name, "link", target)."""
+    with tarfile.open(path, mode) as bundle:
+        for name, content, extra in entries:
+            info = tarfile.TarInfo(name)
+            if content is None:
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                bundle.addfile(info)
+            elif content == "link":
+                info.type, info.linkname = tarfile.SYMTYPE, extra
+                bundle.addfile(info)
+            else:
+                info.size, info.mode = len(content), extra
+                bundle.addfile(info, io.BytesIO(content))
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class InstallOllamaTests(IsolatedHome):
+    """Ollama's own build is downloaded (here from a file:// address, so no network is used), checked, unpacked and tried."""
+
+    def install(self, archive: Path, sha=None):
+        download = (archive.as_uri(), archive.name, sha or _sha256(archive))
+        with mock.patch.object(config, "ollama_download", return_value=download), mock.patch.object(setup, "say"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            setup.install_ollama()
+
+    def failure(self, archive: Path, sha=None) -> str:
+        with self.assertRaises(SystemExit) as raised:
+            self.install(archive, sha)
+        return str(raised.exception.code)
+
+    def leftovers(self):
+        return sorted(path.name for path in config.OLLAMA_DIR.iterdir()) if config.OLLAMA_DIR.exists() else []
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_a_macos_style_archive_installs_a_program_that_runs_and_is_recorded(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755), ("libggml.0.dylib", b"lib", 0o644), ("libggml.dylib", "link", "libggml.0.dylib")])
+        self.install(archive)
+        self.assertEqual(config.private_ollama_binary(), str(config.OLLAMA_DIR / "program" / "ollama"))
+        self.assertEqual(setup._ollama_command_version(config.private_ollama_binary()), (0, 40, 17))
+        self.assertTrue((config.OLLAMA_DIR / "program" / "libggml.dylib").is_symlink())
+        self.assertEqual(self.leftovers(), ["imagent-tool.json", "models", "program"])  # the download and the half-unpacked folder are gone
+        self.assertEqual([(tool["name"], tool["version"]) for tool in config.installed_tools()], [("Ollama", config.OLLAMA_VERSION)])
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_a_linux_style_zstd_archive_installs_into_bin(self):
+        import zstandard
+        plain = self.work / "plain.tar"
+        _tar(plain, [("bin/", None, 0), ("bin/ollama", SCRIPT, 0o755), ("lib/ollama/", None, 0), ("lib/ollama/libx.so", b"x", 0o644)], mode="w")
+        archive = self.work / "ollama-linux-amd64.tar.zst"
+        archive.write_bytes(zstandard.ZstdCompressor().compress(plain.read_bytes()))
+        self.install(archive)
+        self.assertEqual(config.private_ollama_binary(), str(config.OLLAMA_DIR / "program" / "bin" / "ollama"))
+        self.assertTrue((config.OLLAMA_DIR / "program" / "lib" / "ollama" / "libx.so").exists())
+
+    def test_a_windows_style_zip_installs_ollama_exe(self):
+        archive = self.work / "ollama-windows-amd64.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("ollama.exe", b"exe")
+            bundle.writestr("lib/ollama/libx.dll", b"dll")
+        with mock.patch.object(config.platform, "system", return_value="Windows"), \
+                mock.patch.object(setup.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+            self.install(archive)
+            self.assertEqual(config.private_ollama_binary(), str(config.OLLAMA_DIR / "program" / "ollama.exe"))
+
+    def test_a_download_that_is_not_the_published_file_installs_nothing(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        message = self.failure(archive, sha="0" * 64)
+        self.assertIn("checksum", message)
+        self.assertIn("https://ollama.com/download", message)  # and how to do it by hand
+        self.assertEqual(self.leftovers(), [])
+        self.assertIsNone(config.private_ollama_binary())
+
+    def test_an_entry_that_would_leave_the_folder_is_refused(self):
+        outside = self.work / "outside.txt"
+        for entries in ([("../outside.txt", b"bad", 0o644)], [("ollama", "link", "/etc/passwd")], [("a", "link", "../../outside.txt")]):
+            archive = self.work / "ollama-darwin.tgz"
+            _tar(archive, entries)
+            self.assertIn("unsafe entry", self.failure(archive))
+            self.assertFalse(outside.exists())
+            self.assertEqual(self.leftovers(), [])
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_a_program_that_does_not_run_is_removed_again(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", BROKEN, 0o755)])
+        self.assertIn("does not run", self.failure(archive))
+        self.assertEqual(self.leftovers(), [])
+
+    def test_an_archive_without_the_program_is_refused(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("readme.txt", b"hi", 0o644)])
+        self.assertIn("does not contain", self.failure(archive))
+        self.assertEqual(self.leftovers(), [])
+
+    def test_too_little_free_disk_space_stops_before_downloading_it_all(self):
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        with mock.patch.object(setup.shutil, "disk_usage", return_value=SimpleNamespace(free=10)):
+            message = self.failure(archive)
+        self.assertIn("not enough free disk space", message)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_computer_with_no_build_is_told_to_install_it_by_hand(self):
+        with mock.patch.object(config, "ollama_download", return_value=None), self.assertRaises(SystemExit) as raised:
+            setup.install_ollama()
+        self.assertIn("https://ollama.com/download", str(raised.exception.code))
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in program is a shell script")
+    def test_installing_again_keeps_the_models_and_clears_what_an_earlier_try_left(self):
+        (config.OLLAMA_DIR / "models").mkdir(parents=True)
+        (config.OLLAMA_DIR / "models" / "blob").write_bytes(b"weights")
+        (config.OLLAMA_DIR / "program.partial").mkdir()
+        (config.OLLAMA_DIR / "program.partial" / "junk").write_bytes(b"x")
+        archive = self.work / "ollama-darwin.tgz"
+        _tar(archive, [("ollama", SCRIPT, 0o755)])
+        self.install(archive)
+        self.assertEqual((config.OLLAMA_DIR / "models" / "blob").read_bytes(), b"weights")
+        self.assertFalse((config.OLLAMA_DIR / "program.partial").exists())
+
+
+class DownloadProgressTests(IsolatedHome):
+    def test_what_arrived_is_summed_into_the_checksum(self):
+        source = self.work / "file.bin"
+        source.write_bytes(b"abc" * 1000)
+        target = self.work / "copy.bin"
+        with contextlib.redirect_stdout(io.StringIO()):
+            digest = setup._download_file(source.as_uri(), target)
+        self.assertEqual(digest, _sha256(source))
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+

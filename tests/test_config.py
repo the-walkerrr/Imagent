@@ -83,3 +83,74 @@ class LockTests(IsolatedHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OllamaProgramTests(IsolatedHome):
+    def install_program(self, *parts):
+        program = config.OLLAMA_DIR.joinpath("program", *parts)
+        program.parent.mkdir(parents=True, exist_ok=True)
+        program.write_bytes(b"x")
+        return str(program)
+
+    def test_each_os_and_cpu_gets_its_own_build_and_unknown_ones_get_none(self):
+        for system, cpu, file in (("Darwin", "arm64", "ollama-darwin.tgz"), ("Darwin", "x86_64", "ollama-darwin.tgz"),
+                                  ("Linux", "x86_64", "ollama-linux-amd64.tar.zst"), ("Linux", "aarch64", "ollama-linux-arm64.tar.zst"),
+                                  ("Windows", "AMD64", "ollama-windows-amd64.zip"), ("Windows", "ARM64", "ollama-windows-arm64.zip")):
+            with mock.patch.object(config.platform, "system", return_value=system), mock.patch.object(config.platform, "machine", return_value=cpu):
+                url, name, sha = config.ollama_download()
+            self.assertEqual(name, file)
+            self.assertEqual(url, f"https://github.com/ollama/ollama/releases/download/v{config.OLLAMA_VERSION}/{file}")
+            self.assertRegex(sha, r"^[0-9a-f]{64}$")
+        for system, cpu in (("Linux", "riscv64"), ("FreeBSD", "x86_64")):
+            with mock.patch.object(config.platform, "system", return_value=system), mock.patch.object(config.platform, "machine", return_value=cpu):
+                self.assertIsNone(config.ollama_download())
+
+    def test_the_program_is_found_where_each_os_unpacks_it(self):
+        self.assertIsNone(config.private_ollama_binary())
+        with mock.patch.object(config.platform, "system", return_value="Linux"):
+            linux = self.install_program("bin", "ollama")
+            self.assertEqual(config.private_ollama_binary(), linux)
+        with mock.patch.object(config.platform, "system", return_value="Windows"):
+            self.assertIsNone(config.private_ollama_binary())  # no ollama.exe
+            windows = self.install_program("ollama.exe")
+            self.assertEqual(config.private_ollama_binary(), windows)
+
+    def test_imagents_own_copy_wins_over_the_one_on_path(self):
+        with mock.patch.object(config.shutil, "which", return_value="/usr/bin/ollama"):
+            self.assertEqual(config.ollama_binary(), "/usr/bin/ollama")
+            own = self.install_program("ollama") if os.name != "nt" else self.install_program("ollama.exe")
+            self.assertEqual(config.ollama_binary(), own)
+
+    def test_the_server_gets_the_models_folder_only_when_the_program_is_imagents_own(self):
+        self.assertIsNone(config.ollama_environment(None))
+        self.assertEqual(config.ollama_environment("localhost")["OLLAMA_HOST"], "localhost")
+        self.assertNotIn("OLLAMA_MODELS", config.ollama_environment("localhost"))
+        self.install_program("ollama" if os.name != "nt" else "ollama.exe")
+        env = config.ollama_environment("localhost")
+        self.assertEqual(env["OLLAMA_MODELS"], str(config.OLLAMA_DIR / "models"))
+        self.assertEqual(env["OLLAMA_HOST"], "localhost")
+        self.assertNotIn("OLLAMA_HOST", config.ollama_environment(None))  # the address is only set when there is one to set
+
+    def test_imagents_own_server_keeps_every_file_it_writes_inside_its_folder(self):
+        self.install_program("ollama" if os.name != "nt" else "ollama.exe")
+        with mock.patch.dict(os.environ, {"OLLAMA_MODELS": "/somewhere/else"}):
+            env = config.ollama_environment(None)
+        home = str(config.OLLAMA_DIR / "home")
+        self.assertEqual((env["HOME"], env["USERPROFILE"]), (home, home))  # its key pair and cache go under ~/.ollama
+        self.assertEqual(env["OLLAMA_MODELS"], str(config.OLLAMA_DIR / "models"))  # not the user's own setting
+        with mock.patch.object(config, "private_ollama_binary", return_value=None):
+            self.assertEqual(config.ollama_environment("localhost")["HOME"], os.environ.get("HOME"))  # a system Ollama keeps the user's own home
+
+    def test_tools_are_listed_from_the_file_each_one_carries(self):
+        self.assertEqual(config.installed_tools(), [])
+        (self.tools / "stray").mkdir(parents=True)
+        (self.tools / "damaged").mkdir()
+        (self.tools / "damaged" / config.TOOL_INFO_FILE).write_text("{")
+        (self.tools / "ollama").mkdir()
+        config.save_tool_info(self.tools / "ollama", "Ollama", "Runs models.", "1.2.3")
+        self.assertEqual(config.installed_tools(), [{"name": "Ollama", "description": "Runs models.", "version": "1.2.3", "path": self.tools / "ollama"}])
+
+    def test_the_tools_folder_sits_beside_the_data_folder_not_inside_it(self):
+        self.assertEqual(config.TOOLS_DIR.parent, config.IMAGENT_HOME.parent)
+        self.assertNotEqual(config.TOOLS_DIR, config.IMAGENT_HOME)
+

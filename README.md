@@ -9,7 +9,7 @@
 
 ## Requirements
 
-Python 3.9 to 3.14 and [Git](https://git-scm.com). Setup offers to install [Ollama](https://ollama.com) if you do not have it.
+Python 3.9 to 3.14 and [Git](https://git-scm.com). You do not need to install [Ollama](https://ollama.com) yourself: setup installs its own copy for Imagent when the computer has none (see below).
 
 ## Install
 
@@ -23,7 +23,7 @@ python -m pip install -e .
 
 This adds the `imagent` command inside the virtual environment, and your edits to the code take effect straight away. Activate the environment (`source .venv/bin/activate`) in each new terminal before using `imagent`. If your default Python is newer than 3.14, create the environment with Python 3.12 instead: `python3.12 -m venv .venv`.
 
-Then set it up (once). It checks Ollama, downloads the three models, locks them, measures your computer and asks how many deleted pictures to remember (see below):
+Then set it up (once). It checks Ollama (and installs it if needed), downloads the three models, locks them, measures your computer and asks how many deleted pictures to remember (see below):
 
 ```bash
 imagent setup
@@ -75,14 +75,26 @@ If a picture cannot be indexed because Ollama ran out of memory, stopped or did 
 
 Holds `imagent.db`, `config.json`, the logs and `last_error.log`.
 
+## Ollama
+
+If `imagent setup` finds no Ollama, or one older than Imagent needs, it downloads Ollama's official build for your computer (checked against a built-in checksum) into a folder of its own next to the data folder, with no administrator rights, no package manager and no change to `PATH`. The download is about 190 MB on macOS, 1.5 to 1.6 GB on Linux and 0.4 to 1.6 GB on Windows, and it unpacks to about 0.6 GB on macOS and up to about 2.3 GB on Linux and Windows, so keep up to about 4 GB free while it installs. This copy is used only by Imagent, and it keeps its models there too. An Ollama you already have, if it is recent enough, is used as it is and nothing is installed.
+
+| System | Imagent's own Ollama folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/Imagent-tools/ollama` |
+| Windows | `%LOCALAPPDATA%\Imagent-tools\ollama` |
+| Linux | `~/.local/share/imagent-tools/ollama` |
+
+On Linux the copy has no GPU drivers: an NVIDIA GPU is used if its driver is already installed, and AMD or Jetson GPUs are not supported by this copy (install Ollama yourself for those, and setup will use it).
+
 ## Uninstall
 
 ```bash
-imagent uninstall      # deletes the index, the data folder, the models Imagent downloaded and Ollama if Imagent installed it (three confirmations)
+imagent uninstall      # deletes the index, the data folder and the models Imagent downloaded (three confirmations), then asks whether to remove Imagent's own Ollama too
 pipx uninstall imagent # removes the program itself
 ```
 
-Your pictures, Ollama itself and any model you had before Imagent are never touched.
+Your pictures, an Ollama you installed yourself and any model you had before Imagent are never touched. Imagent's own Ollama is removed only if you answer yes (the default is to keep it); you can delete its folder yourself at any time.
 
 ## Troubleshooting
 

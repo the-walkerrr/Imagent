@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import atexit
 import io
-import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -118,10 +116,9 @@ def start_server(client: ollama.Client, host: str | None = None, wait_seconds: i
     A terminal closed or a ``kill`` while it runs also stops it.
     """
     host = host or config.OLLAMA_HOST
-    env = {**os.environ, "OLLAMA_HOST": host} if host else None  # otherwise the server listens on its default port, not the saved one
     try:
-        process = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-                                   **background_process_options())
+        process = subprocess.Popen([config.ollama_binary() or "ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   env=config.ollama_environment(host), **background_process_options())
     except OSError:
         return None
     _stop_server_when_killed()
@@ -156,7 +153,7 @@ def restart_server(client: ollama.Client) -> bool:
     """
     if is_reachable(client):
         return True
-    if not (is_local(config.OLLAMA_HOST) and shutil.which("ollama")):
+    if not (is_local(config.OLLAMA_HOST) and config.ollama_binary()):
         return False
     process = start_server(client, config.OLLAMA_HOST)
     if process is None:
@@ -196,15 +193,15 @@ def check_ready(conn, roles: tuple[str, ...]) -> tuple[ollama.Client, dict]:
                        f"Run: {config.SETUP_COMMAND}. It restores the local address; your models and index are kept.")
 
     client = make_client()
-    if not is_reachable(client) and is_local(config.OLLAMA_HOST) and shutil.which("ollama"):
+    if not is_reachable(client) and is_local(config.OLLAMA_HOST) and config.ollama_binary():
         process = start_server(client, config.OLLAMA_HOST)
         if process is not None:
             atexit.register(_stop_started_server, process)
     try:
         installed = {model.model: model.digest for model in client.list().models}
     except Exception as exc:
-        install_hint = (" The `ollama` command was not found: install Ollama from https://ollama.com/download."
-                        if is_local(config.OLLAMA_HOST) and not shutil.which("ollama") else " Start Ollama and try again.")
+        install_hint = (f" Ollama is not installed. Run: {config.SETUP_COMMAND}; it installs Ollama."
+                        if is_local(config.OLLAMA_HOST) and not config.ollama_binary() else " Start Ollama and try again.")
         raise NotReady(f"Cannot reach Ollama at {config.OLLAMA_HOST} ({type(exc).__name__}: {exc}).{install_hint}") from exc
 
     version = server_version(config.OLLAMA_HOST)

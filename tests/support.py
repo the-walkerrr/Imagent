@@ -37,8 +37,10 @@ class IsolatedHome(unittest.TestCase):
         self.home = Path(tmp.name) / "imagent-home"
         self.work = Path(tmp.name) / "work"
         self.work.mkdir()
+        self.tools = Path(tmp.name) / "imagent-tools"
         for name, value in (("IMAGENT_HOME", self.home), ("DB_PATH", self.home / "imagent.db"),
-                            ("CONFIG_PATH", self.home / "config.json")):
+                            ("CONFIG_PATH", self.home / "config.json"), ("TOOLS_DIR", self.tools),
+                            ("OLLAMA_DIR", self.tools / "ollama")):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import contextlib
 import json
 import os
 import platform
+import shutil
 from pathlib import Path
 
 
@@ -29,6 +32,9 @@ def _data_dir() -> Path:
 IMAGENT_HOME: Path = _data_dir()
 DB_PATH: Path = IMAGENT_HOME / "imagent.db"
 CONFIG_PATH: Path = IMAGENT_HOME / "config.json"
+# Programs that setup installs for Imagent (Ollama, when the computer has none) live here, beside the data folder and not in it:
+# uninstall deletes the data folder first and then asks whether to keep each program.
+TOOLS_DIR: Path = IMAGENT_HOME.with_name(IMAGENT_HOME.name + "-tools")
 
 
 def load_config() -> dict:
@@ -87,9 +93,82 @@ def record_pinned_model(pinned: str, base: str) -> None:
     save_install_record({**record, "ollama_models": models, "pinned_models": {**pins, pinned: base}})
 
 
-def record_ollama_installed() -> None:
-    """Note that setup installed Ollama itself (it was missing), so the uninstaller can tell you how to remove it."""
-    save_install_record({**load_install_record(), "ollama_installed": True})
+# --- Programs installed by setup -----------------------------------------------
+# Each lives in its own folder of TOOLS_DIR, with a small file saying what it is, so uninstall can describe it and offer to
+# remove it even after the data folder (and the install record in it) is gone.
+TOOL_INFO_FILE = "imagent-tool.json"
+OLLAMA_DIR: Path = TOOLS_DIR / "ollama"  # holds program/ (what the archive unpacks to), models/ and the info file
+
+
+def save_tool_info(folder: Path, name: str, description: str, version: str) -> None:
+    (folder / TOOL_INFO_FILE).write_text(json.dumps({"name": name, "description": description, "version": version}, indent=2) + "\n",
+                                         encoding="utf-8")
+
+
+def installed_tools() -> list[dict]:
+    """The programs setup installed that are still on this computer: [{"name", "description", "version", "path"}]."""
+    tools = []
+    for folder in sorted(TOOLS_DIR.iterdir()) if TOOLS_DIR.is_dir() else []:
+        try:
+            info = json.loads((folder / TOOL_INFO_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(info, dict) and isinstance(info.get("name"), str):
+            tools.append({"name": info["name"], "description": str(info.get("description", "")),
+                          "version": str(info.get("version", "")), "path": folder})
+    return tools
+
+
+# --- Ollama program ------------------------------------------------------------
+# The Ollama that setup installs when the computer has none (or an older one than Imagent needs): the official standalone build
+# for this OS and CPU, from Ollama's own release, pinned to one version and checked against these SHA-256 sums.
+# Running it needs no administrator rights and no change to PATH, and removing it is deleting its folder.
+OLLAMA_VERSION = "0.40.17"
+OLLAMA_RELEASE_URL = "https://github.com/ollama/ollama/releases/download/v{version}/{file}"
+OLLAMA_DOWNLOADS: dict = {  # (system, cpu) -> (file name, sha256)
+    ("Darwin", "arm64"): ("ollama-darwin.tgz", "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653"),
+    ("Darwin", "x86_64"): ("ollama-darwin.tgz", "4b9db20d077c5a1e52fb4a6f2e6791f76ae945fd07c9b1a5647c82e927826653"),
+    ("Linux", "x86_64"): ("ollama-linux-amd64.tar.zst", "1df9d6228bac5a22e420b242708c0d10e5b886db97bab99d446a41760f4e79af"),
+    ("Linux", "arm64"): ("ollama-linux-arm64.tar.zst", "0ec632480057cef6300459d1fa7dbbb3fc188b9a7d56cd0b0a72d05927d90ecc"),
+    ("Windows", "x86_64"): ("ollama-windows-amd64.zip", "3dd80f6e3a9699f2eadf4ac418f00529cee594df9557541806eda1f1f3f5588a"),
+    ("Windows", "arm64"): ("ollama-windows-arm64.zip", "f5eab93c7e6dca27f47d556489fa89f760979c6f6f83e0bf1cb26d38630ce83a"),
+}
+
+
+def ollama_download() -> tuple[str, str, str] | None:
+    """(url, file name, sha256) of the Ollama build for this computer, or None when there is none for its OS or CPU."""
+    cpu = {"amd64": "x86_64", "aarch64": "arm64"}.get(platform.machine().lower(), platform.machine().lower())
+    entry = OLLAMA_DOWNLOADS.get((platform.system(), cpu))
+    return (OLLAMA_RELEASE_URL.format(version=OLLAMA_VERSION, file=entry[0]), entry[0], entry[1]) if entry else None
+
+
+def private_ollama_binary() -> str | None:
+    """The `ollama` program that setup installed, or None if it did not (or it is gone)."""
+    name = "ollama.exe" if platform.system() == "Windows" else "ollama"
+    program = OLLAMA_DIR / "program"
+    for path in (program / name, program / "bin" / name):  # Windows and macOS unpack it at the top, Linux in bin/
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def ollama_binary() -> str | None:
+    """The `ollama` program Imagent runs: its own copy when setup installed one (the models are in that copy's folder), otherwise the one on PATH."""
+    return private_ollama_binary() or shutil.which("ollama")
+
+
+def ollama_environment(host: str | None) -> dict | None:
+    """The environment to start ``ollama serve`` with: the address to listen on and, when the program is Imagent's own, a home
+    inside its folder. Ollama keeps its models, its key pair and its cache in a ``.ollama`` folder in the user's home (the models
+    can be moved with OLLAMA_MODELS, the rest cannot), so without this, removing Imagent's copy would leave files behind in a folder
+    shared with any Ollama the user has. None when there is nothing to add."""
+    extra = {}
+    if host:  # otherwise the server listens on its default port, not the saved one
+        extra["OLLAMA_HOST"] = host
+    if private_ollama_binary():
+        extra["OLLAMA_MODELS"] = str(OLLAMA_DIR / "models")  # explicit, so an OLLAMA_MODELS of the user's own cannot send them elsewhere
+        extra["HOME"] = extra["USERPROFILE"] = str(OLLAMA_DIR / "home")  # USERPROFILE is the home on Windows
+    return {**os.environ, **extra} if extra else None
 
 
 # User preferences written by imagent setup.

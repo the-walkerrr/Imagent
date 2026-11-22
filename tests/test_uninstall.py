@@ -30,30 +30,36 @@ class InstallRecordTests(IsolatedHome):
             setup._pull_models(client, ["had-before", "new-one:1b"])
         self.assertEqual(config.load_install_record(), {"ollama_models": ["new-one:1b"]})
 
-    def test_installing_ollama_is_recorded_beside_the_models(self):
-        setup._remember_pulled("vision")
-        config.record_ollama_installed()
-        self.assertEqual(config.load_install_record(), {"ollama_models": ["vision:latest"], "ollama_installed": True})
-
-    def test_setup_records_ollama_only_when_it_installed_it_itself(self):
-        with mock.patch.object(setup, "say"), mock.patch.object(setup, "ensure_ollama_current"), \
-                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/ollama"):
-            setup.ensure_ollama_installed()  # already there
-        self.assertEqual(config.load_install_record(), {})
-        with mock.patch.object(setup, "say"), mock.patch.object(setup, "ask", return_value=True), \
-                mock.patch.object(setup.questionary, "confirm"), mock.patch.object(setup, "install_command", return_value=["brew", "install", "ollama"]), \
-                mock.patch.object(setup, "_succeeds", return_value=True), mock.patch.object(setup.shutil, "which", side_effect=[None, "/usr/bin/ollama"]):
-            setup.ensure_ollama_installed()
-        self.assertEqual(config.load_install_record(), {"ollama_installed": True})
-
-    def test_a_failed_ollama_install_is_not_recorded(self):
-        with mock.patch.object(setup, "say"), mock.patch.object(setup, "ask", return_value=True), \
-                mock.patch.object(setup.questionary, "confirm"), mock.patch.object(setup, "install_command", return_value=["brew", "install", "ollama"]), \
-                mock.patch.object(setup, "_succeeds", return_value=False), mock.patch.object(setup.shutil, "which", return_value=None), \
-                mock.patch.object(setup, "fail", side_effect=SystemExit):
-            with self.assertRaises(SystemExit):
+    def test_setup_uses_the_ollama_that_is_there_and_installs_nothing(self):
+        for version in ((0, 9, 0), None):  # None: an Ollama that cannot say its version is trusted
+            with mock.patch.object(setup, "say"), mock.patch.object(setup, "install_ollama") as install, \
+                    mock.patch.object(setup.shutil, "which", return_value="/usr/bin/ollama"), \
+                    mock.patch.object(setup, "_ollama_command_version", return_value=version):
                 setup.ensure_ollama_installed()
-        self.assertEqual(config.load_install_record(), {})
+            install.assert_not_called()
+        self.assertEqual(config.installed_tools(), [])
+
+    def test_an_ollama_older_than_imagent_needs_is_left_alone_and_imagent_installs_its_own(self):
+        with mock.patch.object(setup, "say") as say, mock.patch.object(setup, "install_ollama") as install, \
+                mock.patch.object(setup.shutil, "which", return_value="/usr/bin/ollama"), \
+                mock.patch.object(setup, "_ollama_command_version", return_value=(0, 4, 0)):
+            setup.ensure_ollama_installed()
+        install.assert_called_once_with()
+        self.assertIn("leaves yours as it is", say.call_args.args[0])
+
+    def test_no_ollama_at_all_installs_imagents_own(self):
+        with mock.patch.object(setup, "say"), mock.patch.object(setup, "install_ollama") as install, \
+                mock.patch.object(setup.shutil, "which", return_value=None):
+            setup.ensure_ollama_installed()
+        install.assert_called_once_with()
+
+    def test_imagents_own_copy_is_used_again_without_installing_or_looking_at_the_system(self):
+        with mock.patch.object(setup, "say"), mock.patch.object(setup, "install_ollama") as install, \
+                mock.patch.object(config, "private_ollama_binary", return_value="/tools/ollama"), \
+                mock.patch.object(setup.shutil, "which") as which:
+            setup.ensure_ollama_installed()
+        install.assert_not_called()
+        which.assert_not_called()
 
     def test_a_missing_or_damaged_record_reads_as_empty(self):
         self.assertEqual(config.load_install_record(), {})
@@ -98,45 +104,17 @@ class PlanTests(IsolatedHome):
         self.assertEqual(plan["models_unreachable"], ["ours:latest"])
 
 
+    def test_the_tools_setup_installed_are_part_of_the_plan(self):
+        (self.tools / "ollama").mkdir(parents=True)
+        config.save_tool_info(self.tools / "ollama", "Ollama", "Runs the AI models.", "0.40.17")
+        (self.tools / "stray").mkdir()  # a folder without the info file is not Imagent's to offer
+        with mock.patch.object(uninstall, "_installed_models", return_value={}):
+            plan = uninstall.make_plan(None, {"locked_models": []})
+        self.assertEqual([(tool["name"], tool["version"], tool["path"]) for tool in plan["tools"]],
+                         [("Ollama", "0.40.17", self.tools / "ollama")])
+
+
 CODE = "aB3dE5gH7j"
-
-
-class OllamaRemovalCommandTests(IsolatedHome):
-    def command(self, system, which, service_file=True, euid=1000):
-        service = self.work / "ollama.service"
-        if service_file:
-            service.write_text("[Unit]")
-        with mock.patch.object(uninstall.platform, "system", return_value=system), \
-                mock.patch.object(uninstall.shutil, "which", side_effect=lambda name: which.get(name)), \
-                mock.patch.object(uninstall, "LINUX_SERVICE_FILE", service), \
-                mock.patch.object(uninstall.os, "geteuid", return_value=euid, create=True):
-            return uninstall.ollama_removal_command()
-
-    def test_macos_and_windows_use_their_package_manager(self):
-        self.assertEqual(self.command("Darwin", {"brew": "/opt/homebrew/bin/brew"}), ["brew", "uninstall", "ollama"])
-        self.assertEqual(self.command("Windows", {"winget": "winget"}), ["winget", "uninstall", "--id", "Ollama.Ollama", "-e", "--silent"])
-
-    def test_without_the_package_manager_there_is_no_command(self):
-        self.assertIsNone(self.command("Darwin", {}))
-        self.assertIsNone(self.command("Windows", {}))
-
-    def test_linux_is_one_sudo_line_that_ends_by_checking_it_worked(self):
-        command = self.command("Linux", {"systemctl": "/bin/systemctl", "ollama": "/usr/local/bin/ollama", "sudo": "/usr/bin/sudo"})
-        self.assertEqual(command[:3], ["sudo", "sh", "-c"])
-        for step in ("systemctl stop ollama", "systemctl disable ollama", "/usr/local/bin/ollama", "/usr/share/ollama", "userdel ollama"):
-            self.assertIn(step, command[3])
-        self.assertTrue(command[3].endswith("test ! -e /usr/local/bin/ollama"))
-
-    def test_linux_as_root_needs_no_sudo(self):
-        command = self.command("Linux", {"systemctl": "/bin/systemctl", "ollama": "/usr/bin/ollama"}, euid=0)
-        self.assertEqual(command[:2], ["sh", "-c"])
-
-    def test_linux_that_does_not_look_like_the_install_script_left_it_gets_no_command(self):
-        tools = {"systemctl": "/bin/systemctl", "ollama": "/usr/local/bin/ollama", "sudo": "/usr/bin/sudo"}
-        self.assertIsNone(self.command("Linux", tools, service_file=False))
-        self.assertIsNone(self.command("Linux", {**tools, "ollama": "/home/me/bin/ollama"}))
-        self.assertIsNone(self.command("Linux", {**tools, "systemctl": None}))
-        self.assertIsNone(self.command("Linux", {**tools, "sudo": None}))
 
 
 class DurationTests(unittest.TestCase):
@@ -220,10 +198,11 @@ class MainTests(IsolatedHome):
     def run_main(self, answers):
         stdin = mock.Mock()
         stdin.isatty.return_value = True
-        with mock.patch.object(sys, "stdin", stdin), mock.patch("builtins.input", side_effect=answers), \
+        with mock.patch.object(sys, "stdin", stdin), mock.patch("builtins.input", side_effect=answers) as asked, \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as exit_info:
                 uninstall.main()
+        self.questions = [call.args[0] for call in asked.call_args_list]  # input() prints its question itself, so it is not in ``out``
         return exit_info.exception.code, out.getvalue()
 
     def test_no_terminal_stops_before_anything(self):
@@ -253,49 +232,70 @@ class MainTests(IsolatedHome):
         self.assertFalse(data.exists())
         self.assertIn("pipx uninstall imagent", out)
 
-    def main_with_ollama_record(self, answers, command, installed=True, returncode=0):
+    def main_with_a_tool(self, answers, installed=True):
+        """Run main() with Imagent's data and, when ``installed``, its own Ollama (with a file in it, like the real one has)."""
         data = self.work / "Imagent"
         data.mkdir()
         (data / "imagent.db").write_bytes(b"db")
         if installed:
-            (data / "install_record.json").write_text('{"ollama_installed": true}')
+            (self.tools / "ollama" / "program").mkdir(parents=True)
+            (self.tools / "ollama" / "program" / "ollama").write_bytes(b"x" * 2000)
+            config.save_tool_info(self.tools / "ollama", "Ollama", "Runs the AI models.", "0.40.17")
         with mock.patch.object(config, "IMAGENT_HOME", data), mock.patch.object(config, "DB_PATH", data / "imagent.db"), \
                 mock.patch.object(config, "CONFIG_PATH", data / "config.json"), \
                 mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)), \
-                mock.patch.object(uninstall, "make_final_code", return_value=CODE), \
-                mock.patch.object(uninstall, "ollama_removal_command", return_value=command), \
-                mock.patch.object(uninstall.subprocess, "run", return_value=SimpleNamespace(returncode=returncode)) as run:
-            code, out = self.run_main(answers)
-        return code, out, run
+                mock.patch.object(uninstall, "make_final_code", return_value=CODE):
+            return self.run_main(answers)
 
-    def test_the_plan_lists_ollama_and_the_three_confirmations_cover_its_removal(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"])
+    def test_each_tool_is_described_and_asked_about_after_the_data_is_gone(self):
+        code, out = self.main_with_a_tool(["yes", "0", CODE, "y"])
         self.assertEqual(code, 0)
-        self.assertIn("Command: brew uninstall ollama", out)
-        run.assert_called_once_with(["brew", "uninstall", "ollama"])
+        self.assertIn("Ollama 0.40.17: Runs the AI models.", out)
+        self.assertEqual(len(self.questions), 4)  # three confirmations, then the question about Ollama
+        self.assertIn("Remove Ollama too? [y/N]", self.questions[-1])
+        self.assertLess(out.index("Deleted the data folder"), out.index("Ollama 0.40.17"))
         self.assertIn("Removed Ollama", out)
+        self.assertFalse(self.tools.exists())  # the folder and the then-empty tools folder
 
-    def test_declining_the_confirmations_leaves_ollama_alone(self):
-        code, out, run = self.main_with_ollama_record(["no"], ["brew", "uninstall", "ollama"])
+    def test_the_default_answer_keeps_the_tool_and_says_where_it_is(self):
+        code, out = self.main_with_a_tool(["yes", "0", CODE, ""])
+        self.assertEqual(code, 0)
+        self.assertTrue((self.tools / "ollama" / "program" / "ollama").exists())
+        self.assertIn(f"Ollama was kept. To remove it later, delete the folder {self.tools / 'ollama'}", out)
+
+    def test_declining_the_confirmations_never_gets_as_far_as_the_tools(self):
+        code, out = self.main_with_a_tool(["no"])
         self.assertNotEqual(code, 0)
-        run.assert_not_called()
+        self.assertEqual(len(self.questions), 1)  # the first confirmation, and no more
+        self.assertTrue((self.tools / "ollama").exists())
 
-    def test_a_failed_removal_is_reported_with_the_command(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"], returncode=1)
-        self.assertEqual(code, 1)
-        self.assertIn("Could not remove Ollama. Remove it yourself with: brew uninstall ollama", out)
-
-    def test_with_no_command_for_this_computer_it_says_to_remove_ollama_by_hand(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], None)
+    def test_without_a_tool_nothing_is_asked(self):
+        code, out = self.main_with_a_tool(["yes", "0", CODE], installed=False)
         self.assertEqual(code, 0)
-        run.assert_not_called()
-        self.assertIn("Imagent installed Ollama itself, and it will not be removed", out)
+        self.assertEqual(len(self.questions), 3)
 
-    def test_without_the_record_ollama_is_not_mentioned(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"], installed=False)
+    def test_a_kept_tool_is_offered_again_by_a_later_uninstall_even_with_no_data_left(self):
+        (self.tools / "ollama").mkdir(parents=True)
+        config.save_tool_info(self.tools / "ollama", "Ollama", "Runs the AI models.", "0.40.17")
+        code, out = self.run_main_with_nothing_else(["y"])
         self.assertEqual(code, 0)
-        run.assert_not_called()
-        self.assertNotIn("Imagent installed Ollama", out)
+        self.assertIn("already removed", out)
+        self.assertIn("Removed Ollama", out)
+        self.assertFalse(self.tools.exists())
+
+    def run_main_with_nothing_else(self, answers):
+        with mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)):
+            return self.run_main(answers)
+
+    def test_a_tool_whose_folder_is_not_in_the_tools_folder_is_never_deleted(self):
+        elsewhere = self.work / "Documents"
+        elsewhere.mkdir()
+        (elsewhere / "keep.txt").write_text("mine")
+        tool = {"name": "Ollama", "description": "", "version": "", "path": elsewhere}
+        with mock.patch("builtins.input", return_value="y"), contextlib.redirect_stdout(io.StringIO()):
+            problems = uninstall.offer_tool_removal([tool])
+        self.assertTrue((elsewhere / "keep.txt").exists())
+        self.assertEqual(len(problems), 1)
 
     def test_with_nothing_to_remove_it_still_says_how_to_remove_the_program(self):
         with mock.patch.object(uninstall, "_ollama", return_value=contextlib.nullcontext(None)):

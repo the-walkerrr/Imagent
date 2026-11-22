@@ -7,6 +7,8 @@ reinstalls a missing one. Starts Ollama only temporarily, to download the models
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import os
 import platform
@@ -15,8 +17,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
+import time
 import urllib.error
 import urllib.request
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -30,7 +35,6 @@ from imagent.pipeline.console import make_output_safe
 
 DEFAULT_HOST = "http://localhost:11434"
 CANCELLED = "Setup cancelled. Run it again any time."
-INSTALL_TIMEOUT = 1800  # seconds allowed for installing Ollama
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
@@ -270,13 +274,6 @@ def offer_prompt_copy(failed: dict | None = None) -> bool:
 
 # --- Helpers ------------------------------------------------------------------
 
-def _succeeds(cmd: list[str]) -> bool:
-    try:
-        return subprocess.run(cmd, timeout=INSTALL_TIMEOUT).returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-
-
 def prepare_ocr() -> None:
     """Load the OCR engine now. Its models come with the package, so nothing is downloaded, and Imagent never needs the internet once set up."""
     say("Loading the text-reading (OCR) engine…")
@@ -291,21 +288,17 @@ def prepare_ocr() -> None:
 
 # --- Step 2: Ollama -----------------------------------------------------------
 
-def install_command(upgrade: bool = False):
-    system = platform.system()
-    if system == "Darwin" and shutil.which("brew"):
-        return ["brew", "upgrade" if upgrade else "install", "ollama"]
-    if system == "Linux":
-        return ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]  # also updates an existing install
-    if system == "Windows" and shutil.which("winget"):
-        return ["winget", "upgrade" if upgrade else "install", "--id", "Ollama.Ollama", "-e"]
-    return None
+class OllamaInstallError(Exception):
+    """Installing Ollama failed; the message says why."""
 
 
-def _ollama_command_version():
-    """Version of the installed `ollama` command as numbers, e.g. (0, 6, 4); None if it cannot be told."""
+OLLAMA_DESCRIPTION = "Runs the AI models on your computer. Imagent installed its own copy, which only Imagent uses."
+
+
+def _ollama_command_version(command: str = "ollama"):
+    """Version of the `ollama` program at ``command`` as numbers, e.g. (0, 6, 4); None if it cannot be told."""
     try:
-        out = subprocess.run(["ollama", "--version"], capture_output=True, text=True, timeout=15)
+        out = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
     text = out.stdout + out.stderr
@@ -314,44 +307,148 @@ def _ollama_command_version():
     return version if version and any(version) else None  # a development build reports 0.0.0
 
 
-def ensure_ollama_current() -> None:
-    """Offer to update a local Ollama older than Imagent needs. An Ollama on another computer is checked once its address is known."""
-    from imagent.vlm.client import MIN_OLLAMA_VERSION  # needs the packages that ensure_packages installed
-    version = _ollama_command_version()
-    if version is None or version >= MIN_OLLAMA_VERSION:
+def _remove(path: Path) -> None:
+    """Delete a file or folder if it exists."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _download_file(url: str, target: Path) -> str:
+    """Download ``url`` into ``target``, showing progress. Returns the SHA-256 of what arrived."""
+    digest = hashlib.sha256()
+    request = urllib.request.Request(url, headers={"User-Agent": "imagent"})
+    with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as out:
+        total = int(response.headers.get("Content-Length") or 0)
+        free = shutil.disk_usage(target.parent).free
+        if total and free < total:
+            raise OllamaInstallError(f"There is not enough free disk space: the download is {_fmt_bytes(total)} and {_fmt_bytes(free)} is free.")
+        done, shown = 0, 0.0
+        while chunk := response.read(1 << 20):
+            out.write(chunk)
+            digest.update(chunk)
+            done += len(chunk)
+            if time.monotonic() - shown >= 0.25:
+                shown = time.monotonic()
+                share = f"  {done * 100 // total}%  ({_fmt_bytes(done)} of {_fmt_bytes(total)})" if total else f"  {_fmt_bytes(done)}"
+                print(f"\r\033[K{INDENT}Downloading Ollama{share}", end="", flush=True)
+    print("\r\033[K", end="", flush=True)
+    return digest.hexdigest()
+
+
+def _check_tar_member(destination: Path, member: tarfile.TarInfo) -> None:
+    """Refuse an archive entry that would be written outside ``destination`` or is not a plain file, folder or link."""
+    root = destination.resolve()
+
+    def inside(path: Path) -> bool:
+        try:
+            path.resolve().relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    target = destination / member.name
+    ok = (member.isreg() or member.isdir() or member.issym() or member.islnk()) and inside(target)
+    if ok and member.issym():
+        ok = inside(target.parent / member.linkname)
+    if ok and member.islnk():
+        ok = inside(destination / member.linkname)
+    if not ok:
+        raise OllamaInstallError(f"The download holds an unsafe entry ({member.name}), so it was not unpacked.")
+
+
+def _unpack(archive: Path, destination: Path) -> None:
+    """Unpack Ollama's .zip, .tgz or .tar.zst into the new folder ``destination``."""
+    destination.mkdir(parents=True)
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(destination)  # removes any ../ or absolute path from the names itself
         return
-    needed = ".".join(map(str, MIN_OLLAMA_VERSION))
-    say(f"Your Ollama is version {'.'.join(map(str, version))}, but Imagent needs {needed} or newer.", "fg:ansimagenta")
-    cmd = install_command(upgrade=True)
-    if cmd is None:
-        fail(f"Please update Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    say(f"Update command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
-    if not ask(questionary.confirm("Update Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail(f"Imagent needs Ollama {needed} or newer. Update it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    if not _succeeds(cmd):
-        fail(f"The Ollama update did not finish. Update it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    say("✓ Ollama updated. If the Ollama app is open, quit and reopen it so it uses the new version.", "fg:green")
+    options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+    if archive.name.endswith(".tar.zst"):
+        import zstandard
+        try:
+            with open(archive, "rb") as raw, zstandard.ZstdDecompressor().stream_reader(raw) as reader, \
+                    tarfile.open(fileobj=reader, mode="r|") as bundle:
+                for member in bundle:
+                    _check_tar_member(destination, member)
+                    bundle.extract(member, destination, **options)
+        except zstandard.ZstdError as exc:
+            raise OllamaInstallError(f"The download is damaged ({exc}).") from exc
+        return
+    with tarfile.open(archive, "r:gz") as bundle:
+        for member in bundle:
+            _check_tar_member(destination, member)
+            bundle.extract(member, destination, **options)
+
+
+def install_ollama() -> None:
+    """Download Ollama's own build for this computer into Imagent's tools folder. It needs no administrator rights and no change
+    to PATH, and uninstalling removes it by deleting the folder. Stops setup, with the reason, when it cannot be done."""
+    manual = f"Install Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again."
+    download = app_config.ollama_download()
+    if download is None:
+        fail(f"Imagent has no Ollama build for this computer ({platform.system()} on {platform.machine()}). {manual}")
+    url, file_name, expected = download
+    root = app_config.OLLAMA_DIR
+    program, partial, archive = root / "program", root / "program.partial", root / file_name
+    say(f"Installing Ollama {app_config.OLLAMA_VERSION} for Imagent only. It needs no administrator rights: {root}")
+    swapped = False
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        _remove(partial)
+        _remove(archive)
+        if _download_file(url, archive) != expected:
+            raise OllamaInstallError("The download is not the file Ollama published (its checksum is different).")
+        say("Unpacking…")
+        _unpack(archive, partial)
+        _remove(program)
+        os.replace(partial, program)  # a half-unpacked folder never looks installed
+        swapped = True
+        binary = app_config.private_ollama_binary()
+        if binary is None:
+            raise OllamaInstallError("The download does not contain the `ollama` program.")
+        if subprocess.run([binary, "--version"], capture_output=True, timeout=60).returncode != 0:
+            raise OllamaInstallError("The downloaded Ollama does not run on this computer.")
+        (root / "models").mkdir(exist_ok=True)
+        app_config.save_tool_info(root, "Ollama", OLLAMA_DESCRIPTION, app_config.OLLAMA_VERSION)
+    except OllamaInstallError as exc:
+        reason = str(exc)
+    except OSError as exc:
+        reason = "There is not enough free disk space." if exc.errno == errno.ENOSPC else f"{type(exc).__name__}: {exc}"
+    except (tarfile.TarError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+    else:
+        reason = None
+    finally:
+        _remove(archive)
+        _remove(partial)
+    if reason is not None:
+        if swapped:
+            _remove(program)
+        fail(f"The Ollama install did not finish. {reason} {manual}")
+    say("✓ Ollama installed.", "fg:green")
 
 
 def ensure_ollama_installed() -> None:
-    if shutil.which("ollama"):
-        say("✓ Ollama is installed.", "fg:green")
-        ensure_ollama_current()
+    """Use the Ollama that is here: Imagent's own copy, or the one on PATH if it is new enough. Otherwise install Imagent's own copy,
+    and leave an older Ollama of the user's as it is."""
+    from imagent.vlm.client import MIN_OLLAMA_VERSION  # needs the packages that ensure_packages installed
+    if app_config.private_ollama_binary():
+        say("✓ Ollama is installed (the copy Imagent installed).", "fg:green")
         return
-    say("Ollama is the program that runs the AI models on your computer. It is not installed yet.", "fg:ansimagenta")
-    cmd = install_command()
-    if cmd is None:
-        fail(f"Please install Ollama from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    say(f"Install command: {cmd[-1] if cmd[0] == 'sh' else ' '.join(cmd)}")
-    if not ask(questionary.confirm("Install Ollama now?", default=True, qmark=QMARK, style=STYLE)):
-        fail(f"Ollama is required. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    if not _succeeds(cmd):
-        fail(f"The Ollama install did not finish. Install it from https://ollama.com/download, then run {app_config.SETUP_COMMAND} again.")
-    app_config.record_ollama_installed()
-    if shutil.which("ollama"):
-        say("✓ Ollama installed.", "fg:green")
+    system_copy = shutil.which("ollama")
+    if system_copy:
+        version = _ollama_command_version(system_copy)
+        if version is None or version >= MIN_OLLAMA_VERSION:
+            say("✓ Ollama is installed.", "fg:green")
+            return
+        say(f"Your Ollama is version {'.'.join(map(str, version))}, but Imagent needs {'.'.join(map(str, MIN_OLLAMA_VERSION))} or newer. "
+            "Imagent installs its own copy and leaves yours as it is.", "fg:ansimagenta")
     else:
-        say("✓ Ollama installed. Open a new terminal window afterwards so the `ollama` command works.", "fg:green")
+        say("Ollama is the program that runs the AI models on your computer. It is not installed yet.", "fg:ansimagenta")
+    install_ollama()
 
 
 # --- Step 3: models -----------------------------------------------------------
@@ -673,8 +770,8 @@ def ollama_client(host: str):
                 say(f"✗ Cannot reach Ollama at {host}.", RED)
                 yield None
                 return
-            if not shutil.which("ollama"):
-                say(f"✗ The `ollama` command was not found. Open a new terminal window and run {app_config.SETUP_COMMAND} again.", RED)
+            if not app_config.ollama_binary():
+                say(f"✗ The `ollama` program was not found. Run {app_config.SETUP_COMMAND} again to install it.", RED)
                 yield None
                 return
             say("Starting Ollama in the background…")

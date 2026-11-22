@@ -119,11 +119,10 @@ class CommandLineTests(unittest.TestCase):
         runs["menu"].assert_called_once_with()
         self.assertEqual([name for name, run in runs.items() if run.called], ["menu"])
 
-    def test_no_command_runs_setup_first_when_it_has_not_been_done(self):
+    def test_the_menu_always_opens_without_running_setup_first(self):
         runs = self.run_command(needs_setup=True)
-        runs["setup"].assert_called_once_with()
         runs["menu"].assert_called_once_with()
-        self.assertEqual([name for name, run in runs.items() if run.called], ["menu", "setup"])
+        self.assertEqual([name for name, run in runs.items() if run.called], ["menu"])
 
     def test_every_command_but_setup_and_uninstall_runs_setup_first_when_it_has_not_been_done(self):
         for argv in (["search", "red car"], ["scan"], ["scan", "add", "/pictures"], ["failed"], ["forget"]):
@@ -150,14 +149,6 @@ class CommandLineTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
                 cli.main(["scan", "add", "/pictures"])
             run_scan_add.assert_not_called()
-
-    def test_the_menu_does_not_open_when_setup_is_cancelled_or_fails(self):
-        for error in (KeyboardInterrupt, SystemExit("Ollama is required.")):
-            with mock.patch.object(menu, "needs_setup", return_value=True), \
-                    mock.patch.object(setup, "main", side_effect=error), mock.patch.object(menu, "main") as run_menu, \
-                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
-                cli.main([])
-            run_menu.assert_not_called()
 
     def test_a_command_that_does_not_exist_is_refused_and_nothing_runs(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:

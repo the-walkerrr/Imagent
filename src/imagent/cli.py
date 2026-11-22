@@ -1,6 +1,6 @@
 """imagent/cli.py — The ``imagent`` command: read the command line and run the command it names.
 
-``imagent`` with no command opens the menu. Every command except ``setup`` and ``uninstall`` (and the menu) runs setup first if it has not been done. Each command is a module in ``imagent/commands``; it is imported only when it is
+``imagent`` with no command opens the menu. The menu always appears, set up or not; every command except ``setup`` and ``uninstall`` runs setup first if it has not been done (so a command picked in the menu does). Each command is a module in ``imagent/commands``; it is imported only when it is
 run, so ``imagent --help`` and a mistyped command answer at once, without loading the image and model libraries.
 """
 
@@ -60,7 +60,7 @@ def _set_up_first() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command not in ("setup", "uninstall"):  # setup is the fix itself, and uninstall must work on a broken install
+    if args.command not in (None, "setup", "uninstall"):  # the menu always appears; setup is the fix itself, and uninstall must work on a broken install
         _set_up_first()
     if args.command == "search":
         from imagent.commands import search
