@@ -12,9 +12,9 @@ from unittest import mock
 
 from PIL import Image
 
-import config
-from image_processing import sample_pictures
-from install import install
+from imagent import config
+from imagent.image_processing import sample_pictures
+from imagent.commands import setup
 
 SMALL = 1_500_000  # bytes for the largest picture made, so these tests are quick
 
@@ -153,13 +153,13 @@ class MadePicturesTests(Folder):
 class SetupStepTests(unittest.TestCase):
     def run_step(self, **patches):
         said = []
-        with mock.patch.object(install, "say", lambda message, style="": said.append(message)), \
+        with mock.patch.object(setup, "say", lambda message, style="": said.append(message)), \
                 mock.patch.object(config, "IMAGENT_HOME", Path(tempfile.mkdtemp())):
             for name, value in patches.items():
                 patcher = mock.patch.object(sample_pictures, name, value)
                 patcher.start()
                 self.addCleanup(patcher.stop)
-            install.check_test_pictures()
+            setup.check_test_pictures()
         return said
 
     def test_the_outcome_is_told_in_one_line(self):

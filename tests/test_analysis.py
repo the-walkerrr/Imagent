@@ -8,14 +8,14 @@ from unittest import mock
 import httpx
 import ollama
 
-import config
-from db.operations import add_failure_history, get_or_add_root, park_backlog, upsert_backlog
-from pipeline.failure import RunStopped
-from scan_and_index import scan_and_index
+from imagent import config
+from imagent.db.operations import add_failure_history, get_or_add_root, park_backlog, upsert_backlog
+from imagent.pipeline.failure import RunStopped
+from imagent.commands import scan
 from tests.support import IsolatedHome
-from text_processing.formatters import build_description, build_search_text
-from vlm import analyzer
-from vlm.reply_validation import check_reply
+from imagent.text_processing.formatters import build_description, build_search_text
+from imagent.vlm import analyzer
+from imagent.vlm.reply_validation import check_reply
 
 GOOD_REPLY = {
     "short_description": "A cat.", "scene": "A cat sits on a sofa.", "objects_and_layout": "A sofa.",
@@ -366,7 +366,7 @@ class EmbeddingRecoveryTests(unittest.TestCase):
             self.unloaded.append(request["model"])
 
     def setUp(self):
-        patcher = mock.patch("vlm.analyzer.time.sleep")
+        patcher = mock.patch("imagent.vlm.analyzer.time.sleep")
         self.sleep = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -438,7 +438,7 @@ class IndexImageTests(IsolatedHome):
         client.embed = lambda **request: SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]])
         settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 3}
         with mock.patch.object(analyzer, "extract_text_blocks", return_value=["EXIT"]):
-            result = scan_and_index.index_image(conn, client, settings, root_id, image)
+            result = scan.index_image(conn, client, settings, root_id, image)
         self.assertEqual(result, ("indexed", "A cat."))
         row = conn.execute("SELECT short_description, description, vlm_metadata_json FROM image_data").fetchone()
         stored = json.loads(row["vlm_metadata_json"])
@@ -461,7 +461,7 @@ class IndexImageTests(IsolatedHome):
         client.embed = lambda **request: SimpleNamespace(embeddings=[[0.1, 0.2]])
         settings = {"vlm_model": "v", "embedding_model": "e", "embedding_dim": 3}
         with mock.patch.object(analyzer, "extract_text_blocks", return_value=[]), self.assertRaises(RunStopped):
-            scan_and_index.index_image(conn, client, settings, root_id, image)
+            scan.index_image(conn, client, settings, root_id, image)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM image_data").fetchone()[0], 0)
 
 
@@ -488,13 +488,13 @@ class FailureRecordTests(IsolatedHome):
         with conn:
             root_id = get_or_add_root(conn, str(self.work))
             upsert_backlog(conn, "/a.png", root_id, "t1")
-            park_backlog(conn, "/a.png", "cut_off", "cut off", "model_changed")
+            park_backlog(conn, "/a.png", "cut_off", "reply_cut_off", "model_changed")
             upsert_backlog(conn, "/a.png", root_id, "t1")  # scanned again, unchanged
-        row = conn.execute("SELECT status, park_kind, last_error FROM backlog").fetchone()
-        self.assertEqual(tuple(row), ("parked", "cut_off", "cut off"))
+        row = conn.execute("SELECT status, park_kind, error_id FROM backlog").fetchone()
+        self.assertEqual(tuple(row), ("parked", "cut_off", "reply_cut_off"))
         with conn:
             upsert_backlog(conn, "/a.png", root_id, "t2")  # the file changed
-        row = conn.execute("SELECT status, park_kind, last_error, retry_when FROM backlog").fetchone()
+        row = conn.execute("SELECT status, park_kind, error_id, retry_when FROM backlog").fetchone()
         self.assertEqual(tuple(row), ("queued", None, None, None))
 
 

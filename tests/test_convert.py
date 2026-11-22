@@ -1,22 +1,17 @@
 """Pictures Pillow cannot open: the copy the operating system's tool makes of them, and what the user is told when none can be made."""
 
 import contextlib
-import io
 import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import config
-from db.operations import get_or_add_root, park_backlog, record_backlog_failure, upsert_backlog
-from image_processing import convert
-from image_processing.convert import ConversionFailed, converted_copy
-from image_processing.problems import UNSUPPORTED, ImageProblem, problem
-from menu import menu
-from os_specific import convert as os_convert
-from scan_and_index import scan_and_index
-from tests.support import IsolatedHome
-from vlm import analyzer
+from imagent.commands import scan
+from imagent.image_processing import convert
+from imagent.image_processing.convert import ConversionFailed, converted_copy
+from imagent.image_processing.problems import UNSUPPORTED, ImageProblem, problem
+from imagent.os_specific import convert as os_convert
+from imagent.vlm import analyzer
 
 
 def finished(returncode=0, stderr=""):
@@ -80,7 +75,7 @@ class ConvertedCopyTests(unittest.TestCase):
 
 
 class AnalyseUnsupportedTests(unittest.TestCase):
-    unsupported = staticmethod(lambda: problem(UNSUPPORTED, "Imagent cannot open .heic pictures on this computer. Convert the picture to JPEG or PNG and keep the copy in the same folder."))
+    unsupported = staticmethod(lambda: problem(UNSUPPORTED, "unsupported_format", params={"suffix": ".heic"}))
 
     def analyse(self, converted):
         """analyse_image on a picture Pillow cannot open; ``converted`` is the copy's path, or an exception from making it."""
@@ -116,7 +111,7 @@ class AnalyseUnsupportedTests(unittest.TestCase):
 
     def test_other_problems_with_the_picture_are_not_converted(self):
         def analyse_file(*args):
-            raise problem("unreadable", "damaged")
+            raise problem("unreadable", "damaged_picture")
         with mock.patch.object(analyzer, "_analyse_file", analyse_file), mock.patch.object(analyzer, "converted_copy") as copy:
             with self.assertRaises(ImageProblem):
                 analyzer.analyse_image(object(), "vlm", "/a.png")
@@ -128,67 +123,9 @@ class WhatTheUserIsToldTests(unittest.TestCase):
 
     def test_no_message_suggests_changing_the_model(self):
         import inspect
-        from image_processing import memory, problems
-        for module in (analyzer, memory, problems, scan_and_index):
+        from imagent.image_processing import memory, problems
+        for module in (analyzer, memory, problems, scan):
             self.assertNotRegex(inspect.getsource(module).lower(), r"another (vision )?model|different (vision )?model|change the model")
-
-
-class FailedImagesReportTests(IsolatedHome):
-    def setUp(self):
-        super().setUp()
-        self.conn = self.connect()
-        with self.conn:
-            root_id = get_or_add_root(self.conn, str(self.work))
-            for name in ("a.png", "b.png", "c.png"):
-                upsert_backlog(self.conn, str(self.work / name), root_id, "t")
-
-    def report(self, limit=10):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            count = scan_and_index.print_failed(self.conn, limit)
-        return count, out.getvalue()
-
-    def test_nothing_is_said_when_nothing_failed(self):
-        self.assertEqual(self.report(), (0, ""))
-
-    def test_each_image_is_listed_with_its_reason_and_what_to_do_about_it(self):
-        with self.conn:
-            park_backlog(self.conn, str(self.work / "a.png"), "unreadable", "The picture file is damaged or incomplete. Copy it again.", "file_changed")
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "Ollama stopped responding. Close other apps.", False, kind="server_crash")
-        count, text = self.report()
-        self.assertEqual(count, 2)
-        for expected in ("2 image(s) could not be indexed", "a.png", "damaged or incomplete", "b.png", "Close other apps"):
-            self.assertIn(expected, text)
-        self.assertNotIn("c.png", text)
-
-    def test_an_image_leaves_the_list_when_it_is_indexed_later(self):
-        with self.conn:
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "Ollama stopped responding.", False, kind="server_crash")
-        self.assertEqual(self.report()[0], 1)
-        with self.conn:
-            self.conn.execute("DELETE FROM backlog WHERE file_path = ?", (str(self.work / "b.png"),))  # what a successful index does
-        self.assertEqual(self.report()[0], 0)
-
-    def test_a_long_list_is_cut_short_at_the_end_of_a_run_but_complete_on_request(self):
-        with self.conn:
-            for name in ("a.png", "b.png", "c.png"):
-                record_backlog_failure(self.conn, str(self.work / name), "reason", False, kind="timeout")
-        self.assertIn("1 more", self.report(limit=2)[1])
-        self.assertNotIn("more.", self.report(limit=None)[1])
-
-    def test_the_menu_offers_the_list_only_when_there_is_something_to_show(self):
-        for failed, offered in ((0, False), (2, True)):
-            scripts = [choice.value for choice in menu.choices(False, failed)]
-            self.assertEqual(menu.SHOW_FAILED_SCRIPT in scripts, offered)
-            self.assertEqual(scripts[-1], menu.UNINSTALL)
-        titles = [choice.title for choice in menu.choices(False, 2)]
-        self.assertIn("Show the 2 image(s) that could not be indexed", titles)
-
-    def test_the_menu_counts_what_the_report_lists(self):
-        self.assertEqual(menu.failed_count(), 0)
-        with self.conn:
-            record_backlog_failure(self.conn, str(self.work / "b.png"), "reason", False, kind="timeout")
-        self.assertEqual(menu.failed_count(), 1)
 
 
 if __name__ == "__main__":

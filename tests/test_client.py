@@ -4,11 +4,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
-import config
-from db.operations import set_device_settings, set_model_settings
+from imagent import config
+from imagent.db.operations import set_device_settings, set_model_settings
 from tests.support import DEVICE, IsolatedHome
-from vlm import client as vlm_client
-from vlm.client import NotReady, _base_url, check_ready, load_model, other_models_running, server_version, start_server
+from imagent.vlm import client as vlm_client
+from imagent.vlm.client import NotReady, _base_url, check_ready, load_model, other_models_running, server_version, start_server
 
 
 def serve_version(version: str) -> HTTPServer:
@@ -89,6 +89,17 @@ class StartServerTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs["env"]["OLLAMA_HOST"], "http://localhost:5555")
         installed = {call.args[0] for call in handler.call_args_list}
         self.assertIn(vlm_client.signal.SIGTERM, installed)  # a plain `kill` must still stop the server
+
+    def test_imagents_own_program_is_started_with_its_own_models_folder(self):
+        with mock.patch.object(vlm_client.subprocess, "Popen") as popen, \
+                mock.patch.object(vlm_client, "is_reachable", return_value=True), \
+                mock.patch.object(vlm_client.signal, "signal"), \
+                mock.patch.object(config, "ollama_binary", return_value="/tools/program/ollama"), \
+                mock.patch.object(config, "private_ollama_binary", return_value="/tools/program/ollama"):
+            popen.return_value.poll.return_value = None
+            start_server(object(), "localhost")
+        self.assertEqual(popen.call_args.args[0], ["/tools/program/ollama", "serve"])
+        self.assertEqual(popen.call_args.kwargs["env"]["OLLAMA_MODELS"], str(config.OLLAMA_DIR / "models"))
 
     def test_a_server_that_never_answers_is_stopped_and_reported(self):
         clock = iter(range(0, 100))  # one second per look at the clock

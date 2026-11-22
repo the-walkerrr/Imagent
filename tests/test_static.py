@@ -7,17 +7,17 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKIPPED_DIRS = {".venv", ".git", "benchmark_results", "__pycache__", "sample_images"}
+SKIPPED_DIRS = {".venv", ".git", "build", "benchmark_results", "__pycache__", "sample_images"}
 MODULES = [
-    "config", "vlm.response_format", "install.install", "scan_and_index.scan_and_index", "search.search", "uninstall.uninstall",
-    "db.connection", "db.operations", "pipeline.console", "pipeline.discovery", "pipeline.locking",
-    "pipeline.progress", "pipeline.validation", "pipeline.error_logger", "pipeline.serialisation",
-    "image_processing.metadata", "image_processing.ocr", "image_processing.preprocess", "image_processing.features",
-    "text_processing.formatters", "vlm.analyzer", "vlm.client", "vlm.reply_validation",
-    "image_processing.memory", "image_processing.problems", "pipeline.failure", "pipeline.storage", "pipeline.versions",
-    "reembed.reembed", "menu.menu", "show_failed.show_failed", "image_processing.convert",
-    "os_specific", "os_specific.convert", "os_specific.files", "os_specific.locking", "os_specific.memory", "os_specific.process",
-    "os_specific.storage",
+    "imagent.config", "imagent.vlm.response_format", "imagent.commands.setup", "imagent.commands.scan", "imagent.commands.search", "imagent.commands.uninstall",
+    "imagent.db.connection", "imagent.db.operations", "imagent.pipeline.console", "imagent.pipeline.discovery", "imagent.pipeline.locking",
+    "imagent.pipeline.progress", "imagent.pipeline.validation", "imagent.pipeline.error_logger", "imagent.pipeline.serialisation",
+    "imagent.image_processing.metadata", "imagent.image_processing.ocr", "imagent.image_processing.preprocess", "imagent.image_processing.features",
+    "imagent.text_processing.formatters", "imagent.vlm.analyzer", "imagent.vlm.client", "imagent.vlm.reply_validation",
+    "imagent.image_processing.memory", "imagent.image_processing.problems", "imagent.pipeline.failure", "imagent.pipeline.storage", "imagent.pipeline.versions",
+    "imagent.commands.menu", "imagent.commands.failed", "imagent.commands.delete", "imagent.commands.after_add", "imagent.image_processing.convert",
+    "imagent.os_specific", "imagent.os_specific.convert", "imagent.os_specific.files", "imagent.os_specific.locking", "imagent.os_specific.memory", "imagent.os_specific.process",
+    "imagent.os_specific.storage", "imagent.pipeline.folder_picker",
 ]
 
 
@@ -44,6 +44,29 @@ def undefined_calls(source: str) -> set:
     return called - defined
 
 
+def missing_package_names(source: str) -> list:
+    """``module.name`` uses and ``from imagent.x import name`` lines where the package has no such name.
+
+    A name that was renamed or mistyped would otherwise show up only when a user reaches the line that uses it."""
+    tree = ast.parse(source)
+    rebound = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}  # a variable that shares a module's name
+    modules, problems = {}, []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "imagent":
+            parent = importlib.import_module(node.module)
+            for alias in node.names:
+                try:
+                    modules[alias.asname or alias.name] = importlib.import_module(f"{node.module}.{alias.name}")
+                except ImportError:
+                    if not hasattr(parent, alias.name):
+                        problems.append(f"from {node.module} import {alias.name}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules \
+                and node.value.id not in rebound and not hasattr(modules[node.value.id], node.attr):
+            problems.append(f"{node.value.id}.{node.attr}")
+    return problems
+
+
 class StaticTests(unittest.TestCase):
     def test_no_file_calls_an_undefined_function(self):
         for path in project_files():
@@ -52,6 +75,14 @@ class StaticTests(unittest.TestCase):
     def test_the_check_would_have_caught_a_function_lost_in_a_refactor(self):
         broken = "def pull(client):\n    _pull_with_progress(client)\n"
         self.assertEqual(undefined_calls(broken), {"_pull_with_progress"})
+
+    def test_no_file_uses_a_name_the_package_does_not_have(self):
+        for path in project_files():
+            self.assertEqual(missing_package_names(path.read_text(encoding="utf-8")), [], str(path.relative_to(ROOT)))
+
+    def test_the_check_would_have_caught_a_renamed_constant(self):
+        broken = "from imagent import config\nprint(config.INSTALL_COMMAND_THAT_WAS_RENAMED)\n"
+        self.assertEqual(missing_package_names(broken), ["config.INSTALL_COMMAND_THAT_WAS_RENAMED"])
 
     def test_every_module_imports(self):
         for name in MODULES:

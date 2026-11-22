@@ -1,13 +1,13 @@
 import contextlib
 import io
-import sys
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from search import search
-from db.operations import get_or_add_root, upsert_text_embedding
-from pipeline.serialisation import serialize_embedding
+from imagent.commands import search
+from imagent.db.operations import get_or_add_root, upsert_text_embedding
+from imagent.pipeline.serialisation import serialize_embedding
 from tests.support import IsolatedHome, add_indexed
 
 SETTINGS = {"judge_model": "j", "embedding_model": "e", "embedding_dim": 3}
@@ -56,31 +56,165 @@ class SearchTests(IsolatedHome):
 
     def test_an_empty_query_is_turned_down_with_an_example_and_asked_again(self):
         out = io.StringIO()
-        with mock.patch.object(sys, "argv", ["search.py", "   "]), \
-                mock.patch("builtins.input", side_effect=["  ", "exit"]) as ask, contextlib.redirect_stdout(out):
-            search.main()
+        with mock.patch("builtins.input", side_effect=["  ", "exit"]) as ask, contextlib.redirect_stdout(out):
+            search.main("   ")
         self.assertIn("Type what you are looking for", out.getvalue())
         self.assertEqual(ask.call_count, 2)
 
     def test_the_session_stays_open_for_more_searches_until_exit(self):
         out = io.StringIO()
-        with mock.patch.object(sys, "argv", ["search.py", "first"]), \
-                mock.patch("builtins.input", side_effect=["second", "exit"]) as ask, \
+        with mock.patch("builtins.input", side_effect=["first", "second", "exit"]) as ask, \
                 mock.patch.object(search, "search", wraps=search.search) as run, contextlib.redirect_stdout(out):
             search.main()
         self.assertEqual([call.args[0] for call in run.call_args_list], ["first", "second"])
-        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(ask.call_count, 3)
         self.assertEqual(search.check_ready.call_count, 1)  # Ollama is started once, not per search
 
+    def test_a_query_given_on_the_command_line_is_answered_once_and_the_command_ends(self):
+        out = io.StringIO()
+        with mock.patch("builtins.input") as ask, mock.patch.object(search, "search", wraps=search.search) as run, contextlib.redirect_stdout(out):
+            search.main("  red car  ")
+        self.assertEqual([call.args[0] for call in run.call_args_list], ["red car"])
+        ask.assert_not_called()
+
     def test_no_terminal_ends_the_session_quietly(self):
-        with mock.patch.object(sys, "argv", ["search.py"]), mock.patch("builtins.input", side_effect=EOFError):
+        with mock.patch("builtins.input", side_effect=EOFError):
             search.main()
 
     def test_a_search_that_cannot_start_ends_the_session(self):
         with mock.patch.object(search, "check_ready", side_effect=search.NotReady("Run the installer")), \
-                mock.patch.object(sys, "argv", ["search.py", "anything"]), mock.patch("builtins.input") as ask:
-            search.main()
+                mock.patch("builtins.input") as ask:
+            search.main("anything")
         ask.assert_not_called()
+
+    def _describe(self, name, **columns):
+        """Give the indexed image ``name`` the descriptions and facts that a finished index run stores."""
+        values = {"short_description": "a short line", "description": "the long description\n\nsecond paragraph",
+                  "vlm_metadata_json": '{"vlm": {"tags": ["dog", "beach"]}}', "width": 4032, "height": 3024, "file_size": 3_250_000,
+                  "mime_type": "image/png", "taken_at": "2026-09-06T07:24:12", "camera_make": "iQOO", "camera_model": "Neo9 Pro",
+                  "gps_lat": 12.97, "gps_lon": 77.59, **columns}
+        conn = self.connect()
+        with conn:
+            conn.execute(f"UPDATE image_data SET {', '.join(f'{key} = ?' for key in values)} WHERE file_path = ?",
+                         (*values.values(), str(self.paths[name])))
+
+    def _shown(self, full=False):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search._show("anything", search.search("anything"), full)
+        return out.getvalue()
+
+    def test_a_result_shows_its_summary_and_facts_but_not_the_long_description_tags_or_scores(self):
+        self._describe("closest")
+        shown = self._shown()
+        self.assertIn("a short line", shown)
+        self.assertIn("07:24 AM 6 Sep, 2026 \u00b7 iQOO Neo9 Pro \u00b7 4032\u00d73024 \u00b7 3.1 MB", shown)
+        self.assertNotIn("the long description", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("tags", shown)
+        self.assertNotIn("score", shown)
+
+    def test_a_result_is_titled_with_its_file_name_and_the_link_opens_the_original_path(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        path = self.paths["closest"]
+        plain, terminal = io.StringIO(), Terminal()
+        for stream, env in ((plain, {}), (terminal, {"TERM": "xterm"})):
+            with contextlib.redirect_stdout(stream), mock.patch.dict(os.environ, env):
+                search._show("anything", search.search("anything"))
+        self.assertIn(f"1. {path.name}\n", plain.getvalue().replace("\033[1m", "").replace("\033[0m", ""))
+        self.assertIn(f"\033]8;;{path.absolute().as_uri()}\033\\{path.name}\033]8;;\033\\", terminal.getvalue())
+
+    def test_the_full_path_is_shown_in_the_normal_mode_too_on_its_own_line_after_the_facts(self):
+        self._describe("closest")
+        lines = self._shown().splitlines()
+        first = lines.index(next(line for line in lines if line.startswith("1. ")))
+        self.assertEqual(lines[first + 6], f"   {self.paths['closest']}")
+        self.assertEqual(lines[first + 7:first + 9], ["", ""])
+
+    def test_the_month_is_its_three_letter_name_and_the_day_is_not_padded(self):
+        for taken, shown in (("2024-05-09T08:00:00", "08:00 AM 9 May, 2024"), ("2024-01-31T20:30:00", "08:30 PM 31 Jan, 2024"),
+                             ("2024-12-01T13:00:00", "01:00 PM 1 Dec, 2024")):
+            self.assertEqual(search._when({"taken_at": taken, "modified_at": None}), shown)
+
+    def test_full_no_longer_shows_the_format(self):
+        self._describe("closest")
+        self.assertNotIn("Format", self._shown(full=True))
+        self.assertNotIn("image/png", self._shown(full=True))
+
+    def test_a_line_that_is_too_long_continues_under_the_same_indent_on_a_terminal(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        words = " ".join(f"word{number}" for number in range(30))
+        self._describe("closest", description=words)
+        out = Terminal()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"TERM": "xterm"}), \
+                mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((40, 24))):
+            search._show("anything", search.search("anything"), full=True)
+        wrapped = [line for line in out.getvalue().splitlines() if "word" in line]
+        self.assertGreater(len(wrapped), 2)
+        self.assertTrue(all(line.startswith("   word") and len(line) <= 39 for line in wrapped))
+        self.assertEqual(" ".join(line.strip() for line in wrapped), words)
+
+    def test_the_query_in_the_heading_is_bold_on_a_terminal_only(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        plain, terminal = io.StringIO(), Terminal()
+        for stream, env in ((plain, {}), (terminal, {"TERM": "xterm"})):
+            with contextlib.redirect_stdout(stream), mock.patch.dict(os.environ, env):
+                search._show("bike", search.search("anything"))
+        self.assertIn("Top 3 result(s) for: 'bike'\n", plain.getvalue())
+        self.assertIn("Top 3 result(s) for: \033[1m'bike'\033[0m\n", terminal.getvalue())
+
+    def test_the_make_is_not_repeated_when_the_model_already_starts_with_it(self):
+        base = {"taken_at": None, "modified_at": None, "width": None, "height": None, "file_size": None}
+        for make, model, shown in (("iQOO", "iQOO Neo9 Pro", "iQOO Neo9 Pro"), ("Canon", "CANON EOS R5", "CANON EOS R5"),
+                                   ("iQOO", "Neo9 Pro", "iQOO Neo9 Pro"), ("Apple", None, "Apple"), (None, "iPhone 15", "iPhone 15")):
+            self.assertEqual(search._facts({**base, "camera_make": make, "camera_model": model}), shown)
+
+    def test_the_time_is_shown_with_am_and_pm(self):
+        for taken, shown in (("2026-09-07T14:14:00", "02:14 PM 7 Sep, 2026"), ("2026-09-07T00:05:00", "12:05 AM 7 Sep, 2026"),
+                             ("2026-09-07T12:00:00", "12:00 PM 7 Sep, 2026")):
+            self.assertEqual(search._when({"taken_at": taken, "modified_at": None}), shown)
+        self.assertEqual(search._when({"taken_at": None, "modified_at": "2026-09-07T14:14:00+00:00"}), "modified 7 Sep, 2026")
+
+    def test_the_lines_of_a_result_are_separated_by_a_blank_line_and_results_by_two(self):
+        self._describe("closest")
+        lines = self._shown().splitlines()
+        first = lines.index(next(line for line in lines if line.startswith("1. ")))
+        self.assertEqual(lines[first + 1], "")
+        self.assertEqual(lines[first + 2], "   a short line")
+        self.assertEqual(lines[first + 3], "")
+        self.assertIn("\u00b7", lines[first + 4])
+        self.assertEqual(lines[first + 5], "")
+        self.assertEqual(lines[first + 6], f"   {self.paths['closest']}")
+        self.assertEqual(lines[first + 7:first + 9], ["", ""])
+        self.assertTrue(lines[first + 9].startswith("2. "))
+
+    def test_full_shows_the_long_description_in_place_of_the_summary_with_the_full_path(self):
+        self._describe("closest")
+        shown = self._shown(full=True)
+        self.assertEqual(shown.count("the long description"), 1)  # only "closest" was described above
+        self.assertIn("   second paragraph", shown)
+        self.assertNotIn("a short line", shown)
+        self.assertIn(f"   {self.paths['closest']}\n", shown)  # the full path, on its own line with no label
+        self.assertNotIn("Path", shown)
+        self.assertNotIn("Folder", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("12.97", shown)
+        self.assertNotIn("tags", shown)
+        self.assertNotIn("score", shown)
+
+    def test_what_an_image_does_not_have_is_left_out(self):
+        self._describe("closest", taken_at=None, camera_make=None, camera_model=None, width=None, height=None, file_size=None,
+                       gps_lat=None, gps_lon=None)
+        shown = self._shown(full=True)
+        self.assertIn("   modified ", shown)
+        self.assertNotIn("Location", shown)
+        self.assertNotIn("None", shown)
 
     def _busy(self, others):
         return mock.patch.object(search, "other_models_running", return_value=others)
@@ -102,7 +236,7 @@ class SearchTests(IsolatedHome):
 
     def test_the_session_ends_instead_of_asking_for_a_query(self):
         with self._busy(["vision"]), mock.patch.object(search, "is_running", return_value=False), \
-                mock.patch.object(sys, "argv", ["search.py"]), mock.patch("builtins.input") as ask:
+                mock.patch("builtins.input") as ask:
             search.main()
         ask.assert_not_called()
 
@@ -184,7 +318,7 @@ class BatchedRankingTests(IsolatedHome):
         self.assertLess(peak, full_matrix / 3, f"peak {peak} bytes for a matrix of {full_matrix}")
 
     def test_the_batches_are_read_in_file_id_order_and_none_twice(self):
-        from db.operations import iter_embedding_batches
+        from imagent.db.operations import iter_embedding_batches
         conn, ids, _ = self.fill(23, 4)
         batches = list(iter_embedding_batches(conn, 5))
         self.assertEqual([len(batch) for batch in batches], [5, 5, 5, 5, 3])

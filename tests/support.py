@@ -4,14 +4,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from PIL import Image
 
-import config
-from db.connection import init_db
-from image_processing.hashing import compute_hash
-from image_processing.metadata import iso_utc
+from imagent import config
+from imagent.db.connection import init_db
+from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
+from imagent.image_processing.metadata import extract_file_metadata, iso_utc
 
 
 # What setup measured about a computer (db/operations.set_device_settings).
@@ -36,8 +37,10 @@ class IsolatedHome(unittest.TestCase):
         self.home = Path(tmp.name) / "imagent-home"
         self.work = Path(tmp.name) / "work"
         self.work.mkdir()
+        self.tools = Path(tmp.name) / "imagent-tools"
         for name, value in (("IMAGENT_HOME", self.home), ("DB_PATH", self.home / "imagent.db"),
-                            ("CONFIG_PATH", self.home / "config.json")):
+                            ("CONFIG_PATH", self.home / "config.json"), ("TOOLS_DIR", self.tools),
+                            ("OLLAMA_DIR", self.tools / "ollama")):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -55,9 +58,40 @@ class IsolatedHome(unittest.TestCase):
 
 
 def add_indexed(conn, root_id: int, path: Path) -> None:
-    """Record ``path`` as indexed, the way a finished index run leaves it (no model involved)."""
+    """Record ``path`` as indexed, the way a finished index run leaves it (no model involved): its hashes and facts about the file."""
+    details = extract_file_metadata(str(path))
     with conn:
         conn.execute(
-            "INSERT INTO image_data(root_id, file_path, hash, vlm_metadata_json, modified_at) VALUES (?, ?, ?, ?, ?)",
-            (root_id, str(path), compute_hash(str(path)), "{}", iso_utc(os.stat(path).st_mtime)),
+            """INSERT INTO image_data(root_id, file_path, hash, pixel_hash, vlm_metadata_json, modified_at,
+                   width, height, file_size, taken_at, camera_make, camera_model, gps_lat, gps_lon)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (root_id, str(path), compute_hash(str(path)), compute_pixel_hash(str(path)), "{}", iso_utc(os.stat(path).st_mtime),
+             details["width"], details["height"], details["file_size"], details["taken_at"], details["camera_make"],
+             details["camera_model"], details["gps_lat"], details["gps_lon"]),
         )
+
+
+SETTINGS = {"vlm_model": "v:latest", "embedding_model": "e:latest", "judge_model": "j:latest",
+            "vlm_digest": "vd", "embedding_digest": "ed", "judge_digest": "jd", "embedding_dim": 3}
+
+
+def models(**digests):
+    return SimpleNamespace(models=[SimpleNamespace(model=name, digest=digest) for name, digest in digests.items()])
+
+
+class ReadyClient:
+    """A stand-in client that lists the given models and says what the vision model can do."""
+
+    def __init__(self, listing, capabilities=("completion", "vision")):
+        self.listing, self.capabilities, self.copied = listing, list(capabilities), []
+
+    def list(self):
+        return self.listing
+
+    def show(self, name):
+        return SimpleNamespace(capabilities=self.capabilities)
+
+    def copy(self, source, destination):
+        self.copied.append((source, destination))
+        self.listing.models.append(SimpleNamespace(model=destination, digest=next(m.digest for m in self.listing.models if m.model == source)))
+
