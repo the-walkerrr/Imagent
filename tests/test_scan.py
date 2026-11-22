@@ -377,7 +377,7 @@ class DiscoveryTests(IsolatedHome):
         root = self.work / "pictures"
         keep = [self.make_image(root / "holiday" / "beach.JPG"), self.make_image(root / "top.png", 1)]
         for junk in ("._beach.jpg", ".hidden/x.jpg", "node_modules/pkg/x.png", "Photos.photoslibrary/resources/x.jpg",
-                     "@eaDir/x.jpg", "notes.txt"):
+                     "@eaDir/x.jpg", "Safari.app/Contents/Resources/x.png", "Catalog Previews.lrdata/x.jpg", "#recycle/x.jpg", "Windows.old/x.jpg", "notes.txt"):
             (root / junk).parent.mkdir(parents=True, exist_ok=True)
             (root / junk).write_bytes(b"x")
         self.assertEqual(discover(root).images, sorted(keep))

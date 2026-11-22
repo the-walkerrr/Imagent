@@ -1,8 +1,8 @@
 """
 imagent/pipeline/folder_picker.py — Ask which folder to add: type part of a folder name and pick it from the folders that match.
 
-The folders come from the operating system's own index (os_specific/folder_index.py), listed once in the background while the user
-starts typing. Where there is no index, the folder is asked for as plain text.
+The folders are listed by walking the home folder (pipeline/discovery.py, with the same pruning as a scan) in a background thread that
+``start_listing`` can start as soon as the command starts, so the list is usually ready by the time the user has typed a few letters.
 
 The matches are ordered from the end of the path: a folder whose own name matches comes first, then one whose parent matches, and so
 on, because a folder is remembered by its own name more than by what holds it.
@@ -16,9 +16,8 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
-from imagent.os_specific import folder_index
 from imagent.os_specific.files import comparable_path, is_hidden_folder
-from imagent.pipeline.discovery import _skip_folder
+from imagent.pipeline.discovery import _skip_folder, list_folders
 from imagent.pipeline.validation import find_overlapping_root
 
 ROWS = 8  # matches shown at once
@@ -31,6 +30,49 @@ class Candidate(NamedTuple):
     path: str  # as the system gave it
     shown: str  # "~/Pictures/Trips"
     key: str  # what the typed text is compared with: below the home folder, "/" between folders, any upper or lower case
+
+
+class _Listing:
+    """The folders below one folder, being listed in a thread that starts at once."""
+
+    def __init__(self, home: str):
+        self.home = home
+        self.folders: list[str] = []
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        self.folders = list_folders(self.home)
+
+    def wait(self) -> list[str]:
+        self.thread.join()
+        return self.folders
+
+
+_listing: _Listing | None = None
+
+
+def _listing_of(home: str) -> _Listing:
+    """The listing of ``home`` that is under way, or a new one."""
+    global _listing
+    if _listing is None or _listing.home != home:
+        _listing = _Listing(home)
+    return _listing
+
+
+def start_listing() -> None:
+    """Start listing the folders below the home folder now, so the picker finds them ready."""
+    _listing_of(os.path.expanduser("~"))
+
+
+def _folders_below(home: str) -> list[str]:
+    """The folders below ``home``, waiting for the listing if it is not done. A listing is used once: the next call lists again, as folders may have changed."""
+    global _listing
+    listing = _listing_of(home)
+    folders = listing.wait()
+    if _listing is listing:
+        _listing = None
+    return folders
 
 
 def _normalize(text: str) -> str:
@@ -113,7 +155,7 @@ class _Picker:
         self.selected = 0
 
     def _load(self) -> None:
-        self.found = candidates(folder_index.list_folders(self.home), self.home, self.added)
+        self.found = candidates(_folders_below(self.home), self.home, self.added)
         self._refresh()
         if self.app is not None:
             self.app.invalidate()  # safe from this thread
@@ -196,10 +238,7 @@ class _Picker:
 
 
 def ask_for_folder(added: list[str], style=None) -> str | None:
-    """Ask which folder to add, with suggestions where the system keeps a folder index and as plain text elsewhere.
+    """Ask which folder to add, suggesting the folders that match what is typed.
 
     ``added`` are the folders added before (they are not suggested). Returns what was chosen or typed, or None on Ctrl+C."""
-    if folder_index.can_list_folders():
-        return _Picker(added).ask(style)
-    import questionary
-    return questionary.text("Folder to add:", qmark="?", style=style).ask()
+    return _Picker(added).ask(style)

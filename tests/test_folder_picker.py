@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from imagent.os_specific import folder_index
 from imagent.pipeline import folder_picker
+from imagent.pipeline.discovery import list_folders
 from imagent.pipeline.folder_picker import Candidate, candidates, rank
 
 
@@ -92,33 +92,96 @@ class RankTests(unittest.TestCase):
         self.assertEqual(self.ranked("zzz", "a"), [])
 
 
-class FolderIndexTests(unittest.TestCase):
-    def test_only_macos_with_spotlight_has_an_index(self):
-        for system, found, expected in (("Darwin", "/usr/bin/mdfind", True), ("Darwin", None, False), ("Linux", "/usr/bin/mdfind", False), ("Windows", None, False)):
-            with mock.patch.object(folder_index.platform, "system", return_value=system), mock.patch.object(folder_index.shutil, "which", return_value=found):
-                self.assertEqual(folder_index.can_list_folders(), expected)
+class ListFoldersTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = os.path.realpath(tmp.name)
 
-    def test_the_folders_are_what_the_index_prints(self):
-        done = mock.Mock(stdout="/Users/u/a b\0/Users/u/é\0".encode())
-        with mock.patch.object(folder_index.subprocess, "run", return_value=done) as run:
-            self.assertEqual(folder_index.list_folders("/Users/u"), ["/Users/u/a b", "/Users/u/é"])
-        self.assertIn("/Users/u", run.call_args.args[0])
+    def listed(self):
+        return sorted(os.path.relpath(path, self.home).replace(os.sep, "/") for path in list_folders(self.home))
 
-    def test_an_index_that_cannot_be_asked_lists_nothing(self):
-        with mock.patch.object(folder_index.subprocess, "run", side_effect=OSError):
-            self.assertEqual(folder_index.list_folders("/Users/u"), [])
+    def test_every_folder_below_is_listed_at_any_depth(self):
+        make(self.home, "Pictures/Trips/Rome", "Documents")
+        self.assertEqual(self.listed(), ["Documents", "Pictures", "Pictures/Trips", "Pictures/Trips/Rome"])
+
+    def test_folders_the_scan_skips_are_neither_listed_nor_entered(self):
+        make(self.home, "app/src", "app/node_modules/pkg", ".hidden/photos", "Photos.photoslibrary/originals", "Safari.app/Contents/Resources",
+             "Lightroom Previews.lrdata/a", "#recycle/old", "Program Files/tool", "keep/site-packages/x")
+        self.assertEqual(self.listed(), ["app", "app/src", "keep"])
+
+    def test_a_folder_the_system_hides_is_neither_listed_nor_entered(self):
+        make(self.home, "Library/Caches", "Pictures")
+        with mock.patch("imagent.pipeline.discovery.is_hidden_folder", side_effect=lambda path: path.endswith("Library")):
+            self.assertEqual(self.listed(), ["Pictures"])
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name != "nt", "needs links that can be made without special rights")
+    def test_a_link_to_a_folder_is_listed_but_not_followed(self):
+        target = tempfile.TemporaryDirectory()
+        self.addCleanup(target.cleanup)
+        make(target.name, "inside")
+        os.symlink(target.name, os.path.join(self.home, "link"))
+        os.symlink(self.home, os.path.join(self.home, "loop"))
+        self.assertEqual(self.listed(), ["link", "loop"])
+
+    def test_a_folder_that_cannot_be_read_is_skipped_and_the_rest_is_listed(self):
+        make(self.home, "a/b", "c")
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if path.endswith("a"):
+                raise PermissionError(path)
+            return real_scandir(path)
+
+        with mock.patch("imagent.pipeline.discovery.os.scandir", side_effect=scandir):
+            self.assertEqual(self.listed(), ["a", "c"])  # a is listed (it is a folder) but what is in it is unknown
+
+    def test_a_folder_that_is_not_there_lists_nothing(self):
+        self.assertEqual(list_folders(os.path.join(self.home, "missing")), [])
+
+
+class ListingTests(unittest.TestCase):
+    """The listing that starts with the command and is waited for by the picker."""
+
+    def setUp(self):
+        self.addCleanup(setattr, folder_picker, "_listing", None)
+        folder_picker._listing = None
+
+    def test_it_starts_at_once_and_the_picker_gets_its_result(self):
+        with mock.patch.object(folder_picker, "list_folders", return_value=["/h/a"]) as listing, mock.patch.dict(os.environ, {"HOME": "/h", "USERPROFILE": "/h"}):
+            folder_picker.start_listing()
+            self.assertEqual(folder_picker._folders_below(os.path.expanduser("~")), ["/h/a"])
+        listing.assert_called_once_with(os.path.expanduser("/h"))
+
+    def test_the_listing_started_early_is_used_not_started_again(self):
+        release = threading.Event()
+        calls = []
+
+        def slow(home):
+            calls.append(home)
+            release.wait(5)
+            return ["/h/a"]
+
+        with mock.patch.object(folder_picker, "list_folders", side_effect=slow):
+            folder_picker._listing_of("/h")
+            threading.Timer(0.05, release.set).start()
+            self.assertEqual(folder_picker._folders_below("/h"), ["/h/a"])  # waits for the one under way
+        self.assertEqual(calls, ["/h"])
+
+    def test_a_listing_is_used_once_so_the_next_one_sees_new_folders(self):
+        with mock.patch.object(folder_picker, "list_folders", side_effect=[["/h/a"], ["/h/a", "/h/b"]]):
+            self.assertEqual(folder_picker._folders_below("/h"), ["/h/a"])
+            self.assertEqual(folder_picker._folders_below("/h"), ["/h/a", "/h/b"])
+
+    def test_a_listing_of_another_home_is_not_reused(self):
+        with mock.patch.object(folder_picker, "list_folders", side_effect=lambda home: [home + "/x"]):
+            folder_picker._listing_of("/h")
+            self.assertEqual(folder_picker._folders_below("/other"), ["/other/x"])
 
 
 class AskTests(unittest.TestCase):
-    def test_without_an_index_the_folder_is_asked_as_plain_text(self):
-        with mock.patch.object(folder_picker.folder_index, "can_list_folders", return_value=False), \
-                mock.patch("questionary.text") as text:
-            text.return_value.ask.return_value = "/pictures"
-            self.assertEqual(folder_picker.ask_for_folder([]), "/pictures")
-
-    def test_with_an_index_the_picker_is_used_and_told_what_was_added(self):
-        with mock.patch.object(folder_picker.folder_index, "can_list_folders", return_value=True), \
-                mock.patch.object(folder_picker, "_Picker") as picker:
+    def test_the_picker_is_used_and_told_what_was_added(self):
+        with mock.patch.object(folder_picker, "_Picker") as picker:
             picker.return_value.ask.return_value = "/pictures"
             self.assertEqual(folder_picker.ask_for_folder(["/a"], None), "/pictures")
         picker.assert_called_once_with(["/a"])
@@ -147,7 +210,7 @@ class PickerTests(unittest.TestCase):
 
         with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()), \
                 mock.patch.dict(os.environ, {"HOME": self.home}), \
-                mock.patch.object(folder_picker.folder_index, "list_folders", return_value=self.folders), \
+                mock.patch.object(folder_picker, "list_folders", return_value=self.folders), \
                 mock.patch.object(folder_picker._Picker, "_load", load), mock.patch("prompt_toolkit.shortcuts.print_formatted_text"), \
                 contextlib.redirect_stdout(io.StringIO()):
             threading.Thread(target=lambda: (listed.wait(5), pipe.send_text(keys)), daemon=True).start()

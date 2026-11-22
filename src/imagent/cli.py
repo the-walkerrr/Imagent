@@ -7,6 +7,7 @@ run, so ``imagent --help`` and a mistyped command answer at once, without loadin
 from __future__ import annotations
 
 import argparse
+import sys
 
 from imagent import config
 from imagent.pipeline.console import run_cli
@@ -64,6 +65,9 @@ def _set_up_first() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command == "scan" and args.scan_command == "add" and not args.folder and sys.stdin.isatty():
+        from imagent.pipeline import folder_picker
+        folder_picker.start_listing()  # the folders are listed while setup (if it runs) and the user's typing go on
     if args.command not in ("setup", "uninstall"):  # setup is the fix itself, and uninstall must work on a broken install
         _set_up_first()
     if args.command == "search":

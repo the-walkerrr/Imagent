@@ -57,7 +57,7 @@ class CommandLineTests(unittest.TestCase):
         with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, mock.patch.object(scan, "add") as run_scan_add, \
                 mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu, \
                 mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall, \
-                mock.patch.object(delete, "main") as run_delete:
+                mock.patch.object(delete, "main") as run_delete, mock.patch("imagent.pipeline.folder_picker.start_listing"):
             cli.main(list(argv))
         return {"search": run_search, "scan": run_scan, "scan add": run_scan_add, "failed": run_failed, "menu": run_menu, "setup": run_setup,
                 "uninstall": run_uninstall, "delete": run_delete}
@@ -86,6 +86,25 @@ class CommandLineTests(unittest.TestCase):
         runs = self.run_command("scan", "add", "/pictures")
         runs["scan add"].assert_called_once_with("/pictures")
         self.assertEqual([name for name, run in runs.items() if run.called], ["scan add"])
+
+    def test_scan_add_without_a_folder_starts_listing_the_folders_before_setup(self):
+        from imagent.pipeline import folder_picker
+        order = []
+        with mock.patch.object(folder_picker, "start_listing", side_effect=lambda: order.append("list")) as listing, \
+                mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main", side_effect=lambda: order.append("setup")), \
+                mock.patch.object(scan, "add"), mock.patch.object(sys.stdin, "isatty", return_value=True), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["scan", "add"])
+        listing.assert_called_once_with()
+        self.assertEqual(order, ["list", "setup"])
+
+    def test_the_folders_are_not_listed_when_a_folder_is_given_or_there_is_no_terminal(self):
+        from imagent.pipeline import folder_picker
+        for argv, tty in ((["scan", "add", "/pictures"], True), (["scan", "add"], False), (["scan"], True), (["search", "cat"], True)):
+            with mock.patch.object(folder_picker, "start_listing") as listing, mock.patch.object(menu, "needs_setup", return_value=False), \
+                    mock.patch.object(scan, "add"), mock.patch.object(scan, "main"), mock.patch.object(search, "main"), \
+                    mock.patch.object(sys.stdin, "isatty", return_value=tty):
+                cli.main(argv)
+            listing.assert_not_called()
 
     def test_scan_add_without_a_folder_asks_for_one_itself(self):
         runs = self.run_command("scan", "add")

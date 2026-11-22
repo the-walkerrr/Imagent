@@ -32,6 +32,7 @@ from imagent.db.connection import init_db
 from imagent.db.operations import (get_device_settings, get_keep_deleted, get_model_settings, set_device_settings, set_keep_deleted,
                                    set_model_settings)
 from imagent.pipeline.console import make_output_safe
+from imagent.pipeline.progress import SearchProgress
 
 DEFAULT_HOST = "http://localhost:11434"
 CANCELLED = "Setup cancelled. Run it again any time."
@@ -316,24 +317,28 @@ def _remove(path: Path) -> None:
 
 
 def _download_file(url: str, target: Path) -> str:
-    """Download ``url`` into ``target``, showing progress. Returns the SHA-256 of what arrived."""
+    """Download ``url`` into ``target``, showing a spinner and the progress. Returns the SHA-256 of what arrived."""
     digest = hashlib.sha256()
     request = urllib.request.Request(url, headers={"User-Agent": "imagent"})
-    with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as out:
-        total = int(response.headers.get("Content-Length") or 0)
-        free = shutil.disk_usage(target.parent).free
-        if total and free < total:
-            raise OllamaInstallError(f"There is not enough free disk space: the download is {_fmt_bytes(total)} and {_fmt_bytes(free)} is free.")
-        done, shown = 0, 0.0
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-            digest.update(chunk)
-            done += len(chunk)
-            if time.monotonic() - shown >= 0.25:
-                shown = time.monotonic()
-                share = f"  {done * 100 // total}%  ({_fmt_bytes(done)} of {_fmt_bytes(total)})" if total else f"  {_fmt_bytes(done)}"
-                print(f"\r\033[K{INDENT}Downloading Ollama{share}", end="", flush=True)
-    print("\r\033[K", end="", flush=True)
+    loader = SearchProgress()  # keeps spinning while the server is slow to answer
+    loader.step(f"{INDENT}Downloading Ollama")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            free = shutil.disk_usage(target.parent).free
+            if total and free < total:
+                raise OllamaInstallError(f"There is not enough free disk space: the download is {_fmt_bytes(total)} and {_fmt_bytes(free)} is free.")
+            done, shown = 0, 0.0
+            while chunk := response.read(1 << 20):
+                out.write(chunk)
+                digest.update(chunk)
+                done += len(chunk)
+                if time.monotonic() - shown >= 0.25:
+                    shown = time.monotonic()
+                    share = f"  {done * 100 // total}%  ({_fmt_bytes(done)} of {_fmt_bytes(total)})" if total else f"  {_fmt_bytes(done)}"
+                    loader.step(f"{INDENT}Downloading Ollama{share}")
+    finally:
+        loader.close()
     return digest.hexdigest()
 
 
@@ -428,6 +433,7 @@ def install_ollama() -> None:
     root = app_config.OLLAMA_DIR
     program, partial, manifest = root / "program", root / "program.partial", root / app_config.OLLAMA_MANIFEST
     archive = None
+    loader = SearchProgress()  # the spinner for the steps that show no download percentage
     say("Installing Ollama for this project.")
     swapped = False
     try:
@@ -455,17 +461,20 @@ def install_ollama() -> None:
             _remove(archive)
             if _download_file(url, archive) != expected:
                 raise OllamaInstallError("The download is not the file Ollama published (its checksum is different).")
-            say("Unpacking…")
+            loader.step(f"{INDENT}Unpacking Ollama")
             _unpack(archive, partial)  # the extra files go over the build, into the same folder
             _remove(archive)
+            loader.close()
         _remove(program)
         os.replace(partial, program)  # a half-unpacked folder never looks installed
         swapped = True
         binary = app_config.private_ollama_binary()
         if binary is None:
             raise OllamaInstallError("The download does not contain the `ollama` program.")
+        loader.step(f"{INDENT}Checking that Ollama runs")
         if subprocess.run([binary, "--version"], capture_output=True, timeout=60).returncode != 0:
             raise OllamaInstallError("The downloaded Ollama does not run on this computer.")
+        loader.close()
         (root / "models").mkdir(exist_ok=True)
         app_config.save_tool_info(root, "Ollama", OLLAMA_DESCRIPTION, app_config.OLLAMA_VERSION)
     except OllamaInstallError as exc:
@@ -477,6 +486,7 @@ def install_ollama() -> None:
     else:
         reason = None
     finally:
+        loader.close()  # a failed step must not leave the spinner running
         if archive is not None:
             _remove(archive)
         _remove(manifest)

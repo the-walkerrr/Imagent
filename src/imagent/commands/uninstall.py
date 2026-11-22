@@ -297,7 +297,7 @@ def delete_everything(plan: dict, base: str | None) -> list[str]:
         except (urllib.error.URLError, OSError, ValueError) as exc:
             problems.append(f"Could not remove the Ollama model {name} ({exc}). Remove it with: ollama rm {name}")
     if plan["data_dir"]:
-        if config.IMAGENT_HOME.name.lower() != "imagent":  # never delete a folder this program did not name itself
+        if config.IMAGENT_HOME.name.lstrip(".").lower() != "imagent":  # (the folder is ~/.imagent) never delete a folder this program did not name itself
             problems.append("Did not delete the data folder: it is not named like Imagent's own folder.")
         elif _remove_tree(config.IMAGENT_HOME):
             print("  ✓ Deleted the data folder")

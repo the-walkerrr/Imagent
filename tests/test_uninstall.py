@@ -185,6 +185,15 @@ class DeleteTests(IsolatedHome):
         self.assertIn("ollama rm ours:latest", problems[0])
         self.assertFalse(self.data.exists())
 
+    def test_the_hidden_default_folder_name_is_deleted(self):
+        hidden = self.work / ".imagent"
+        hidden.mkdir()
+        (hidden / "imagent.db").write_bytes(b"db")
+        with mock.patch.object(config, "IMAGENT_HOME", hidden):
+            problems, _ = self.run_delete()
+        self.assertEqual(problems, [])
+        self.assertFalse(hidden.exists())
+
     def test_a_folder_not_named_like_imagents_is_never_deleted(self):
         other = self.work / "Documents"
         other.mkdir()
