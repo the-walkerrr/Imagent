@@ -1196,7 +1196,16 @@ def main() -> None:
     finally:
         conn.close()
     if not saved:
-        sys.exit(f'No folders have been added yet. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+        if questionary is None or not sys.stdin.isatty():  # nobody to ask
+            sys.exit(f'No folders have been added yet. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+        print("No folders have been added yet, so there is nothing to scan. Add one now and it is scanned and indexed.")
+        folder = questionary.text("Folder to add:", qmark="?", style=STYLE).ask()
+        if folder is None:  # Ctrl+C; questionary already said so
+            sys.exit(1)
+        if not folder.strip():
+            sys.exit("No folder entered.")
+        add(folder.strip())
+        return
     roots = _scannable(saved)
     if not roots:
         sys.exit("Error: none of the folders added before can be read.")

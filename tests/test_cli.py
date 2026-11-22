@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from imagent import cli
-from imagent.commands import failed, menu, scan, search, setup, uninstall
+from imagent.commands import failed, forget, menu, scan, search, setup, uninstall
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
 from imagent.db.operations import set_device_settings, set_model_settings
@@ -125,6 +125,32 @@ class CommandLineTests(unittest.TestCase):
         runs["menu"].assert_called_once_with()
         self.assertEqual([name for name, run in runs.items() if run.called], ["menu", "setup"])
 
+    def test_every_command_but_setup_and_uninstall_runs_setup_first_when_it_has_not_been_done(self):
+        for argv in (["search", "red car"], ["scan"], ["scan", "add", "/pictures"], ["failed"], ["forget"]):
+            with mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main") as run_setup, \
+                    mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
+                    mock.patch.object(scan, "add") as run_scan_add, mock.patch.object(failed, "main") as run_failed, \
+                    mock.patch.object(forget, "main") as run_forget, contextlib.redirect_stdout(io.StringIO()):
+                order = []
+                run_setup.side_effect = lambda: order.append("setup")
+                for run in (run_search, run_scan, run_scan_add, run_failed, run_forget):
+                    run.side_effect = lambda *a, **k: order.append("command")
+                cli.main(argv)
+            self.assertEqual(order, ["setup", "command"], argv)
+
+    def test_setup_and_uninstall_do_not_run_setup_first(self):
+        for command in ("setup", "uninstall"):
+            runs = self.run_command(command, needs_setup=True)
+            self.assertEqual(runs["setup"].call_count, command == "setup")
+
+    def test_the_command_does_not_run_when_setup_is_cancelled_or_fails(self):
+        for error in (KeyboardInterrupt, SystemExit("Ollama is required.")):
+            with mock.patch.object(menu, "needs_setup", return_value=True), \
+                    mock.patch.object(setup, "main", side_effect=error), mock.patch.object(scan, "add") as run_scan_add, \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main(["scan", "add", "/pictures"])
+            run_scan_add.assert_not_called()
+
     def test_the_menu_does_not_open_when_setup_is_cancelled_or_fails(self):
         for error in (KeyboardInterrupt, SystemExit("Ollama is required.")):
             with mock.patch.object(menu, "needs_setup", return_value=True), \
@@ -140,7 +166,8 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("invalid choice", err.getvalue())
 
     def test_a_command_ends_politely_when_it_is_cancelled(self):
-        with mock.patch.object(search, "main", side_effect=KeyboardInterrupt), self.assertRaises(SystemExit) as stop:
+        with mock.patch.object(menu, "needs_setup", return_value=False), mock.patch.object(search, "main", side_effect=KeyboardInterrupt), \
+                self.assertRaises(SystemExit) as stop:
             cli.main(["search", "x"])
         self.assertIn("Search cancelled.", str(stop.exception.code))
 

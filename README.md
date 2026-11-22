@@ -36,7 +36,7 @@ imagent search "red car at night"   # show the pictures that best match a descri
 imagent search                      # keep searching until you type exit
 imagent search --full "red car"     # show each result's full description instead of its one-line summary
 imagent scan add ~/Pictures         # add a folder, find its new or changed pictures, then index them
-imagent scan                        # scan every folder you added, then index what is pending
+imagent scan                        # scan every folder you added, then index what is pending (asks for a folder if none is added yet)
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
 imagent                             # open a menu (arrow keys and Enter) with the same choices
@@ -78,7 +78,7 @@ Holds `imagent.db`, `config.json`, the logs and `last_error.log`.
 ## Uninstall
 
 ```bash
-imagent uninstall      # deletes the index, the data folder and the models Imagent downloaded (three confirmations)
+imagent uninstall      # deletes the index, the data folder, the models Imagent downloaded and Ollama if Imagent installed it (three confirmations)
 pipx uninstall imagent # removes the program itself
 ```
 

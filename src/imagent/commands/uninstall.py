@@ -4,8 +4,9 @@ imagent/commands/uninstall.py — Take Imagent off this computer: show what will
 Run by ``imagent uninstall``. It removes:
   * the Ollama models that setup downloaded or copied (listed in install_record.json); a model you already had
     before Imagent is never removed;
-  * Imagent's data folder (the index database, config.json, logs).
-It never touches your image files, Ollama itself or any other Ollama model. The program itself is removed afterwards
+  * Imagent's data folder (the index database, config.json, logs);
+  * Ollama itself, but only when setup installed it (listed in the plan and covered by the same three confirmations).
+It never touches your image files or any other Ollama model, and leaves a pre-existing Ollama alone. The program itself is removed afterwards
 with ``pipx uninstall imagent`` (a running program cannot remove itself), and the last message says so.
 """
 
@@ -208,7 +209,10 @@ def make_plan(base: str | None, stats: dict) -> dict:
         "not_recorded": [m for m in stats["locked_models"] if m not in recorded],
         "data_dir": config.IMAGENT_HOME if config.IMAGENT_HOME.exists() else None,
         "ollama_installed": config.load_install_record().get("ollama_installed") is True,
+        "ollama_command": None,
     }
+    if plan["ollama_installed"]:
+        plan["ollama_command"] = ollama_removal_command()
     for name in recorded:
         if present is None:
             plan["models_unreachable"].append(name)
@@ -244,6 +248,17 @@ def show_plan(stats: dict, plan: dict) -> None:
         print(f"  {' ' * width}{folder}")
     row("Total time analyzed", _fmt_duration(stats["analysis_ms"]) if stats["analysis_ms"] is not None else unknown)
     row("Storage used", _fmt_bytes(plan["data_size"] + plan["models_size"]))
+    if plan["ollama_installed"]:
+        command = plan["ollama_command"]
+        if command is None:
+            print("\n  Imagent installed Ollama itself, and it will not be removed. Remove it the way you would remove any program"
+                  + (f" (on Linux: see the Uninstall section of {LINUX_DOCS})." if platform.system() == "Linux" else "."))
+        else:
+            print("\n  Imagent installed Ollama itself, so Ollama is removed too.")
+            if platform.system() == "Linux":
+                print(f"  That stops the Ollama service and deletes Ollama, its \"ollama\" user and everything in {LINUX_DATA_DIR},")
+                print("  including models you downloaded yourself. It asks for your password (sudo).")
+            print(f"  Command: {shlex.join(command)}")
     if plan["models_unreachable"]:
         print("\n  Could not reach Ollama, so these models will NOT be removed (remove them yourself with")
         print("  `ollama rm <name>` on the computer where Ollama runs): " + ", ".join(plan["models_unreachable"]))
@@ -320,7 +335,7 @@ def ollama_removal_command() -> list[str] | None:
     if system == "Darwin" and shutil.which("brew"):
         return ["brew", "uninstall", "ollama"]
     if system == "Windows" and shutil.which("winget"):
-        return ["winget", "uninstall", "--id", "Ollama.Ollama", "-e"]
+        return ["winget", "uninstall", "--id", "Ollama.Ollama", "-e", "--silent"]
     if system != "Linux" or not shutil.which("systemctl") or not LINUX_SERVICE_FILE.exists():
         return None
     program = shutil.which("ollama")
@@ -339,26 +354,12 @@ def ollama_removal_command() -> list[str] | None:
     return sudo + ["sh", "-c", "; ".join(steps)]
 
 
-def remove_ollama() -> list[str]:
-    """Ask whether to remove the Ollama that setup installed, and do it if the answer is yes. Returns the problems."""
-    command = ollama_removal_command()
-    if command is None:
-        print("\n  Imagent installed Ollama itself, and it was not removed. Remove it the way you would remove any program"
-              + (f" (on Linux: see the Uninstall section of {LINUX_DOCS})." if platform.system() == "Linux" else "."))
-        return []
-    shown = shlex.join(command)
-    print("\n  Imagent installed Ollama itself, and it is still on this computer.")
-    if platform.system() == "Linux":
-        print(f"  Removing it stops the Ollama service and deletes Ollama, its \"ollama\" user and everything in {LINUX_DATA_DIR},")
-        print("  including models you downloaded yourself. It asks for your password (sudo).")
-    print(f"  Command: {shown}")
-    if input("  Remove Ollama too? Type yes (anything else keeps it): ").strip().lower() != "yes":
-        print(f"  Ollama was kept. To remove it later: {shown}")
-        return []
+def remove_ollama(command: list[str]) -> list[str]:
+    """Run the command that removes the Ollama that setup installed. Returns the problems."""
     if subprocess.run(command).returncode == 0:
         print("  ✓ Removed Ollama")
         return []
-    return [f"Could not remove Ollama. Remove it yourself with: {shown}"]
+    return [f"Could not remove Ollama. Remove it yourself with: {shlex.join(command)}"]
 
 
 # --- Entry point -------------------------------------------------------------------------
@@ -389,8 +390,8 @@ def main() -> None:
         print()
         problems = delete_everything(plan, base)
 
-    if plan["ollama_installed"]:  # after the block above, so a server started only for the models is stopped first
-        problems += remove_ollama()
+    if plan["ollama_command"]:  # after the block above, so a server started only for the models is stopped first
+        problems += remove_ollama(plan["ollama_command"])
 
     print()
     if problems:

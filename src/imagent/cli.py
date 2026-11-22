@@ -1,6 +1,6 @@
 """imagent/cli.py — The ``imagent`` command: read the command line and run the command it names.
 
-``imagent`` with no command opens the menu, after running setup first if it has not been done. Each command is a module in ``imagent/commands``; it is imported only when it is
+``imagent`` with no command opens the menu. Every command except ``setup`` and ``uninstall`` (and the menu) runs setup first if it has not been done. Each command is a module in ``imagent/commands``; it is imported only when it is
 run, so ``imagent --help`` and a mistyped command answer at once, without loading the image and model libraries.
 """
 
@@ -47,8 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _set_up_first() -> None:
+    """Run setup before the command if it has not been done, so the user is told at the start, not after the command has done its work.
+
+    Setup ends the program if it fails or is cancelled, so the command only runs once Imagent is set up."""
+    from imagent.commands import menu
+    if menu.needs_setup():
+        from imagent.commands import setup
+        setup.say("Imagent is not set up yet, so setup starts now.")
+        run_cli(setup.main, cancelled=setup.CANCELLED)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command not in ("setup", "uninstall"):  # setup is the fix itself, and uninstall must work on a broken install
+        _set_up_first()
     if args.command == "search":
         from imagent.commands import search
         run_cli(lambda: search.main(" ".join(args.query), full=args.full), cancelled="Search cancelled.")
@@ -72,8 +85,4 @@ def main(argv: list[str] | None = None) -> None:
         run_cli(uninstall.main, cancelled=uninstall.CANCELLED)
     else:
         from imagent.commands import menu
-        if menu.needs_setup():
-            from imagent.commands import setup
-            setup.say("Imagent is not set up yet, so setup starts now.")
-            run_cli(setup.main, cancelled=setup.CANCELLED)  # ends the program if setup fails or is cancelled
         run_cli(menu.main)

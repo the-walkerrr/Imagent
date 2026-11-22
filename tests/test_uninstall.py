@@ -114,7 +114,7 @@ class OllamaRemovalCommandTests(IsolatedHome):
 
     def test_macos_and_windows_use_their_package_manager(self):
         self.assertEqual(self.command("Darwin", {"brew": "/opt/homebrew/bin/brew"}), ["brew", "uninstall", "ollama"])
-        self.assertEqual(self.command("Windows", {"winget": "winget"}), ["winget", "uninstall", "--id", "Ollama.Ollama", "-e"])
+        self.assertEqual(self.command("Windows", {"winget": "winget"}), ["winget", "uninstall", "--id", "Ollama.Ollama", "-e", "--silent"])
 
     def test_without_the_package_manager_there_is_no_command(self):
         self.assertIsNone(self.command("Darwin", {}))
@@ -268,20 +268,20 @@ class MainTests(IsolatedHome):
             code, out = self.run_main(answers)
         return code, out, run
 
-    def test_answering_yes_runs_the_ollama_removal_command(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE, "yes"], ["brew", "uninstall", "ollama"])
+    def test_the_plan_lists_ollama_and_the_three_confirmations_cover_its_removal(self):
+        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"])
         self.assertEqual(code, 0)
+        self.assertIn("Command: brew uninstall ollama", out)
         run.assert_called_once_with(["brew", "uninstall", "ollama"])
         self.assertIn("Removed Ollama", out)
 
-    def test_anything_else_keeps_ollama_and_shows_the_command_for_later(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE, "no"], ["brew", "uninstall", "ollama"])
-        self.assertEqual(code, 0)
+    def test_declining_the_confirmations_leaves_ollama_alone(self):
+        code, out, run = self.main_with_ollama_record(["no"], ["brew", "uninstall", "ollama"])
+        self.assertNotEqual(code, 0)
         run.assert_not_called()
-        self.assertIn("To remove it later: brew uninstall ollama", out)
 
     def test_a_failed_removal_is_reported_with_the_command(self):
-        code, out, run = self.main_with_ollama_record(["yes", "0", CODE, "yes"], ["brew", "uninstall", "ollama"], returncode=1)
+        code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"], returncode=1)
         self.assertEqual(code, 1)
         self.assertIn("Could not remove Ollama. Remove it yourself with: brew uninstall ollama", out)
 
@@ -289,7 +289,7 @@ class MainTests(IsolatedHome):
         code, out, run = self.main_with_ollama_record(["yes", "0", CODE], None)
         self.assertEqual(code, 0)
         run.assert_not_called()
-        self.assertIn("Imagent installed Ollama itself, and it was not removed", out)
+        self.assertIn("Imagent installed Ollama itself, and it will not be removed", out)
 
     def test_without_the_record_ollama_is_not_mentioned(self):
         code, out, run = self.main_with_ollama_record(["yes", "0", CODE], ["brew", "uninstall", "ollama"], installed=False)

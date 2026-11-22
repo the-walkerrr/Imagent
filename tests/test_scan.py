@@ -508,10 +508,34 @@ class ScanCommandTests(ScanBase):
             function(*args)
         return out.getvalue(), run, yes_no
 
-    def test_scan_with_no_folder_added_says_how_to_add_one(self):
-        with self.assertRaises(SystemExit) as stop:
+    def test_scan_with_no_folder_added_and_no_terminal_says_how_to_add_one(self):
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
             self._call(scan.main)
         self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+
+    def _scan_with_no_folder_added(self, typed):
+        """Run ``scan.main`` in a terminal with no folder added and ``typed`` entered at the folder prompt; returns what ``add`` got and what was said."""
+        with mock.patch.object(scan.sys.stdin, "isatty", return_value=True), mock.patch.object(scan.questionary, "text") as text, \
+                mock.patch.object(scan, "add") as add:
+            text.return_value.ask.return_value = typed
+            try:
+                report, _, _ = self._call(scan.main)
+                stopped = None
+            except SystemExit as stop:
+                report, stopped = "", stop.code
+        return add, report, stopped
+
+    def test_scan_with_no_folder_added_asks_for_one_and_adds_it(self):
+        add, report, stopped = self._scan_with_no_folder_added("  /pictures ")
+        add.assert_called_once_with("/pictures")
+        self.assertIn("No folders have been added yet", report)
+        self.assertIsNone(stopped)
+
+    def test_scan_with_no_folder_added_and_none_typed_adds_nothing(self):
+        for typed, code in ((None, 1), ("   ", "No folder entered.")):
+            add, _, stopped = self._scan_with_no_folder_added(typed)
+            add.assert_not_called()
+            self.assertEqual(stopped, code)
 
     def test_scan_reports_every_folder_without_listing_them_first(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()
