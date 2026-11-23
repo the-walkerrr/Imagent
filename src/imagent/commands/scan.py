@@ -1159,7 +1159,7 @@ def _scan_and_report(root: Path) -> None:
         print(f"  {label:<15} : {value}")
     if counts["delete_blocked"]:
         print(f"\nNote: {counts['delete_blocked']} image(s) are no longer in this folder. Their index was kept in case they come back.\n"
-              f"  Moved them?       Scan their new folder ({config.SCAN_ADD_COMMAND} \"folder path\"). They are recognised\n"
+              f"  Moved them?       Scan their new folder ({config.ADD_COMMAND} \"folder path\"). They are recognised\n"
               f"                    and not analysed again, which can save hours.\n"
               f"  Drive unplugged?  Reconnect it and run {config.SCAN_COMMAND}.\n"
               f"  Deleted them?     Run {config.SCAN_COMMAND} and answer y to delete their index.")
@@ -1205,7 +1205,7 @@ def added_folders() -> list[str]:
 def _ask_for_folder(added: list[str]) -> str:
     """The folder to add, asked for in a terminal with suggestions; ends the program if there is no terminal or nothing was entered."""
     if questionary is None or not sys.stdin.isatty():  # nobody to ask
-        sys.exit(f'No folder was given. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+        sys.exit(f'No folder was given. Run: {config.ADD_COMMAND} "folder path"')
     folder = ask_for_folder(added, STYLE)
     if folder is None:  # Ctrl+C; already said so
         sys.exit(1)
@@ -1220,7 +1220,7 @@ def main() -> None:
     saved = added_folders()
     if not saved:
         if questionary is None or not sys.stdin.isatty():  # nobody to ask
-            sys.exit(f'No folders have been added yet. Run: {config.SCAN_ADD_COMMAND} "folder path"')
+            sys.exit(f'No folders have been added yet. Run: {config.ADD_COMMAND} "folder path"')
         print("No folders have been added yet, so there is nothing to scan. Add one now and it is scanned and indexed.")
         add()
         return

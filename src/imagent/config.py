@@ -305,7 +305,7 @@ APP_VERSION: str = "0.1.0"  # stored with every indexed record (pipeline/version
 # What messages tell the user to run, for the OS they are on.
 SETUP_COMMAND: str = "imagent setup"
 SCAN_COMMAND: str = "imagent scan"
-SCAN_ADD_COMMAND: str = "imagent scan add"
+ADD_COMMAND: str = "imagent add"
 
 # --- Prompts -----------------------------------------------------------------
 PROMPTS_DIR: Path = Path(__file__).parent / "prompts"

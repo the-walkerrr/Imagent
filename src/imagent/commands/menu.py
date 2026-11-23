@@ -5,7 +5,7 @@ imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is
 It only opens once setup is complete: when it is not, ``cli.py`` runs setup first (``needs_setup``), then opens the menu.
 It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
-"Forget the deleted pictures Imagent remembers" is only offered when it remembers some.
+"Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Help" (``imagent help``) is always offered, just before "Exit".
 
 """
 
@@ -25,10 +25,11 @@ UNINSTALL = "uninstall"
 EXIT = "exit"
 
 SEARCH = ("Search your images", "search")
-ADD_FOLDER = ("Add a folder", "scan add")
+ADD_FOLDER = ("Add a folder", "add")
 SCAN = ("Scan folders and index images", "scan")
 FAILED_COMMAND = "failed"
 FORGET_COMMAND = "forget"
+HELP = ("Help: what each command does", "help")
 
 STYLE = questionary.Style([
     ("qmark", "fg:ansidefault bold"),
@@ -38,6 +39,24 @@ STYLE = questionary.Style([
     ("answer", "fg:ansidefault bold"),
     ("instruction", "fg:ansibrightblack"),
 ])
+
+
+LOGO = """\
+█████  █   █   ███    ████  █████  █   █  █████
+  █    ██ ██  █   █  █      █      ██  █    █
+  █    █ █ █  █████  █  ██  ████   █ █ █    █
+  █    █   █  █   █  █   █  █      █  ██    █
+█████  █   █  █   █   ████  █████  █   █    █"""
+TAGLINE = "Local image indexing and search tool."
+
+
+def show_header() -> None:
+    """The name in big letters with the one-line description under it, after a blank line so it never touches the command typed above."""
+    questionary.print("")
+    questionary.print(LOGO, style="bold")
+    questionary.print("")
+    questionary.print(TAGLINE)
+    questionary.print("")
 
 
 def failed_count() -> int:
@@ -82,15 +101,17 @@ def needs_setup() -> bool:
 def choices(failed: int = 0, remembered: int = 0) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
     forget = [(f"Forget the {remembered} deleted picture(s) Imagent remembers", FORGET_COMMAND)] if remembered else []
-    entries = [SEARCH, ADD_FOLDER, SCAN] + shown + forget + [("Exit", EXIT)]
+    entries = [SEARCH, ADD_FOLDER, SCAN] + shown + forget + [HELP, ("Exit", EXIT)]
     return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
 
 def main() -> None:
     make_output_safe()
-    choice = questionary.select("What would you like to do?", choices=choices(failed_count(), remembered_count()), qmark="?",
-                                pointer="»", style=STYLE).ask()
+    show_header()
+    # The blank separator is skipped by the arrow keys; it only leaves a gap between the question and the entries.
+    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" ")] + choices(failed_count(), remembered_count()), qmark="▌",
+                                pointer="»", instruction=" ", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)
     if choice == EXIT:

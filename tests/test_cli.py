@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from unittest import mock
 
 from imagent import cli
 from imagent.commands import delete, failed, forget, menu, scan, search, setup, uninstall
+from imagent.commands import help as help_command
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
 from imagent.db.operations import set_device_settings, set_model_settings
@@ -59,7 +61,7 @@ class CommandLineTests(unittest.TestCase):
                 mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall, \
                 mock.patch.object(delete, "main") as run_delete, mock.patch("imagent.pipeline.folder_picker.start_listing"):
             cli.main(list(argv))
-        return {"search": run_search, "scan": run_scan, "scan add": run_scan_add, "failed": run_failed, "menu": run_menu, "setup": run_setup,
+        return {"search": run_search, "scan": run_scan, "add": run_scan_add, "failed": run_failed, "menu": run_menu, "setup": run_setup,
                 "uninstall": run_uninstall, "delete": run_delete}
 
     def test_search_gets_the_words_typed_as_one_query(self):
@@ -82,33 +84,33 @@ class CommandLineTests(unittest.TestCase):
         runs["scan"].assert_called_once_with()
         self.assertEqual([name for name, run in runs.items() if run.called], ["scan"])
 
-    def test_scan_add_gets_the_folder(self):
-        runs = self.run_command("scan", "add", "/pictures")
-        runs["scan add"].assert_called_once_with("/pictures")
-        self.assertEqual([name for name, run in runs.items() if run.called], ["scan add"])
+    def test_add_gets_the_folder(self):
+        runs = self.run_command("add", "/pictures")
+        runs["add"].assert_called_once_with("/pictures")
+        self.assertEqual([name for name, run in runs.items() if run.called], ["add"])
 
-    def test_scan_add_without_a_folder_starts_listing_the_folders_before_setup(self):
+    def test_add_without_a_folder_starts_listing_the_folders_before_setup(self):
         from imagent.pipeline import folder_picker
         order = []
         with mock.patch.object(folder_picker, "start_listing", side_effect=lambda: order.append("list")) as listing, \
                 mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main", side_effect=lambda: order.append("setup")), \
                 mock.patch.object(scan, "add"), mock.patch.object(sys.stdin, "isatty", return_value=True), contextlib.redirect_stdout(io.StringIO()):
-            cli.main(["scan", "add"])
+            cli.main(["add"])
         listing.assert_called_once_with()
         self.assertEqual(order, ["list", "setup"])
 
     def test_the_folders_are_not_listed_when_a_folder_is_given_or_there_is_no_terminal(self):
         from imagent.pipeline import folder_picker
-        for argv, tty in ((["scan", "add", "/pictures"], True), (["scan", "add"], False), (["scan"], True), (["search", "cat"], True)):
+        for argv, tty in ((["add", "/pictures"], True), (["add"], False), (["scan"], True), (["search", "cat"], True)):
             with mock.patch.object(folder_picker, "start_listing") as listing, mock.patch.object(menu, "needs_setup", return_value=False), \
                     mock.patch.object(scan, "add"), mock.patch.object(scan, "main"), mock.patch.object(search, "main"), \
                     mock.patch.object(sys.stdin, "isatty", return_value=tty):
                 cli.main(argv)
             listing.assert_not_called()
 
-    def test_scan_add_without_a_folder_asks_for_one_itself(self):
-        runs = self.run_command("scan", "add")
-        runs["scan add"].assert_called_once_with(None)
+    def test_add_without_a_folder_asks_for_one_itself(self):
+        runs = self.run_command("add")
+        runs["add"].assert_called_once_with(None)
 
     def test_delete_gets_every_folder_given(self):
         runs = self.run_command("delete", "/pictures", "/my photos")
@@ -122,7 +124,12 @@ class CommandLineTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
             self.run_command("scan", "/pictures")
         self.assertEqual(stop.exception.code, 2)
-        self.assertIn("invalid choice", err.getvalue())
+        self.assertIn("unrecognized arguments", err.getvalue())
+
+    def test_scan_add_is_gone(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stop:
+            self.run_command("scan", "add", "/pictures")
+        self.assertEqual(stop.exception.code, 2)
 
     def test_failed_takes_no_arguments(self):
         runs = self.run_command("failed")
@@ -135,11 +142,38 @@ class CommandLineTests(unittest.TestCase):
             runs[command].assert_called_once_with()
             self.assertEqual([name for name, run in runs.items() if run.called], [command])
 
+    def test_help_runs_without_setup_and_takes_no_arguments(self):
+        with mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main") as run_setup, \
+                mock.patch.object(help_command, "main") as run_help:
+            cli.main(["help"])
+        run_help.assert_called_once_with()
+        run_setup.assert_not_called()
+
+    def test_help_explains_every_command(self):
+        commands = set(cli.build_parser()._subparsers._group_actions[0].choices)
+        self.assertEqual({name for name, _, _ in help_command.COMMANDS}, commands)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            help_command.main()
+        for command in commands:
+            self.assertIn(f"imagent {command}", out.getvalue())
+
+    def test_help_is_styled_only_on_a_terminal_and_says_the_same_either_way(self):
+        plain = help_command.render()
+        self.assertNotIn("\033[", plain)
+        with mock.patch.object(sys.stdout, "isatty", return_value=True), mock.patch.dict(os.environ, {"TERM": "xterm"}):
+            os.environ.pop("NO_COLOR", None)
+            styled = help_command.render()
+            os.environ["NO_COLOR"] = "1"
+            self.assertEqual(help_command.render(), plain)
+        self.assertIn("\033[", styled)
+        self.assertEqual(re.sub(r"\033\[[0-9;]*m", "", styled), plain)
+        self.assertIn(f"\033[{help_command.BOLD}mimagent search \"red car at night\" --full\033[0m", styled)
+
     def test_every_command_the_menu_offers_exists(self):
-        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.UNINSTALL):
+        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.HELP[1], menu.UNINSTALL):
             self.assertEqual(cli.build_parser().parse_args([command]).command, command)
         added = cli.build_parser().parse_args([*menu.ADD_FOLDER[1].split(), "/pictures"])
-        self.assertEqual((added.command, added.scan_command, added.folder), ("scan", "add", "/pictures"))
+        self.assertEqual((added.command, added.folder), ("add", "/pictures"))
 
     def test_no_command_opens_the_menu(self):
         runs = self.run_command()
@@ -163,7 +197,7 @@ class CommandLineTests(unittest.TestCase):
             run_menu.assert_not_called()
 
     def test_every_command_but_setup_and_uninstall_runs_setup_first_when_it_has_not_been_done(self):
-        for argv in (["search", "red car"], ["scan"], ["scan", "add", "/pictures"], ["failed"], ["forget"]):
+        for argv in (["search", "red car"], ["scan"], ["add", "/pictures"], ["failed"], ["forget"]):
             with mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main") as run_setup, \
                     mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, \
                     mock.patch.object(scan, "add") as run_scan_add, mock.patch.object(failed, "main") as run_failed, \
@@ -185,7 +219,7 @@ class CommandLineTests(unittest.TestCase):
             with mock.patch.object(menu, "needs_setup", return_value=True), \
                     mock.patch.object(setup, "main", side_effect=error), mock.patch.object(scan, "add") as run_scan_add, \
                     contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
-                cli.main(["scan", "add", "/pictures"])
+                cli.main(["add", "/pictures"])
             run_scan_add.assert_not_called()
 
     def test_a_command_that_does_not_exist_is_refused_and_nothing_runs(self):
@@ -248,11 +282,17 @@ class MenuTests(unittest.TestCase):
                 menu.main()
         return popen.call_args.args[0][3:] if popen.called else None
 
-    def test_adding_a_folder_runs_scan_add_which_asks_for_it(self):
-        self.assertEqual(self._choose(menu.ADD_FOLDER[1]), ["scan", "add"])
+    def test_adding_a_folder_runs_add_which_asks_for_it(self):
+        self.assertEqual(self._choose(menu.ADD_FOLDER[1]), ["add"])
 
     def test_other_choices_run_as_they_are(self):
         self.assertEqual(self._choose(menu.SCAN[1]), ["scan"])
+
+    def test_help_is_always_offered_just_before_exit(self):
+        for failed in (0, 3):
+            values = [choice.value for choice in menu.choices(failed, remembered=failed)]
+            self.assertEqual(values[-3:], [menu.HELP[1], menu.EXIT, menu.UNINSTALL])
+        self.assertEqual(self._choose(menu.HELP[1]), ["help"])
 
     def test_exit_closes_the_menu_without_running_anything(self):
         with mock.patch.object(menu.questionary, "select") as select, mock.patch.object(menu, "failed_count", return_value=0), \

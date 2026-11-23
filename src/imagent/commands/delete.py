@@ -160,6 +160,6 @@ def main(paths: list[str] | None = None) -> None:
         print(f"\n  ✓ Removed {len(folders)} {noun} and the index of {len(image_ids):,} picture(s). Your pictures were not touched.")
         if keep:
             print(f"  ✓ Imagent remembers {count_deleted_analyses(conn):,} deleted picture(s). Add a folder again with "
-                  f'{config.SCAN_ADD_COMMAND} "folder path" and the ones it recognises are not analysed again.')
+                  f'{config.ADD_COMMAND} "folder path" and the ones it recognises are not analysed again.')
     finally:
         conn.close()

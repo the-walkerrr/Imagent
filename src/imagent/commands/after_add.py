@@ -2,7 +2,7 @@
 """
 imagent/commands/after_add.py — What to do after a folder was added: a menu that comes back after each choice, until Exit.
 
-Shown by ``imagent scan add`` (and by ``imagent scan`` when no folder was added yet) when there is a terminal to answer in. The folder
+Shown by ``imagent add`` (and by ``imagent scan`` when no folder was added yet) when there is a terminal to answer in. The folder
 has only been added, nothing is scanned yet. From here the user can add another folder, scan and index the folder just added, scan every
 folder and index what is pending (as ``imagent scan`` does), delete folders (as ``imagent delete`` does) or search the pictures.
 A choice that ends with a message or Ctrl+C brings the user back to the menu instead of ending the program.
@@ -62,7 +62,9 @@ def run(folder: Path) -> None:
         if current is not None and not _is_added(current):  # deleted from this menu
             current = None
         print()
-        choice = questionary.select("What would you like to do next?", choices=choices(current), qmark="?", pointer="»", style=STYLE).ask()
+        # The blank separator is skipped by the arrow keys; it only leaves a gap between the question and the entries.
+        choice = questionary.select("What would you like to do next?", choices=[questionary.Separator(" ")] + choices(current), qmark="▌",
+                                    pointer="»", instruction=" ", style=STYLE).ask()
         if choice is None:  # Ctrl+C; questionary already said so
             sys.exit(1)
         if choice == EXIT:

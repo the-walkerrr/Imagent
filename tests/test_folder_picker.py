@@ -11,7 +11,7 @@ from unittest import mock
 
 from imagent.pipeline import folder_picker
 from imagent.pipeline.discovery import list_folders
-from imagent.pipeline.folder_picker import Candidate, candidates, rank
+from imagent.pipeline.folder_picker import Candidate, candidates, path_matches, rank
 
 
 def make(home: str, *folders: str) -> list[str]:
@@ -179,6 +179,47 @@ class ListingTests(unittest.TestCase):
             self.assertEqual(folder_picker._folders_below("/other"), ["/other/x"])
 
 
+class PathMatchesTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = os.path.realpath(tmp.name)
+        make(self.home, "Desktop", "Desktop/Old", "Desk2", "Documents", ".hidden", "node_modules")
+        Path(self.home, "desk.txt").write_text("a file, not a folder")
+
+    def shown(self, text, added=()):
+        return [c.shown.replace(os.sep, "/") for c in path_matches(text, list(added))]
+
+    def test_the_folders_that_start_with_what_follows_the_last_separator_are_suggested(self):
+        self.assertEqual(self.shown(self.home + "/Des"), [self.home + "/Desk2", self.home + "/Desktop"])
+
+    def test_upper_and_lower_case_are_the_same_and_the_exact_name_comes_first(self):
+        self.assertEqual(self.shown(self.home + "/desktop"), [self.home + "/Desktop"])
+        self.assertEqual(self.shown(self.home + "/desk2")[0], self.home + "/Desk2")
+
+    def test_nothing_after_the_last_separator_suggests_every_folder_inside(self):
+        self.assertEqual(self.shown(self.home + "/Desktop/"), [self.home + "/Desktop/Old"])
+        self.assertEqual(self.shown(self.home + "/"), [self.home + "/" + name for name in ("Desk2", "Desktop", "Documents")])
+
+    def test_a_path_typed_with_a_tilde_is_shown_as_typed_but_gives_the_whole_path(self):
+        with mock.patch.dict(os.environ, {"HOME": self.home}):
+            found = path_matches("~/Doc", [])
+        self.assertEqual([(c.shown, c.path) for c in found], [("~/Documents", os.path.join(self.home, "Documents"))])
+
+    def test_folders_the_scan_skips_are_not_suggested(self):
+        self.assertEqual(self.shown(self.home + "/."), [])
+        self.assertEqual(self.shown(self.home + "/node"), [])
+
+    def test_folders_added_before_and_overlapping_ones_are_not_suggested(self):
+        added = [os.path.join(self.home, "Desktop")]
+        self.assertEqual(self.shown(self.home + "/Des", added), [self.home + "/Desk2"])
+        self.assertEqual(self.shown(self.home + "/Desktop/", added), [])
+
+    def test_a_folder_that_is_not_there_or_no_folder_yet_gives_nothing(self):
+        self.assertEqual(self.shown(self.home + "/nowhere/x"), [])
+        self.assertEqual(self.shown("~"), [])
+
+
 class AskTests(unittest.TestCase):
     def test_the_picker_is_used_and_told_what_was_added(self):
         with mock.patch.object(folder_picker, "_Picker") as picker:
@@ -224,6 +265,15 @@ class PickerTests(unittest.TestCase):
 
     def test_a_typed_path_is_used_as_it_is(self):
         self.assertEqual(self.run_picker("~/somewhere\r"), "~/somewhere")
+
+    def test_a_typed_path_is_completed_from_the_disk(self):
+        make(self.home, "Desktop")
+        self.assertEqual(self.run_picker("~/desk\r"), os.path.join(self.home, "Desktop"))
+
+    def test_after_a_separator_enter_adds_the_folder_typed_and_an_arrow_key_picks_one_inside(self):
+        make(self.home, "Desktop/Old")
+        self.assertEqual(self.run_picker("~/Desktop/\r"), "~/Desktop/")
+        self.assertEqual(self.run_picker("~/Desktop/\x1b[B\r"), os.path.join(self.home, "Desktop", "Old"))
 
     def test_two_characters_suggest_nothing_so_enter_uses_them_as_a_path(self):
         self.assertEqual(self.run_picker("tr\r"), "tr")

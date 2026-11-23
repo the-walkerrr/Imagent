@@ -35,17 +35,18 @@ imagent setup
 imagent search "red car at night"   # show the pictures that best match a description
 imagent search                      # keep searching until you type exit
 imagent search --full "red car"     # show each result's full description instead of its one-line summary
-imagent scan add ~/Pictures         # add a folder, then choose what to do next: scan and index it, add another, delete folders, search
-imagent scan add                    # the same, picking the folder from suggestions as you type (macOS; elsewhere you type the path)
+imagent add ~/Pictures         # add a folder, then choose what to do next: scan and index it, add another, delete folders, search
+imagent add                    # the same, picking the folder from suggestions as you type (macOS; elsewhere you type the path)
 imagent scan                        # scan every folder you added, then index what is pending (asks for a folder if none is added yet)
 imagent delete ~/Pictures           # remove a folder you added and what was indexed from it (several folders can be given; quote a path with spaces)
 imagent delete                      # the same, ticking the folders to remove from the ones you added
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
+imagent help                        # explain each command briefly
 imagent                             # open a menu (arrow keys and Enter) with the same choices
 ```
 
-`imagent --help` lists the commands. To index: run `imagent scan add` with a folder, or without one to pick it from a list, then choose "Scan and index this folder" (the menu comes back after each choice, so you can add more folders), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
+`imagent --help` lists the commands. To index: run `imagent add` with a folder, or without one to pick it from a list, then choose "Scan and index this folder" (the menu comes back after each choice, so you can add more folders), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
 
 ## Pictures that come back
 
@@ -96,7 +97,7 @@ Your pictures, an Ollama you installed yourself and any model you had before Ima
 | Message | What to do |
 | --- | --- |
 | `Imagent is not set up yet` | Run `imagent setup`. |
-| `No indexed images found` | Run `imagent scan add` with a folder first. |
+| `No indexed images found` | Run `imagent add` with a folder first. |
 | `The ... model ... is not the same version` | The models are locked. Put the original version back (`imagent setup` restores it when it can), or uninstall and set up again, which clears the index. |
 | `...is on a network drive` / `...external or removable drive` | Copy the pictures to your computer's own disk. |
 

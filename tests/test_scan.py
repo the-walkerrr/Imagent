@@ -488,7 +488,7 @@ class CloudAndHiddenTests(ScanBase):
 
 
 class ScanCommandTests(ScanBase):
-    """``scan`` scans every folder that was added, and ``scan add`` (with no terminal to answer in) adds a folder and scans it; each then offers to index the backlog."""
+    """``scan`` scans every folder that was added, and ``add`` (with no terminal to answer in) adds a folder and scans it; each then offers to index the backlog."""
 
     def _scan_two_folders(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()
@@ -511,7 +511,7 @@ class ScanCommandTests(ScanBase):
     def test_scan_with_no_folder_added_and_no_terminal_says_how_to_add_one(self):
         with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
             self._call(scan.main)
-        self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+        self.assertIn('imagent add "folder path"', str(stop.exception.code))
 
     def _scan_with_no_folder_added(self, typed):
         """Run ``scan.main`` in a terminal with no folder added and ``typed`` chosen at the folder prompt; returns what was validated as the
@@ -573,7 +573,7 @@ class ScanCommandTests(ScanBase):
     def test_add_without_a_folder_and_no_terminal_says_how_to_give_one(self):
         with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
             scan.add()
-        self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+        self.assertIn('imagent add "folder path"', str(stop.exception.code))
 
     def test_add_in_a_terminal_only_adds_the_folder_and_scans_nothing(self):
         folder = (self.work / "first").resolve()
