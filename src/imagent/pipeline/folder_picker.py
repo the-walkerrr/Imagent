@@ -6,6 +6,9 @@ The folders are listed by walking the home folder (pipeline/discovery.py, with t
 
 The matches are ordered from the end of the path: a folder whose own name matches comes first, then one whose parent matches, and so
 on, because a folder is remembered by its own name more than by what holds it.
+
+A typed path (one that starts with "~" or is absolute) is completed like in a shell instead: the folders inside the folder typed so far
+whose names start with what follows its last separator are suggested, read from the disk as the user types.
 """
 
 from __future__ import annotations
@@ -136,6 +139,40 @@ def _looks_like_path(text: str) -> bool:
     return text.startswith("~") or os.path.isabs(text)
 
 
+_SEPARATORS = tuple({os.sep, os.altsep} - {None})
+
+
+def _ends_with_separator(text: str) -> bool:
+    return text.endswith(_SEPARATORS)
+
+
+def path_matches(text: str, added: list[str]) -> list[Candidate]:
+    """The folders that complete the typed path ``text``: those inside the folder up to its last separator whose names start with what follows it.
+
+    The exact name comes first, then the rest in alphabetical order. Left out are the folders that ``candidates`` leaves out (skipped or hidden
+    ones, and ones that are added or overlap an added one). A folder that is not there or cannot be read gives nothing. Each ``shown`` keeps the
+    way the path was typed ("~/Pic" gives "~/Pictures"), each ``path`` is the whole path."""
+    typed = text.strip()
+    cut = max(typed.rfind(separator) for separator in _SEPARATORS) + 1
+    if not cut:  # no folder to look in yet: "~" alone, or a drive letter
+        return []
+    parent_text, wanted = typed[:cut], _normalize(typed[cut:])
+    added_keys = {comparable_path(path) for path in added}
+    found = []
+    try:
+        with os.scandir(os.path.expanduser(parent_text)) as entries:
+            for entry in entries:
+                key = _normalize(entry.name)
+                if _skip_folder(entry.name) or not key.startswith(wanted) or not entry.is_dir() or is_hidden_folder(entry.path):
+                    continue
+                if added and (comparable_path(entry.path) in added_keys or find_overlapping_root(Path(entry.path), added)):
+                    continue
+                found.append(Candidate(entry.path, parent_text + entry.name, key))
+    except OSError:
+        return []
+    return sorted(found, key=lambda candidate: (candidate.key != wanted, candidate.key))
+
+
 class _Picker:
     """The prompt: a line to type in and, under it, the matching folders to choose from."""
 
@@ -151,8 +188,13 @@ class _Picker:
 
     def _refresh(self) -> None:
         text = self.buffer.text.strip()
-        self.matches = rank(self.found, text) if self.found and not _looks_like_path(text) else []
-        self.selected = 0
+        if _looks_like_path(text):
+            self.matches = path_matches(text, self.added)
+            # Right after a separator nothing is named yet, so nothing is highlighted and Enter adds the folder typed so far.
+            self.selected = -1 if _ends_with_separator(text) else 0
+        else:
+            self.matches = rank(self.found, text) if self.found else []
+            self.selected = 0
 
     def _load(self) -> None:
         self.found = candidates(_folders_below(self.home), self.home, self.added)
@@ -165,13 +207,15 @@ class _Picker:
         if not text:
             return []
         if _looks_like_path(text):
-            return [("class:instruction", "Press Enter to add this path.")]
-        if len(text) < MIN_QUERY:
-            return []
-        if self.found is None:
-            return [("class:instruction", "Looking for folders...")]
-        if not self.matches:
-            return [("class:instruction", "No folder matches. You can paste its path instead.")]
+            if not self.matches:
+                return [("class:instruction", "Press Enter to add this path.")]
+        else:
+            if len(text) < MIN_QUERY:
+                return []
+            if self.found is None:
+                return [("class:instruction", "Looking for folders...")]
+            if not self.matches:
+                return [("class:instruction", "No folder matches. You can paste its path instead.")]
         lines: list[tuple[str, str]] = []
         for number, candidate in enumerate(self.matches[:ROWS]):
             chosen = number == self.selected
@@ -192,7 +236,7 @@ class _Picker:
         from prompt_toolkit.shortcuts import print_formatted_text
 
         typing = Window(BufferControl(self.buffer, input_processors=[
-            BeforeInput([("class:qmark", "? "), ("class:question", "Folder to add: ")]),
+            BeforeInput([("class:qmark", "▌ "), ("class:question", "Folder to add: ")]),
             ConditionalProcessor(AfterInput(PLACEHOLDER, style=PLACEHOLDER_STYLE), Condition(lambda: not self.buffer.text)),
         ]), height=1)
         keys = KeyBindings()
@@ -200,7 +244,7 @@ class _Picker:
         def move(step: int) -> None:
             shown = min(len(self.matches), ROWS)
             if shown:
-                self.selected = (self.selected + step) % shown
+                self.selected = (0 if step > 0 else shown - 1) if self.selected < 0 else (self.selected + step) % shown
 
         @keys.add("down")
         @keys.add("c-n")
@@ -215,7 +259,7 @@ class _Picker:
         @keys.add("enter")
         def _(event):
             text = self.buffer.text.strip()
-            if self.matches:
+            if self.matches and self.selected >= 0:
                 event.app.exit(result=self.matches[self.selected].path)
             elif text and (self.found is not None or _looks_like_path(text)):  # not while the folders are still being listed
                 event.app.exit(result=text)
@@ -227,12 +271,13 @@ class _Picker:
         self.app = Application(
             layout=Layout(HSplit([typing, Window(FormattedTextControl(self._render), height=ROWS + 1)]), focused_element=typing),
             key_bindings=keys, style=style, erase_when_done=True)
+        print()  # a gap above the heading
         threading.Thread(target=self._load, daemon=True).start()
         folder = self.app.run()
         if folder is None:
             print("Cancelled by user")
             return None
-        print_formatted_text(FormattedText([("class:qmark", "? "), ("class:question", "Folder to add: "), ("class:answer", folder)]),
+        print_formatted_text(FormattedText([("class:qmark", "▌ "), ("class:question", "Folder to add: "), ("class:answer", folder)]),
                              style=style)
         return folder
 

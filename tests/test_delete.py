@@ -90,20 +90,23 @@ class MainTests(DeleteBase):
         self.titles = []
         answers = list(answers)
 
+        def choose_folders(conn, roots):  # what the list of folders returns: the ones ticked, or Ctrl+C when ``checked`` is None
+            if checked is None:
+                sys.exit(f"\n{delete.CANCELLED}")
+            return [root for root in roots if root["root_id"] in checked]
+
         def select(message, **kwargs):
             asked.append((message, [choice.value for choice in kwargs["choices"]]))
             self.titles.append([choice.title for choice in kwargs["choices"]])
             return mock.Mock(ask=lambda: answers.pop(0))
 
-        with mock.patch.object(delete.questionary, "select", side_effect=select), \
-                mock.patch.object(delete.questionary, "checkbox", return_value=mock.Mock(ask=lambda: checked)) as checkbox, \
+        with mock.patch.object(delete.questionary, "select", side_effect=select), mock.patch.object(delete, "choose_folders", side_effect=choose_folders), \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
             try:
                 delete.main(list(paths))
                 code = None
             except SystemExit as exit_info:
                 code = exit_info.code
-        self.checkbox = checkbox
         return code, out.getvalue(), asked
 
     def test_with_no_terminal_it_asks_for_one(self):
@@ -146,8 +149,7 @@ class MainTests(DeleteBase):
         code, _, _ = self.run_main(answers=[delete.DISCARD, delete.DELETE], checked=[first])
         self.assertIsNone(code)
         self.assertEqual(self.folders(), ["second"])
-        titles = [choice.title for choice in self.checkbox.call_args.kwargs["choices"]]
-        self.assertTrue(all("picture(s)" in title for title in titles))
+
 
     def test_it_shows_what_will_be_lost_before_asking(self):
         self.add_folder("pictures", 3)
@@ -200,6 +202,52 @@ class MainTests(DeleteBase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM text_embeddings").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM backlog").fetchone()[0], 0)
         self.assertTrue((self.work / "gone" / "0.png").exists())  # the picture files are never touched
+
+
+class ChooseFoldersTests(DeleteBase):
+    """The list of folders, driven by real key presses on a fake keyboard and screen."""
+    ENTER, DOWN, CTRL_C = "\r", "\x1b[B", "\x03"
+
+    def choose(self, *keys):
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        with create_pipe_input() as keyboard, contextlib.redirect_stdout(io.StringIO()):
+            keyboard.send_text("".join(keys))
+            return delete.choose_folders(self.conn, list_roots(self.conn), input=keyboard, output=DummyOutput())
+
+    def setUp(self):
+        super().setUp()
+        self.first, self.second = self.add_folder("first", 1), self.add_folder("second", 1, shade_from=5)
+
+    def test_enter_ticks_a_folder_and_confirm_ends_the_choice(self):
+        first = list_roots(self.conn)[0]["root_id"]
+        self.assertEqual([root["root_id"] for root in self.choose(self.ENTER, self.DOWN, self.DOWN, self.ENTER)], [first])
+
+    def test_enter_ticks_every_folder_it_is_pressed_on(self):
+        self.assertEqual(len(self.choose(self.ENTER, self.DOWN, self.ENTER, self.DOWN, self.ENTER)), 2)
+
+    def test_enter_on_a_ticked_folder_unticks_it(self):
+        # tick the first, tick the second, go back up and untick the first, then confirm
+        chosen = self.choose(self.ENTER, self.DOWN, self.ENTER, "\x1b[A", self.ENTER, self.DOWN, self.DOWN, self.ENTER)
+        self.assertEqual([root["root_id"] for root in chosen], [list_roots(self.conn)[1]["root_id"]])
+
+    def test_confirm_cannot_be_chosen_until_a_folder_is_ticked(self):
+        # with nothing ticked the pointer skips Confirm: from the first folder, three Downs go to the second folder, to Exit (past Confirm)
+        # and back to the first folder, where Enter ticks it; then two Downs reach Confirm, which is now allowed
+        chosen = self.choose(self.DOWN, self.DOWN, self.DOWN, self.ENTER, self.DOWN, self.DOWN, self.ENTER)
+        self.assertEqual([root["root_id"] for root in chosen], [list_roots(self.conn)[0]["root_id"]])
+
+    def test_exit_below_confirm_deletes_nothing(self):
+        for ticked in ((), (self.ENTER,)):  # Exit is offered whether or not a folder is ticked
+            downs = (self.DOWN,) * (2 if not ticked else 3)  # with nothing ticked the pointer skips Confirm
+            with self.assertRaises(SystemExit) as stop:
+                self.choose(*ticked, *downs, self.ENTER)
+            self.assertEqual(stop.exception.code, f"\n{delete.CANCELLED}")
+
+    def test_ctrl_c_cancels(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.choose(self.ENTER, self.CTRL_C)
+        self.assertEqual(stop.exception.code, f"\n{delete.CANCELLED}")
 
 
 class KeepTests(DeleteBase):

@@ -18,7 +18,7 @@ class MenuTests(unittest.TestCase):
         menus = []
 
         def select(message, **kwargs):
-            menus.append([(choice.title, choice.value) for choice in kwargs["choices"]])
+            menus.append([(choice.title, choice.value) for choice in kwargs["choices"] if not isinstance(choice, after_add.questionary.Separator)])
             return mock.Mock(ask=lambda: answers.pop(0))
 
         mocks = {name: mock.Mock() for name in ("add_folder", "scan_and_index", "main", "delete", "search")}

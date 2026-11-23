@@ -488,7 +488,7 @@ class CloudAndHiddenTests(ScanBase):
 
 
 class ScanCommandTests(ScanBase):
-    """``scan`` scans every folder that was added, and ``scan add`` (with no terminal to answer in) adds a folder and scans it; each then offers to index the backlog."""
+    """``scan`` scans every folder that was added, and ``add`` (with no terminal to answer in) adds a folder and scans it; each then offers to index the backlog."""
 
     def _scan_two_folders(self):
         first, second = (self.work / "first").resolve(), (self.work / "second").resolve()
@@ -511,7 +511,7 @@ class ScanCommandTests(ScanBase):
     def test_scan_with_no_folder_added_and_no_terminal_says_how_to_add_one(self):
         with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
             self._call(scan.main)
-        self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+        self.assertIn('imagent add "folder path"', str(stop.exception.code))
 
     def _scan_with_no_folder_added(self, typed):
         """Run ``scan.main`` in a terminal with no folder added and ``typed`` chosen at the folder prompt; returns what was validated as the
@@ -573,7 +573,7 @@ class ScanCommandTests(ScanBase):
     def test_add_without_a_folder_and_no_terminal_says_how_to_give_one(self):
         with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
             scan.add()
-        self.assertIn('imagent scan add "folder path"', str(stop.exception.code))
+        self.assertIn('imagent add "folder path"', str(stop.exception.code))
 
     def test_add_in_a_terminal_only_adds_the_folder_and_scans_nothing(self):
         folder = (self.work / "first").resolve()
@@ -629,7 +629,7 @@ class ScanCommandTests(ScanBase):
         _, run, yes_no = self._call(scan.main, answer=True)
         yes_no.assert_called_once()
         self.assertIn("3 file(s)", yes_no.call_args.args[0])
-        run.assert_called_once_with()
+        run.assert_called_once_with(None)
 
     def test_scan_does_not_index_when_the_user_declines(self):
         self._scan_two_folders()
@@ -658,7 +658,7 @@ class ScanCommandTests(ScanBase):
         self.make_image(root / "a.png", 1)
         _, run, yes_no = self._call(scan.add, str(root), answer=True)
         yes_no.assert_called_once()
-        run.assert_called_once_with()
+        run.assert_called_once_with(None)
 
     def test_adding_a_folder_again_scans_it_again(self):
         root = (self.work / "pictures").resolve()
@@ -865,3 +865,70 @@ class KeepDeletedTests(ScanBase):
         counts = scan.scan(root)
         self.assertEqual((counts["renamed"], counts["deleted"]), (1, 0))
         self.assertEqual(self._kept(), [])
+
+
+class RescanLoopTests(ScanBase):
+    """After a round of indexing the folders are scanned again, and what changed meanwhile is indexed in another round."""
+
+    def _loop(self, pending, answers, tty=True):
+        """Run the loop with ``pending`` as the successive counts found by the rescans and ``answers`` as the menu's successive answers;
+        returns the mocks of ``run``, of the rescan and of the menu, and what was said."""
+        import contextlib
+        import io
+        rescan, out = mock.Mock(), io.StringIO()
+        with mock.patch.object(scan, "run") as run, mock.patch.object(scan, "_pending_count", side_effect=pending), \
+                mock.patch.object(scan, "_run_again_or_exit", side_effect=answers) as menu, \
+                mock.patch.object(scan.sys.stdin, "isatty", return_value=tty), contextlib.redirect_stdout(out):
+            scan._index_until_nothing_is_pending(rescan, {7})
+        return run, rescan, menu, out.getvalue()
+
+    def test_with_no_terminal_there_is_one_round_and_no_rescan(self):
+        run, rescan, menu, said = self._loop([], [], tty=False)
+        run.assert_called_once_with({7})
+        rescan.assert_not_called()
+        menu.assert_not_called()
+
+    def test_nothing_pending_after_the_rescan_ends_the_loop(self):
+        run, rescan, menu, said = self._loop([0], [])
+        run.assert_called_once_with({7})
+        rescan.assert_called_once_with()
+        menu.assert_not_called()
+        self.assertNotIn("changes during the earlier scan", said)
+
+    def test_changes_found_by_the_rescan_are_indexed_in_another_round_until_nothing_is_pending(self):
+        run, rescan, menu, said = self._loop([2, 1, 0], [True, True])
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(rescan.call_count, 3)
+        self.assertEqual(menu.call_count, 2)
+        self.assertIn("There were changes during the earlier scan: 2 file(s)", said)
+        self.assertIn("There were changes during the earlier scan: 1 file(s)", said)
+
+    def test_exiting_from_the_menu_leaves_the_backlog_for_later(self):
+        run, rescan, menu, said = self._loop([3], [False])
+        run.assert_called_once_with({7})
+        self.assertIn("Exiting. Run imagent scan later", said)
+
+    def test_a_round_that_stops_ends_the_loop(self):
+        with mock.patch.object(scan, "run", side_effect=SystemExit(1)), mock.patch.object(scan.sys.stdin, "isatty", return_value=True), \
+                self.assertRaises(SystemExit):
+            scan._index_until_nothing_is_pending(mock.Mock(), None)
+
+    def _menu(self, typed, wait):
+        """Show the menu with ``typed`` as the keys pressed (nothing typed: nobody answers) and ``wait`` seconds before it answers by itself."""
+        import questionary
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        real = questionary.select
+        with create_pipe_input() as pipe, mock.patch.object(scan.config, "RESCAN_WAIT_SECONDS", wait), \
+                mock.patch.object(scan.questionary, "select", side_effect=lambda *a, **k: real(*a, input=pipe, output=DummyOutput(), **k)):
+            pipe.send_text(typed)
+            return scan._run_again_or_exit()
+
+    def test_the_menu_runs_the_backlog_again_when_nobody_answers_in_time(self):
+        self.assertTrue(self._menu("", 1))
+
+    def test_the_menu_runs_the_backlog_again_when_that_is_chosen(self):
+        self.assertTrue(self._menu("\r", 60))
+
+    def test_the_menu_exits_when_exit_is_chosen(self):
+        self.assertFalse(self._menu("\x1b[B\r", 60))

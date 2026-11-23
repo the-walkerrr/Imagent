@@ -169,6 +169,14 @@ class SearchTests(IsolatedHome):
         self.assertIn("Top 3 result(s) for: 'bike'\n", plain.getvalue())
         self.assertIn("Top 3 result(s) for: \033[1m'bike'\033[0m\n", terminal.getvalue())
 
+    def test_the_heading_shows_how_long_the_search_took_when_it_is_known(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search._show("bike", search.search("anything"), seconds=3.24)
+            search._show("bike", [], seconds=0.5)
+        self.assertIn("Top 3 result(s) for: 'bike' in 3.2s\n", out.getvalue())
+        self.assertIn("No results for: 'bike' in 0.5s\n", out.getvalue())
+
     def test_the_make_is_not_repeated_when_the_model_already_starts_with_it(self):
         base = {"taken_at": None, "modified_at": None, "width": None, "height": None, "file_size": None}
         for make, model, shown in (("iQOO", "iQOO Neo9 Pro", "iQOO Neo9 Pro"), ("Canon", "CANON EOS R5", "CANON EOS R5"),
@@ -244,6 +252,44 @@ class SearchTests(IsolatedHome):
         with self._busy([]), mock.patch.object(search, "load_model") as load:
             self.assertIsNotNone(search.start_session())
         self.assertEqual(load.call_count, 2)
+
+
+class NoIndexedImagesTests(unittest.TestCase):
+    """With nothing indexed, the user is offered a scan or Exit instead of being told a command to run."""
+
+    def offer(self, answer, tty=True, folders=True):
+        with mock.patch.object(search.sys.stdin, "isatty", return_value=tty), \
+                mock.patch.object(search.questionary, "select") as select, \
+                mock.patch("imagent.commands.menu.has_folders", return_value=folders), \
+                mock.patch("imagent.commands.scan.add") as add, \
+                mock.patch("imagent.commands.scan.main") as scan:
+            select.return_value.ask.return_value = answer
+            search._offer_scan()
+        self.add = add
+        return select, scan
+
+    def test_scan_runs_the_scan(self):
+        select, scan = self.offer("scan")
+        self.assertEqual([choice.title for choice in select.call_args.kwargs["choices"][1:]], ["Scan and index images", "Exit"])
+        scan.assert_called_once_with()
+
+    def test_with_no_folder_added_it_offers_to_add_one_instead_of_a_scan(self):
+        select, scan = self.offer("add", folders=False)
+        self.assertEqual([choice.title for choice in select.call_args.kwargs["choices"][1:]], ["Add a folder", "Exit"])
+        self.add.assert_called_once_with()
+        scan.assert_not_called()
+
+    def test_exit_runs_nothing(self):
+        self.assertFalse(self.offer("exit")[1].called)
+
+    def test_ctrl_c_ends_the_program(self):
+        with self.assertRaises(SystemExit):
+            self.offer(None)
+
+    def test_no_terminal_means_no_menu(self):
+        select, scan = self.offer("scan", tty=False)
+        select.assert_not_called()
+        scan.assert_not_called()
 
 
 if __name__ == "__main__":

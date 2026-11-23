@@ -31,9 +31,11 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 from datetime import datetime
 
 import numpy as np
+import questionary
 
 from imagent import config
 from imagent.db.connection import init_db
@@ -45,7 +47,7 @@ from imagent.db.operations import (
 from imagent.pipeline.console import file_link, make_output_safe
 from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.locking import is_running
-from imagent.pipeline.progress import SearchProgress
+from imagent.pipeline.progress import SearchProgress, format_duration
 from imagent.vlm.analyzer import embed_search_text, understand_query
 from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running
 
@@ -114,6 +116,24 @@ def _another_model_is_running(client, settings: dict, progress: SearchProgress) 
     return True
 
 
+def _offer_scan() -> None:
+    """With a terminal to answer in, offer to scan and index images now (or, when no folder has been added, to add one), or to exit; the search
+    itself ends either way."""
+    if not sys.stdin.isatty():
+        return
+    from imagent.commands import scan  # after_add (which scan uses) imports this module
+    from imagent.commands.menu import ADD_FOLDER, STYLE, has_folders
+    title, command = ("Scan and index images", "scan") if has_folders() else ADD_FOLDER  # with no folder there is nothing to scan: adding one scans and indexes it
+    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" "), questionary.Choice(title, value=command),
+                                questionary.Choice("Exit", value="exit")], qmark="▌", pointer="»", instruction=" ", style=STYLE).ask()
+    if choice is None:  # Ctrl+C; questionary already said so
+        sys.exit(1)
+    if choice == "scan":
+        scan.main()
+    elif choice == "add":
+        scan.add()
+
+
 def start_session() -> tuple | None:
     """Start Ollama and load the judge and embedding models, shown as one step.
 
@@ -122,6 +142,7 @@ def start_session() -> tuple | None:
     """
     make_output_safe()
     conn = init_db(str(config.DB_PATH))
+    print()  # a gap above the live line
     progress = SearchProgress()
     progress.step("Loading the model and starting the server")
     try:
@@ -134,7 +155,10 @@ def start_session() -> tuple | None:
 
         if count_embeddings(conn) == 0:
             progress.fail()
-            progress.say(f"No indexed images found. Run {config.SCAN_COMMAND} first.")
+            progress.say("\nNo indexed images found.\n")  # a blank line above and below
+            progress.close()
+            conn.close()
+            _offer_scan()
             return None
 
         if _another_model_is_running(client, settings, progress):
@@ -298,13 +322,15 @@ def _description(result: dict, full: bool) -> str:
     return _indented((result["description"] if full else result["short_description"]) or "")
 
 
-def _show(query: str, results: list[dict], full: bool = False) -> None:
+def _show(query: str, results: list[dict], full: bool = False, seconds: float | None = None) -> None:
+    """Print the results; ``seconds`` is how long the search took, shown in the heading when given."""
+    took = f" in {format_duration(seconds, decimals=1)}" if seconds is not None else ""
     if not results:
-        print(f"\nNo results for: {query!r}\n")
+        print(f"\nNo results for: {query!r}{took}\n")
         return
 
     bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
-    print(f"\nTop {len(results)} result(s) for: " + (f"\033[1m{query!r}\033[0m" if bold else f"{query!r}") + "\n")
+    print(f"\nTop {len(results)} result(s) for: " + (f"\033[1m{query!r}\033[0m" if bold else f"{query!r}") + f"{took}\n")
     for position, result in enumerate(results, start=1):
         name = file_link(os.path.basename(result["file_path"]), result["file_path"])
         name = f"\033[1m{name}\033[0m" if bold else name
@@ -315,7 +341,9 @@ def _show(query: str, results: list[dict], full: bool = False) -> None:
 
 
 def _answer(query: str, session: tuple, full: bool) -> None:
-    _show(query, search(query, session), full)
+    started = time.monotonic()
+    results = search(query, session)
+    _show(query, results, full, time.monotonic() - started)
 
 
 def main(query: str = "", full: bool = False) -> None:
@@ -331,11 +359,14 @@ def main(query: str = "", full: bool = False) -> None:
         _answer(query, session, full)
         return
     colour = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
-    prompt = "Enter your search query (type exit to quit): "
-    prompt = f"\033[34m{prompt}\033[0m" if colour else prompt
+    title = "▌Enter your search query (type exit to quit):"
+    title = f"\033[1m{title}\033[0m" if colour else title
+    above = ""  # the live line that loaded the models left the gap above the first step
     while True:
+        print(f"{above}{title}\n")  # a step: a gap above and below it
+        above = "\n"
         try:
-            query = input(prompt).strip()
+            query = input().strip()
         except EOFError:  # Ctrl+D, or no terminal to type in
             return
         if query.lower() in ("exit", "quit"):
@@ -343,4 +374,5 @@ def main(query: str = "", full: bool = False) -> None:
         if not query:
             print('Type what you are looking for, for example: red car at night')
             continue
+        print()  # a gap between the query and the step shown while it is answered
         _answer(query, session, full)
