@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import sys
 import textwrap
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -82,7 +83,7 @@ from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.failure import IndexingFailure, RunStopped
 from imagent.pipeline.folder_picker import ask_for_folder
 from imagent.pipeline.locking import AlreadyRunning, single_instance
-from imagent.pipeline.progress import Progress, format_duration
+from imagent.pipeline.progress import Progress
 from imagent.pipeline.serialisation import serialize_embedding
 from imagent.pipeline.versions import collect_versions, model_versions
 from imagent.pipeline.validation import find_overlapping_root, validate_folder
@@ -521,7 +522,7 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
     next run; every other outcome (indexed/updated/skipped) removes the row from the
     backlog.  The run stops early if Ollama keeps failing, if the database cannot be
     written (disk full, for example; the files stay queued, none of their attempts used),
-    or on Ctrl+C.  A summary is printed at the end.
+    or on Ctrl+C.
     """
     db_path = str(config.DB_PATH)
     conn = init_db(db_path)
@@ -569,8 +570,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
         load_model(client, settings["embedding_model"], embedding=True)
     print()
 
-    counts: dict[str, int] = {"indexed": 0, "updated": 0, "skipped": 0, "failed": 0}
-    wall_start = time.perf_counter()
     in_a_row = 0  # consecutive images that failed for a reason that is not theirs (Ollama, the machine)
     last_service_error = ""
     lower_settings_offer: list[tuple] = []  # (backlog row, kind, message) of images that failed for the computer's trouble: the user may try them again with lower settings
@@ -593,7 +592,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
                                                                   retried.append)
                     with conn:
                         delete_backlog(conn, row["file_path"])
-                    counts[result] += 1
                     progress.done(result, short_description)
                     in_a_row = 0
                     io_failures.clear()
@@ -607,7 +605,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
                     # Every step for this kind of trouble was tried, so trying again would only repeat them. The file is set
                     # aside with the whole record of what was tried (it is queued again when the file changes), or, when the
                     # fault is not the file's, left queued with its attempts untouched.
-                    counts["failed"] += 1
                     params = dict(exc.params)
                     if exc.service:  # the machine's trouble: it was tried several times, and the user is told what to do about it
                         params["tries"] = config.SERVICE_TRIES
@@ -633,7 +630,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
                     if exc.model_trouble:
                         recent_retries.append(True)
                 except RunStopped as exc:
-                    counts["failed"] += 1
                     progress.done("FAILED", str(exc))
                     stopped = f"Indexing stopped. {exc} Nothing was held against the files; the rest stays queued."
                     can_offer = False
@@ -645,7 +641,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
                             delete_backlog(conn, row["file_path"])
                         progress.done("gone")
                         continue
-                    counts["failed"] += 1
                     counts_as_attempt, ollama_problem = classify_failure(exc)
                     log_error(
                         conn,
@@ -686,7 +681,6 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
                                "the rest stays queued.")
                     break
             except sqlite3.Error as exc:
-                counts["failed"] += 1
                 message = describe_db_error(exc)
                 progress.done("FAILED", message)
                 stopped = f"Indexing stopped. {message} Finished images are saved and the rest stays queued."
@@ -700,22 +694,9 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
     finally:
         progress.close()
 
-    elapsed = time.perf_counter() - wall_start
     if settings["vlm_model"] != settings["judge_model"]:
         unload_model(client, settings["vlm_model"])  # searching does not need the VLM; free its memory for the judge model
 
-    # Final summary
-    print(f"\n{'─' * 52}")
-    print(f"  Total in backlog  : {total}")
-    print(f"  Indexed (new)     : {counts['indexed']}")
-    print(f"  Updated           : {counts['updated']}")
-    print(f"  Skipped           : {counts['skipped']}")
-    print(f"  Failed            : {counts['failed']}")
-    print(f"  Total elapsed     : {format_duration(elapsed, decimals=2)}")
-    processed = counts["indexed"] + counts["updated"]
-    if processed:
-        print(f"  Average per image : {format_duration(elapsed / processed, decimals=2)}")
-    print(f"{'─' * 52}")
     if stopped:
         print(f"\n{stopped}")
     try:
@@ -1167,26 +1148,89 @@ def _scan_and_report(root: Path) -> None:
 
 def _scan_folders(roots: list[Path]) -> None:
     """Scan each folder and print what changed in it, then offer to index what is pending."""
+    bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ  # as in _scan_and_report
+    title = "List of folders added for scan:"
+    print(f"\n\033[1m{title}\033[0m" if bold else f"\n{title}")
     for root in roots:
         _scan_and_report(root)
     print()
 
-    conn = init_db(str(config.DB_PATH))
-    try:
-        backlog = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
-        failed = {row["file_path"] for row in get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)}
-    finally:
-        conn.close()
-    backlog_size = len([row for row in backlog if row["file_path"] not in failed])  # a file left queued after its tries is failed, not pending
+    backlog_size = _pending_count()
     if backlog_size == 0:
         return
     if _ask_yes_no(
         f"{backlog_size} file(s) in the backlog are pending indexing. "
         "Run indexing now? [y/N]: "
     ):
-        run()
+        _index_until_nothing_is_pending(lambda: _rescan(roots))
     else:
-        print(f"Skipping indexing. Run {config.SCAN_COMMAND} later to process the backlog.")
+        print(f"\nSkipping indexing. Run {config.SCAN_COMMAND} later to process the backlog.")
+
+
+def _pending_count(root_ids: set[int] | None = None) -> int:
+    """How many files wait to be indexed (only those of the folders ``root_ids`` when given)."""
+    conn = init_db(str(config.DB_PATH))
+    try:
+        backlog = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+        failed = {row["file_path"] for row in get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)}
+    finally:
+        conn.close()
+    # a file left queued after its tries is failed, not pending
+    return len([row for row in backlog if row["file_path"] not in failed and (root_ids is None or row["root_id"] in root_ids)])
+
+
+def _rescan(roots: list[Path]) -> None:
+    for root in roots:
+        _scan_and_report(root)
+
+
+def _run_again_or_exit() -> bool:
+    """Ask in a menu whether to index the backlog again; True to run it (chosen, or nobody answered within ``config.RESCAN_WAIT_SECONDS``), False to exit.
+
+    Ctrl+C ends the program."""
+    run_again, leave = "run again", "exit"
+    question = questionary.select(
+        f"Run the backlog again now, or exit? (it runs again by itself in {config.RESCAN_WAIT_SECONDS} seconds)",
+        choices=[questionary.Choice("Run the backlog again", value=run_again), questionary.Choice("Exit", value=leave)],
+        qmark="▌", pointer="»", instruction=" ", style=STYLE)
+    app = question.application
+
+    def time_is_up() -> None:  # runs in the timer's thread: the menu is closed from the thread that shows it
+        loop = app.loop
+        if loop is not None and app.is_running:
+            loop.call_soon_threadsafe(lambda: app.exit(result=run_again) if app.is_running else None)
+
+    timer = threading.Timer(config.RESCAN_WAIT_SECONDS, time_is_up)
+    timer.daemon = True
+    timer.start()
+    try:
+        choice = question.ask()
+    finally:
+        timer.cancel()
+    if choice is None:  # Ctrl+C; questionary already said so
+        sys.exit(1)
+    return choice != leave
+
+
+def _index_until_nothing_is_pending(rescan, root_ids: set[int] | None = None) -> None:
+    """Index the backlog (only the files of the folders ``root_ids`` when given), then ``rescan`` the folders: pictures that changed or were added
+    meanwhile are indexed in another round, after a menu that waits ``config.RESCAN_WAIT_SECONDS`` for the user's choice. This repeats until
+    nothing is pending or the user exits. With no terminal to answer in, there is one round."""
+    run(root_ids)
+    if questionary is None or not sys.stdin.isatty():
+        return
+    while True:
+        print("\nScanning again to find what changed while indexing…")
+        rescan()
+        pending = _pending_count(root_ids)
+        if pending == 0:
+            return
+        print(f"\nThere were changes during the earlier scan: {pending} file(s) are pending indexing again.")
+        if not _run_again_or_exit():
+            print(f"\nExiting. Run {config.SCAN_COMMAND} later to process the backlog.")
+            return
+        print("\nRunning the scan and index again for the backlog images…")
+        run(root_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1221,6 +1265,7 @@ def main() -> None:
     if not saved:
         if questionary is None or not sys.stdin.isatty():  # nobody to ask
             sys.exit(f'No folders have been added yet. Run: {config.ADD_COMMAND} "folder path"')
+        print()
         print("No folders have been added yet, so there is nothing to scan. Add one now and it is scanned and indexed.")
         add()
         return
@@ -1257,7 +1302,7 @@ def scan_and_index(root: Path) -> None:
             root_id = get_or_add_root(conn, str(root))
     finally:
         conn.close()
-    run({root_id})
+    _index_until_nothing_is_pending(lambda: _scan_and_report(root), {root_id})
 
 
 def add(folder: str | None = None) -> None:

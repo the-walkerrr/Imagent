@@ -38,8 +38,8 @@ imagent search --full "red car"     # show each result's full description instea
 imagent add ~/Pictures         # add a folder, then choose what to do next: scan and index it, add another, delete folders, search
 imagent add                    # the same, picking the folder from suggestions as you type (macOS; elsewhere you type the path)
 imagent scan                        # scan every folder you added, then index what is pending (asks for a folder if none is added yet)
-imagent delete ~/Pictures           # remove a folder you added and what was indexed from it (several folders can be given; quote a path with spaces)
-imagent delete                      # the same, ticking the folders to remove from the ones you added
+imagent delete ~/Pictures           # remove a folder from the scan list and what was indexed from it (several folders can be given; quote a path with spaces)
+imagent delete                      # the same, ticking the folders to remove from the scan list
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
 imagent help                        # explain each command briefly

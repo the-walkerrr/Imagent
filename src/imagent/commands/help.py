@@ -9,6 +9,7 @@ The text is written here by hand: when a command is added to ``cli.py`` it must 
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import textwrap
 
@@ -27,7 +28,7 @@ COMMANDS = [
     ("scan", "imagent scan",
      "Scan every folder you added for new, changed, moved or removed pictures, then index what is pending."),
     ("delete", 'imagent delete "folder path"',
-     "Remove folders you added and what was indexed from them. Your pictures are never touched. You can keep the analysis, so adding the folder again is quick."),
+     "Remove folders from the scan list and what was indexed from them. Your pictures are never touched. You can keep the analysis, so adding the folder again is quick."),
     ("failed", "imagent failed",
      "List the pictures that could not be indexed, with the reason for each."),
     ("forget", "imagent forget",
@@ -40,7 +41,8 @@ COMMANDS = [
      "Show this explanation."),
 ]
 
-WIDTH = 100
+WIDTH = 100           # the widest a line is, on a wide terminal
+MIN_TEXT = 30        # the least room kept for the descriptions on a narrow one
 INDENT = 2           # before the names
 GAP = 4              # between the names and the commands and descriptions
 NAME_WIDTH = max(len(name) for name, _, _ in COMMANDS)
@@ -56,11 +58,17 @@ def _style(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def _width() -> int:
+    """How wide a line may be: the terminal's width (its last column is left empty so a line never wraps by itself), at most ``WIDTH``."""
+    return max(min(shutil.get_terminal_size((WIDTH, 24)).columns - 1, WIDTH), RIGHT + MIN_TEXT)
+
+
 def render() -> str:
-    lines = ["", textwrap.fill(INTRO, WIDTH), "", MENU_NOTE.format(_style("imagent", BOLD)), "", _style("Commands:", BOLD)]
+    width = _width()
+    lines = ["", textwrap.fill(INTRO, width), "", MENU_NOTE.format(_style("imagent", BOLD)), "", _style("imagent <command>", BOLD)]
     for name, example, explanation in COMMANDS:
         # break_on_hyphens is off so a flag such as --full is never split between two lines
-        right = [_style(example, BOLD), "", *textwrap.wrap(explanation, WIDTH - RIGHT, break_on_hyphens=False)]
+        right = [_style(example, BOLD), *textwrap.wrap(explanation, width - RIGHT, break_on_hyphens=False)]
         left = " " * INDENT + _style(name, BOLD) + " " * (NAME_WIDTH - len(name) + GAP)  # padded by the plain length: the style codes show nothing
         lines += [""] + [((left if row == 0 else " " * RIGHT) + line).rstrip() for row, line in enumerate(right)]
     lines += ["", MORE_NOTE.format(_style("imagent <command> --help", BOLD))]

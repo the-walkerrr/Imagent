@@ -10,7 +10,7 @@ import argparse
 import sys
 
 from imagent import config
-from imagent.pipeline.console import run_cli
+from imagent.pipeline.console import leave_a_gap, run_cli
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,10 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("forget", help="forget the deleted pictures Imagent remembers",
                         description="Delete what Imagent remembers about pictures that were deleted (their descriptions and search data), after two confirmations. "
                                     "Your indexed pictures are not touched.")
-    delete = commands.add_parser("delete", help="remove folders you added, and what was indexed from them",
-                                 description="Remove folders you added and delete what was indexed from them, after showing what will be lost and two questions. "
+    delete = commands.add_parser("delete", help="remove folders from the scan list, and what was indexed from them",
+                                 description="Remove folders from the scan list and delete what was indexed from them, after showing what will be lost and two questions. "
                                              "Your pictures are never touched. You can choose to keep the analysis, so adding a folder again does not analyse its pictures again.")
-    delete.add_argument("folder", nargs="*", help="the folders to remove; put a path with spaces in quotes (without any, you choose from the folders you added)")
+    delete.add_argument("folder", nargs="*", help="the folders to remove from the scan list; put a path with spaces in quotes (without any, you choose from the folders you added)")
     commands.add_parser("setup", help="choose the models and prepare this computer (once)",
                         description="Check Ollama, download and lock the three models, and measure this computer. "
                                     "Run it once after installing. Run again, it shows the models and restores a missing one.")
@@ -65,6 +65,19 @@ def _set_up_first() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Run the command, and however it ends (done, a message, Ctrl+C, ``--help``) leave a blank line before the shell's prompt."""
+    try:
+        _run(argv)
+    except SystemExit as stop:
+        if sys.stdout.isatty() and isinstance(stop.code, str):  # Python would print this message after the gap, so it is printed here, before it
+            print(stop.code, file=sys.stderr)
+            stop = SystemExit(1)
+        leave_a_gap()
+        raise stop
+    leave_a_gap()
+
+
+def _run(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "add" and not args.folder and sys.stdin.isatty():
         from imagent.pipeline import folder_picker

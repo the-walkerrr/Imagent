@@ -54,6 +54,35 @@ class RunCliTests(IsolatedHome):
         self.assertEqual(stop.exception.code, 0)
 
 
+class ExitGapTests(unittest.TestCase):
+    """On a terminal, every way the program ends leaves a blank line before the shell's prompt, once."""
+
+    def end(self, run, tty=True):
+        out, err = io.StringIO(), io.StringIO()
+        out.isatty = lambda: tty
+        code = None
+        with mock.patch.object(cli, "_run", side_effect=run), mock.patch("imagent.pipeline.console.gap_shown", False), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                cli.main([])
+            except SystemExit as stop:
+                code = stop.code
+        return out.getvalue(), err.getvalue(), code
+
+    def test_a_normal_end(self):
+        self.assertEqual(self.end(lambda argv: None)[0], "\n")
+
+    def test_a_message_is_shown_before_the_gap(self):
+        out, err, code = self.end(lambda argv: sys.exit("Nothing to do."))
+        self.assertEqual((out, err, code), ("\n", "Nothing to do.\n", 1))
+
+    def test_an_exit_code_is_kept(self):
+        self.assertEqual(self.end(lambda argv: sys.exit(2)), ("\n", "", 2))
+
+    def test_no_gap_when_output_is_redirected(self):
+        self.assertEqual(self.end(lambda argv: sys.exit("Nothing to do."), tty=False), ("", "", "Nothing to do."))
+
+
 class CommandLineTests(unittest.TestCase):
     def run_command(self, *argv, needs_setup=False):
         with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, mock.patch.object(scan, "add") as run_scan_add, \
@@ -169,6 +198,16 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(re.sub(r"\033\[[0-9;]*m", "", styled), plain)
         self.assertIn(f"\033[{help_command.BOLD}mimagent search \"red car at night\" --full\033[0m", styled)
 
+    def test_help_table_fits_a_narrow_terminal_and_keeps_the_descriptions_in_the_right_column(self):
+        right = " " * help_command.RIGHT
+        for columns in (60, 80, 200):
+            with mock.patch.object(help_command.shutil, "get_terminal_size", return_value=os.terminal_size((columns, 24))):
+                table = [line for line in help_command.render().splitlines() if line.startswith(" ")]
+            self.assertLessEqual(max(len(line) for line in table), min(columns - 1, help_command.WIDTH), columns)
+            for line in table:  # a row of a table starts with a name, every other line of it sits in the right column
+                self.assertTrue(line.startswith(right) or line[2] != " ", (columns, line))
+            self.assertGreater(sum(line.startswith(right) for line in table), len(help_command.COMMANDS))
+
     def test_every_command_the_menu_offers_exists(self):
         for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.HELP[1], menu.UNINSTALL):
             self.assertEqual(cli.build_parser().parse_args([command]).command, command)
@@ -271,6 +310,19 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(values[0], menu.SEARCH[1])
             self.assertEqual(values[-1], menu.UNINSTALL)
             self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
+
+    def test_search_and_scan_are_only_offered_once_a_folder_has_been_added(self):
+        without = [choice.value for choice in menu.choices(folders=False)]
+        self.assertNotIn(menu.SEARCH[1], without)
+        self.assertNotIn(menu.SCAN[1], without)
+        self.assertNotIn(menu.DELETE_FOLDER[1], without)
+        self.assertEqual(without[0], menu.ADD_FOLDER[1])
+        with_folder = [choice.value for choice in menu.choices(folders=True)]
+        self.assertEqual(with_folder[:4], [menu.SEARCH[1], menu.ADD_FOLDER[1], menu.SCAN[1], menu.DELETE_FOLDER[1]])
+
+    def test_an_unreadable_database_still_gets_the_full_menu(self):
+        with mock.patch.object(menu, "init_db", side_effect=DatabaseProblem("damaged")):
+            self.assertTrue(menu.has_folders())
 
     def _choose(self, choice):
         """Run the menu with ``choice`` picked; returns the arguments the command got."""

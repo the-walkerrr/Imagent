@@ -53,6 +53,19 @@ def _save_traceback() -> str | None:
         return None
 
 
+gap_shown = False  # set once the blank line that ends a program has been printed, so it is never printed twice
+
+
+def leave_a_gap() -> None:
+    """End a program on a terminal with a blank line, so the shell's prompt does not touch the last line of output. Only once, and not when
+    the output is redirected."""
+    global gap_shown
+    if gap_shown or not sys.stdout.isatty():
+        return
+    gap_shown = True
+    print()
+
+
 def run_cli(main: Callable[[], None], cancelled: str = "Cancelled.") -> None:
     """Run a command-line ``main`` so that whatever goes wrong ends as a short, plain message, not a traceback.
 

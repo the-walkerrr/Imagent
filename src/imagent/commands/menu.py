@@ -5,7 +5,8 @@ imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is
 It only opens once setup is complete: when it is not, ``cli.py`` runs setup first (``needs_setup``), then opens the menu.
 It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
-"Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Help" (``imagent help``) is always offered, just before "Exit".
+"Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Search your images", "Scan folders and index images" and
+"Delete a folder" are only offered once a folder has been added (until then there is nothing to search, scan or delete). "Help" (``imagent help``) is always offered, just before "Exit".
 
 """
 
@@ -18,7 +19,8 @@ import questionary
 
 from imagent import config
 from imagent.db.connection import init_db
-from imagent.db.operations import count_deleted_analyses, get_device_settings, get_exhausted_backlog, get_model_settings
+from imagent.db.operations import count_deleted_analyses, get_device_settings, get_exhausted_backlog, get_model_settings, list_roots
+from imagent.pipeline import console
 from imagent.pipeline.console import make_output_safe
 
 UNINSTALL = "uninstall"
@@ -27,6 +29,7 @@ EXIT = "exit"
 SEARCH = ("Search your images", "search")
 ADD_FOLDER = ("Add a folder", "add")
 SCAN = ("Scan folders and index images", "scan")
+DELETE_FOLDER = ("Delete a folder", "delete")
 FAILED_COMMAND = "failed"
 FORGET_COMMAND = "forget"
 HELP = ("Help: what each command does", "help")
@@ -83,6 +86,18 @@ def remembered_count() -> int:
         return 0
 
 
+def has_folders() -> bool:
+    """True when at least one folder has been added; True if that cannot be found out (the menu must always appear, complete)."""
+    try:
+        conn = init_db(str(config.DB_PATH))
+        try:
+            return bool(list_roots(conn))
+        finally:
+            conn.close()
+    except Exception:
+        return True
+
+
 def needs_setup() -> bool:
     """True when setup has not been completed: the models are not locked or this computer has not been measured.
 
@@ -98,10 +113,10 @@ def needs_setup() -> bool:
         return False
 
 
-def choices(failed: int = 0, remembered: int = 0) -> list:
+def choices(failed: int = 0, remembered: int = 0, folders: bool = True) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
     forget = [(f"Forget the {remembered} deleted picture(s) Imagent remembers", FORGET_COMMAND)] if remembered else []
-    entries = [SEARCH, ADD_FOLDER, SCAN] + shown + forget + [HELP, ("Exit", EXIT)]
+    entries = ([SEARCH, ADD_FOLDER, SCAN, DELETE_FOLDER] if folders else [ADD_FOLDER]) + shown + forget + [HELP, ("Exit", EXIT)]
     return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
@@ -110,7 +125,7 @@ def main() -> None:
     make_output_safe()
     show_header()
     # The blank separator is skipped by the arrow keys; it only leaves a gap between the question and the entries.
-    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" ")] + choices(failed_count(), remembered_count()), qmark="▌",
+    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" ")] + choices(failed_count(), remembered_count(), has_folders()), qmark="▌",
                                 pointer="»", instruction=" ", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)
@@ -120,7 +135,9 @@ def main() -> None:
     process = subprocess.Popen([sys.executable, "-m", "imagent", *command])
     while True:
         try:
-            sys.exit(process.wait())
+            code = process.wait()
         except KeyboardInterrupt:
             continue  # the command got the same Ctrl+C and is ending by itself: wait for it, do not cut it short
+        console.gap_shown = True  # the command left the blank line when it ended
+        sys.exit(code)
 

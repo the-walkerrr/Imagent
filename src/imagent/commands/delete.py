@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 
 import questionary
+from prompt_toolkit.keys import Keys
+from questionary.prompts.common import InquirerControl
 
 from imagent import config
 from imagent.commands.menu import STYLE
@@ -28,8 +30,12 @@ from imagent.pipeline.console import make_output_safe
 from imagent.pipeline.locking import AlreadyRunning, single_instance
 from imagent.pipeline.progress import format_duration
 
+# The menu style without the highlight on a row: no underline or bold under the pointer, and no reverse video on the row a question
+# starts on (questionary draws the ``default`` row as "selected", which is reverse video unless a style says otherwise).
+PICKER_STYLE = questionary.Style([rule for rule in STYLE.style_rules if rule[0] not in ("highlighted", "selected")]
+                                 + [("highlighted", "noreverse nobold nounderline"), ("selected", "noreverse nobold nounderline")])
 CANCELLED = "Cancelled. Nothing was deleted."
-KEEP, DISCARD, DELETE, EXIT = "keep", "discard", "delete", "exit"
+KEEP, DISCARD, DELETE, EXIT, CONFIRM = "keep", "discard", "delete", "exit", "confirm"
 
 
 def match_folders(paths: list[str], roots: list[dict]) -> tuple[list[dict], list[str]]:
@@ -52,27 +58,53 @@ def _ask(question):
     return answer
 
 
-def choose_folders(conn, roots: list[dict]) -> list[dict]:
-    """Let the user tick the folders to remove from those that were added (typing narrows the list)."""
-    titles = {}
-    for root in roots:
-        images = root_stats(conn, root["root_id"])["images"]
-        titles[root["root_id"]] = f"{root['path']}   ({images:,} picture(s))"
-    ticked = _ask(questionary.checkbox(
-        "Which folders do you want to remove?",
-        choices=[questionary.Choice(titles[root["root_id"]], value=root["root_id"]) for root in roots],
-        instruction="(space ticks, a ticks all, type to search, enter confirms)", use_search_filter=True, use_jk_keys=False,
-        validate=lambda ticked: bool(ticked) or "Tick at least one folder with the space bar.",
-        qmark="?", pointer="»", style=STYLE))
+def choose_folders(conn, roots: list[dict], **prompt_options) -> list[dict]:
+    """Let the user tick the folders to remove from those that were added: Enter ticks or unticks the folder under the pointer, and
+    Confirm, below the list, ends the choice (it is only offered once a folder is ticked). Exit, below Confirm, deletes nothing.
+
+    It is one prompt that stays open: Enter redraws the row in place, so nothing flickers (a new prompt for each Enter would erase and
+    draw the whole list again). ``prompt_options`` go to the prompt (the tests give it a fake keyboard and screen)."""
+    indexed = {root["root_id"]: root_stats(conn, root["root_id"])["images"] for root in roots}
+    ticked: set[int] = set()
+    rows = {root["root_id"]: questionary.Choice("", value=root["root_id"]) for root in roots}
+    confirm = questionary.Choice("Confirm", value=CONFIRM, disabled="tick a folder first")
+    leave = questionary.Choice("Exit: delete nothing", value=EXIT)
+
+    def draw() -> None:
+        for root in roots:
+            mark = "x" if root["root_id"] in ticked else " "
+            rows[root["root_id"]].title = f"[{mark}] {root['path']}   ({indexed[root['root_id']]:,} indexed)"
+        confirm.disabled = None if ticked else "tick a folder first"
+
+    draw()
+    questionary.print("")
+    questionary.print("▌Which folders do you want to remove from the scan list?", style="bold")  # the message below is blank: it is the gap under this line
+    question = questionary.select("", choices=[*rows.values(), questionary.Separator(" "), confirm, leave], qmark=" ", pointer="»", instruction=" ",
+                                  style=PICKER_STYLE, **prompt_options)
+    application = question.application
+    control = next(control for control in application.layout.find_all_controls() if isinstance(control, InquirerControl))
+
+    @application.key_bindings.add(Keys.ControlM, eager=True)  # added last, so it is used instead of the prompt's own Enter
+    def press_enter(event):
+        choice = control.get_pointed_at()
+        if choice.value in (CONFIRM, EXIT):
+            control.is_answered = True
+            event.app.exit(result=choice.value)
+            return
+        ticked.symmetric_difference_update({choice.value})
+        draw()
+        event.app.invalidate()
+
+    application.erase_when_done = True
+    if _ask(question) == EXIT:
+        sys.exit(f"\n{CANCELLED}")
     return [root for root in roots if root["root_id"] in ticked]
 
 
 def show_what_is_lost(conn, folders: list[dict]) -> dict:
     """Print what will be lost, folder by folder; returns the totals."""
     total = {"images": 0, "bytes": 0, "analysis_ms": 0, "queued": 0}
-    print("\n" + "=" * 64)
-    print("  THIS REMOVES FOLDERS AND WHAT WAS INDEXED FROM THEM")
-    print("=" * 64)
+    print("\n  This removes the folders from the scan list and what was indexed from them.")
     for folder in folders:
         stats = root_stats(conn, folder["root_id"])
         for key in total:
@@ -82,8 +114,7 @@ def show_what_is_lost(conn, folders: list[dict]) -> dict:
     if len(folders) > 1:
         print(f"\n  All {len(folders)} folders")
         _print_stats(total)
-    print("=" * 64)
-    print("  Your pictures are not touched, only what Imagent stored about them (descriptions and search data).")
+    print("\n  Your pictures are not touched, only what Imagent stored about them (descriptions and search data).")
     return total
 
 
@@ -107,13 +138,14 @@ def ask_keep(keepable: int, limit: int | None) -> bool | None:
     kept = min(keepable, limit)
     reach = (f"{kept:,} of the {keepable:,} pictures (the most Imagent was set up to remember)" if kept < keepable
              else f"all {keepable:,} pictures")  # what adding the folders again will recognise
+    questionary.print("")  # a gap above the question
     choice = _ask(questionary.select(
-        "Keep the analysis of these pictures?",
+        "Keep the analysis of these pictures?\n",
         choices=[
             questionary.Choice(f"Keep it: {reach} are not analysed again if you add the folders back", value=KEEP),
             questionary.Choice("Don't keep it: every picture is analysed again if you add the folders back", value=DISCARD),
             questionary.Choice("Exit: delete nothing", value=EXIT),
-        ], qmark="?", pointer="»", style=STYLE))
+        ], qmark="▌", pointer="»", instruction=" ", style=PICKER_STYLE))
     return None if choice == EXIT else choice == KEEP
 
 
@@ -143,10 +175,11 @@ def main(paths: list[str] | None = None) -> None:
         if keep is None:
             sys.exit(f"\n{CANCELLED}")
         noun = "folder" if len(folders) == 1 else "folders"
+        questionary.print("")  # a gap above the question
         choice = _ask(questionary.select(
-            f"Are you sure you want to delete {len(folders)} {noun} and what was indexed from {'it' if len(folders) == 1 else 'them'}?",
+            f"Are you sure you want to remove {len(folders)} {noun} from the scan list and delete what was indexed from {'it' if len(folders) == 1 else 'them'}?\n",
             choices=[questionary.Choice("Yes, delete", value=DELETE), questionary.Choice("Exit: delete nothing", value=EXIT)],
-            default=EXIT, qmark="?", pointer="»", style=STYLE))
+            default=EXIT, qmark="▌", pointer="»", instruction=" ", style=PICKER_STYLE))
         if choice != DELETE:
             sys.exit(f"\n{CANCELLED}")
         try:
@@ -157,7 +190,7 @@ def main(paths: list[str] | None = None) -> None:
                     delete_roots(conn, ids)
         except AlreadyRunning as exc:
             sys.exit(f"\n{exc} Nothing was deleted.")
-        print(f"\n  ✓ Removed {len(folders)} {noun} and the index of {len(image_ids):,} picture(s). Your pictures were not touched.")
+        print(f"\n  ✓ Removed {len(folders)} {noun} from the scan list and the index of {len(image_ids):,} picture(s). Your pictures were not touched.")
         if keep:
             print(f"  ✓ Imagent remembers {count_deleted_analyses(conn):,} deleted picture(s). Add a folder again with "
                   f'{config.ADD_COMMAND} "folder path" and the ones it recognises are not analysed again.')

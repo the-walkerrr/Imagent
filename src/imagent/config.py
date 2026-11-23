@@ -286,6 +286,7 @@ SQLITE_BUSY_TIMEOUT_S: int = 30  # how long a connection waits for another proce
 SCAN_GUARD_MIN_FILES: int = 10  # a scan that finds at least this many indexed images gone ...
 SCAN_GUARD_MAX_SHARE: float = 0.5  # ... and more than this share of the folder's indexed images asks before forgetting them
 BACKLOG_MAX_ATTEMPTS: int = 3  # a file that fails this many times is left alone until it changes
+RESCAN_WAIT_SECONDS: int = 60  # after an indexing round, how long the user can choose before the scan runs again by itself
 MAX_CONSECUTIVE_SERVICE_FAILURES: int = 3  # indexing stops after this many Ollama failures in a row
 SERVICE_TRIES: int = 3  # tries for an image whose failure is Ollama's or the machine's (each try runs the steps in vlm/analyzer.py), before the user is told
 CONVERT_TIMEOUT: int = 300  # seconds the operating system's tool may take to convert one picture Pillow cannot open
