@@ -40,7 +40,7 @@ MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
 KEEP_DELETED_CHOICES = (100, 500, 1000, 2000)  # how many deleted pictures to remember, offered at the end of setup
-KEEP_DELETED_DEFAULT = 1000
+KEEP_DELETED_DEFAULT = 500
 ENTER_A_NUMBER = "enter a number"
 RED = "fg:ansibrightred"
 INDENT = "  "  # left padding for everything under a step heading
@@ -73,6 +73,11 @@ def say(message: str = "", style: str = "") -> None:
 def step(title: str) -> None:
     os.system("")  # enables ANSI colours in terminals
     print(f"\n\033[1m▌{title}\033[0m\n")
+
+
+def clear_screen() -> None:
+    os.system("")  # enables ANSI escape codes in the Windows console
+    print("\033[2J\033[H", end="", flush=True)  # erase the screen and move the cursor to the top
 
 
 def fail(message: str) -> None:
@@ -593,10 +598,12 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = "", failed:
         return ConditionalContainer(Window(height=1), filter=visible)
 
     def text_row(label, buffer, filled_green=True):
+        # wrap_lines: a name or set longer than the row continues on the next line; without it the row scrolls sideways and
+        # hides the start of what was typed or pasted. dont_extend_height: the row grows only as far as the text needs.
         window = Window(
             BufferControl(buffer, input_processors=[ConditionalProcessor(
                 AfterInput("not set", style="fg:ansibrightred"), Condition(lambda: filled_green and not buffer.text))]),
-            height=1, style=lambda: "fg:ansigreen" if filled_green and buffer.text else "")
+            wrap_lines=True, dont_extend_height=True, style=lambda: "fg:ansigreen" if filled_green and buffer.text else "")
         style = lambda: "fg:ansigreen" if buffer.text or not filled_green else "fg:ansibrightred"
         title = Window(FormattedTextControl(lambda: [(style(), f"{pointer(window)}○ {label} ")]), height=1, dont_extend_width=True)
         return window, VSplit([title, window])
@@ -622,7 +629,7 @@ def ask_models(vlm: str = "", embedding: str = "", text_model: str = "", failed:
 
     def initial_focus():
         if ready():
-            return "continue"
+            return "vlm"  # all three prefilled: start on the first row, not on Continue
         if state["asked"]:
             return "paste"
         return next(key for key, buffer in fields.items() if not buffer.text.strip())
@@ -1070,6 +1077,7 @@ def choose_models(saved_host: str):
     failed: dict = {}  # every model that was tried here and did not work, with the reason: the AI prompt tells the AI
     while True:
         vlm, embedding, text_model = ask_models(vlm, embedding, text_model, failed)
+        _store_pending_models(vlm, embedding, text_model)  # kept at once, so a setup that stops before the download shows them again
         proceed, missing = review_models(vlm, embedding, text_model, is_local(host))
         if not proceed:
             # Clear only the names that were not found; keep the valid ones.
@@ -1137,7 +1145,7 @@ def _reinstall(client, name: str) -> None:
 
 
 def manage_models(settings: dict, host: str) -> None:
-    """Setup was run before: show the locked models and offer to reinstall one that was removed."""
+    """Setup was run before: show the locked models, and ask only when one was removed (to reinstall it)."""
     say("Setup was already completed. Checking your installed models…\n")
     with ollama_client(host) as client:
         if client is None:
@@ -1180,16 +1188,13 @@ def manage_models(settings: dict, host: str) -> None:
                     [(RED, f"○ {role} model: {name} is not installed. Select to reinstall")], value=("reinstall", name))
                 for role, name in missing
             ]
-            if choices:
-                choices.append(questionary.Separator())
-            choices.append(questionary.Choice("○ Done", value=("done", "")))
+            if not missing:
+                return  # nothing to fix: nothing to ask
             action, name = ask(questionary.select(
-                "What would you like to do?", choices=choices, default=choices[0].value if missing else ("done", ""),
+                "What would you like to do?", choices=choices, default=choices[0].value,
                 qmark=QMARK, pointer=POINTER, style=STYLE))
             _erase_last_line()
 
-            if action == "done":
-                return
             _reinstall(client, name)
             say("")
 
@@ -1272,15 +1277,12 @@ def ask_keep_deleted() -> int:
 
 
 def choose_keep_deleted() -> None:
-    """Ask what happens to the data of a deleted picture, and store the answer. When it was answered before, it is shown and only asked again if the user wants."""
+    """Ask what happens to the data of a deleted picture, and store the answer. When it was answered before, nothing is asked."""
     conn = init_db(str(app_config.DB_PATH))
     try:
-        current = get_keep_deleted(conn)
+        if get_keep_deleted(conn) is not None:
+            return
         step("Deleted pictures")
-        if current is not None:
-            say(f"Imagent remembers the last {current} deleted pictures." if current else "Imagent does not remember deleted pictures.")
-            if not ask(questionary.confirm("Change it?", default=False, qmark=QMARK, style=STYLE)):
-                return
         keep = ask_keep_deleted()
         with conn:
             set_keep_deleted(conn, keep)
@@ -1329,8 +1331,8 @@ def main() -> None:
             app_config.save_config({"ollama_host": host})
         manage_models(settings, host)
         measure_again_if_needed(settings, host)
-        check_test_pictures()
         choose_keep_deleted()
+        clear_screen()
         say("✓ Setup complete.", "fg:green")
         return
 
@@ -1348,6 +1350,7 @@ def main() -> None:
         conn.close()
     check_test_pictures()
     choose_keep_deleted()
+    clear_screen()
     say(f"\n✓ Setup complete. Your models are locked in.", "fg:green")
 
 

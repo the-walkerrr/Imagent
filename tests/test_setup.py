@@ -86,8 +86,9 @@ class ModelScreenTests(unittest.TestCase):
         keys = "a:1\rb:2\rc:3\r" + self.DOWN + self.ENTER  # then Down from "Ask AI" to Continue
         self.assertEqual(self.run_screen(keys), ("a:1", "b:2", "c:3"))
 
-    def test_names_that_are_already_set_are_kept_and_continue_is_where_you_start(self):
-        self.assertEqual(self.run_screen(self.ENTER, "a:1", "b:2", "c:3"), ("a:1", "b:2", "c:3"))
+    def test_names_that_are_already_set_are_kept_and_the_first_row_is_where_you_start(self):
+        keys = self.DOWN * 4 + self.ENTER  # from the VLM row: embedding, text, Ask AI, Continue
+        self.assertEqual(self.run_screen(keys, "a:1", "b:2", "c:3"), ("a:1", "b:2", "c:3"))
 
     def test_a_pasted_line_with_a_label_is_cleaned(self):
         keys = "VLM_1=`a:1`\rb:2\rc:3\r" + self.DOWN + self.ENTER
@@ -522,15 +523,12 @@ class KeepDeletedQuestionTests(IsolatedHome):
         setup.choose_keep_deleted()
         self.assertEqual(self.stored(), 2000)
 
-    def test_an_answer_given_before_is_kept_unless_the_user_wants_to_change_it(self):
+    def test_an_answer_given_before_is_kept_and_not_asked_again(self):
         self.answers(2000)
         setup.choose_keep_deleted()
-        self.answers(False)  # "Change it?" no
+        self.answers()  # nothing is asked the second time
         setup.choose_keep_deleted()
-        self.assertEqual((self.stored(), len(self.questions)), (2000, 1))
-        self.answers(True, 100)  # "Change it?" yes, then the new number
-        setup.choose_keep_deleted()
-        self.assertEqual(self.stored(), 100)
+        self.assertEqual((self.stored(), len(self.questions)), (2000, 0))
 
     def test_zero_is_stored_as_remembering_none(self):
         self.answers(setup.ENTER_A_NUMBER, "0")

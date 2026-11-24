@@ -4,7 +4,7 @@ imagent/commands/after_add.py — What to do after a folder was added: a menu th
 
 Shown by ``imagent add`` (and by ``imagent scan`` when no folder was added yet) when there is a terminal to answer in. The folder
 has only been added, nothing is scanned yet. From here the user can add another folder, scan and index the folder just added, scan every
-folder and index what is pending (as ``imagent scan`` does), delete folders (as ``imagent delete`` does) or search the pictures.
+folder and index what is pending (as ``imagent scan`` does), delete folders (as ``imagent delete`` does) or search the pictures (once some are indexed).
 A choice that ends with a message or Ctrl+C brings the user back to the menu instead of ending the program.
 """
 
@@ -16,19 +16,20 @@ from pathlib import Path
 import questionary
 
 from imagent.commands import delete, scan, search
-from imagent.commands.menu import STYLE
+from imagent.commands.menu import STYLE, has_indexed_images
 from imagent.os_specific.files import comparable_path
 
 ADD, SCAN_THIS, SCAN_ALL, DELETE, SEARCH, EXIT = "add", "scan this", "scan all", "delete", "search", "exit"
 
 
-def choices(folder: Path | None) -> list:
-    """The menu; ``folder`` is the folder added last (None if it is not there any more), which "scan and index" is about."""
+def choices(folder: Path | None, indexed: bool = True) -> list:
+    """The menu; ``folder`` is the folder added last (None if it is not there any more), which "scan and index" is about.
+    "Search your images" is only offered when some image is indexed (``indexed``)."""
     entries = [("Add another folder", ADD)]
     if folder is not None:
         entries.append((f"Scan and index this folder ({folder})", SCAN_THIS))
     entries += [("Scan all folders and index the pictures waiting", SCAN_ALL), ("Delete folders", DELETE),
-                ("Search your images", SEARCH), ("Exit", EXIT)]
+                *([("Search your images", SEARCH)] if indexed else []), ("Exit", EXIT)]
     return [questionary.Choice(title, value=value) for title, value in entries]
 
 
@@ -63,7 +64,7 @@ def run(folder: Path) -> None:
             current = None
         print()
         # The blank separator is skipped by the arrow keys; it only leaves a gap between the question and the entries.
-        choice = questionary.select("What would you like to do next?", choices=[questionary.Separator(" ")] + choices(current), qmark="▌",
+        choice = questionary.select("What would you like to do next?", choices=[questionary.Separator(" ")] + choices(current, has_indexed_images()), qmark="▌",
                                     pointer="»", instruction=" ", style=STYLE).ask()
         if choice is None:  # Ctrl+C; questionary already said so
             sys.exit(1)

@@ -105,6 +105,8 @@ def _run(argv: list[str] | None = None) -> None:
     elif args.command == "setup":
         from imagent.commands import setup
         run_cli(setup.main, cancelled=setup.CANCELLED)
+        from imagent.commands import menu  # setup ends the program if it fails or is cancelled, so the menu opens only once it is done
+        run_cli(menu.main)
     elif args.command == "help":
         from imagent.commands import help as show_help
         run_cli(show_help.main)

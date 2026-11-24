@@ -169,7 +169,8 @@ class CommandLineTests(unittest.TestCase):
         for command in ("setup", "uninstall"):
             runs = self.run_command(command)
             runs[command].assert_called_once_with()
-            self.assertEqual([name for name, run in runs.items() if run.called], [command])
+            self.assertEqual(sorted(name for name, run in runs.items() if run.called),
+                             sorted([command, "menu"] if command == "setup" else [command]))  # setup opens the menu once it is done
 
     def test_help_runs_without_setup_and_takes_no_arguments(self):
         with mock.patch.object(menu, "needs_setup", return_value=True), mock.patch.object(setup, "main") as run_setup, \
@@ -319,6 +320,14 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(without[0], menu.ADD_FOLDER[1])
         with_folder = [choice.value for choice in menu.choices(folders=True)]
         self.assertEqual(with_folder[:4], [menu.SEARCH[1], menu.ADD_FOLDER[1], menu.SCAN[1], menu.DELETE_FOLDER[1]])
+
+    def test_search_is_only_offered_once_an_image_is_indexed(self):
+        self.assertNotIn(menu.SEARCH[1], [choice.value for choice in menu.choices(folders=True, indexed=False)])
+        self.assertIn(menu.SEARCH[1], [choice.value for choice in menu.choices(folders=True, indexed=True)])
+
+    def test_an_unreadable_database_still_gets_search_in_the_menu(self):
+        with mock.patch.object(menu, "init_db", side_effect=DatabaseProblem("damaged")):
+            self.assertTrue(menu.has_indexed_images())
 
     def test_an_unreadable_database_still_gets_the_full_menu(self):
         with mock.patch.object(menu, "init_db", side_effect=DatabaseProblem("damaged")):

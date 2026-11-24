@@ -5,8 +5,9 @@ imagent/commands/menu.py — Imagent: the menu that ``imagent`` opens when it is
 It only opens once setup is complete: when it is not, ``cli.py`` runs setup first (``needs_setup``), then opens the menu.
 It runs the chosen command and ends with that command's exit code; "Exit" just closes the menu. "Show the images that could not be indexed" is only
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
-"Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Search your images", "Scan folders and index images" and
-"Delete a folder" are only offered once a folder has been added (until then there is nothing to search, scan or delete). "Help" (``imagent help``) is always offered, just before "Exit".
+"Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Scan folders and index images" and
+"Delete a folder" are only offered once a folder has been added (until then there is nothing to scan or delete). "Search your images" is only
+offered once some image is indexed (until then there is nothing to search). "Help" (``imagent help``) is always offered, just before "Exit".
 
 """
 
@@ -19,7 +20,7 @@ import questionary
 
 from imagent import config
 from imagent.db.connection import init_db
-from imagent.db.operations import count_deleted_analyses, get_device_settings, get_exhausted_backlog, get_model_settings, list_roots
+from imagent.db.operations import count_deleted_analyses, count_embeddings, get_device_settings, get_exhausted_backlog, get_model_settings, list_roots
 from imagent.pipeline import console
 from imagent.pipeline.console import make_output_safe
 
@@ -98,6 +99,18 @@ def has_folders() -> bool:
         return True
 
 
+def has_indexed_images() -> bool:
+    """True when at least one image is indexed (searchable, as search itself counts them); True if that cannot be found out (the menu must always appear, complete)."""
+    try:
+        conn = init_db(str(config.DB_PATH))
+        try:
+            return count_embeddings(conn) > 0
+        finally:
+            conn.close()
+    except Exception:
+        return True
+
+
 def needs_setup() -> bool:
     """True when setup has not been completed: the models are not locked or this computer has not been measured.
 
@@ -113,10 +126,10 @@ def needs_setup() -> bool:
         return False
 
 
-def choices(failed: int = 0, remembered: int = 0, folders: bool = True) -> list:
+def choices(failed: int = 0, remembered: int = 0, folders: bool = True, indexed: bool = True) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
     forget = [(f"Forget the {remembered} deleted picture(s) Imagent remembers", FORGET_COMMAND)] if remembered else []
-    entries = ([SEARCH, ADD_FOLDER, SCAN, DELETE_FOLDER] if folders else [ADD_FOLDER]) + shown + forget + [HELP, ("Exit", EXIT)]
+    entries = ([*([SEARCH] if indexed else []), ADD_FOLDER, SCAN, DELETE_FOLDER] if folders else [ADD_FOLDER]) + shown + forget + [HELP, ("Exit", EXIT)]
     return [questionary.Choice(title, value=command) for title, command in entries] + [
         questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
 
@@ -125,7 +138,7 @@ def main() -> None:
     make_output_safe()
     show_header()
     # The blank separator is skipped by the arrow keys; it only leaves a gap between the question and the entries.
-    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" ")] + choices(failed_count(), remembered_count(), has_folders()), qmark="▌",
+    choice = questionary.select("What would you like to do?", choices=[questionary.Separator(" ")] + choices(failed_count(), remembered_count(), has_folders(), has_indexed_images()), qmark="▌",
                                 pointer="»", instruction=" ", style=STYLE).ask()
     if choice is None:  # Ctrl+C; questionary already said so
         sys.exit(1)

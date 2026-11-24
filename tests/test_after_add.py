@@ -12,7 +12,7 @@ FOLDER = Path("/pictures/trips")
 
 
 class MenuTests(unittest.TestCase):
-    def run_menu(self, answers, added=(str(FOLDER),), **patches):
+    def run_menu(self, answers, added=(str(FOLDER),), indexed=True, **patches):
         """Run the menu with ``answers`` chosen in turn; returns the mocks it used, keyed by name, and its output. ``added`` is what is added at the start."""
         answers = list(answers)
         menus = []
@@ -25,6 +25,7 @@ class MenuTests(unittest.TestCase):
         for name, value in patches.items():
             mocks[name] = value
         with mock.patch.object(after_add.questionary, "select", side_effect=select), \
+                mock.patch.object(after_add, "has_indexed_images", side_effect=lambda: indexed), \
                 mock.patch.object(after_add.scan, "added_folders", return_value=list(added)), \
                 mock.patch.object(after_add.scan, "add_folder", mocks["add_folder"]), \
                 mock.patch.object(after_add.scan, "scan_and_index", mocks["scan_and_index"]), \
@@ -45,6 +46,10 @@ class MenuTests(unittest.TestCase):
         self.assertEqual([value for _, value in menu],
                          [after_add.ADD, after_add.SCAN_THIS, after_add.SCAN_ALL, after_add.DELETE, after_add.SEARCH, after_add.EXIT])
         self.assertIn(str(FOLDER), dict((value, title) for title, value in menu)[after_add.SCAN_THIS])
+
+    def test_search_is_not_offered_while_no_image_is_indexed(self):
+        menu = self.run_menu([after_add.EXIT], indexed=False)["menus"][0]
+        self.assertEqual([value for _, value in menu], [after_add.ADD, after_add.SCAN_THIS, after_add.SCAN_ALL, after_add.DELETE, after_add.EXIT])
 
     def test_exit_ends_the_menu_and_runs_nothing(self):
         ran = self.run_menu([after_add.EXIT])

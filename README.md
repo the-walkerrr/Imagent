@@ -55,7 +55,7 @@ A picture is recognised by its pixels, whatever its name, folder or embedded det
 - **Copies and renames:** a new file with the same pixels as a picture already indexed gets that picture's description and search data again, so it is not analysed a second time. A renamed or moved file keeps its index.
 - **Deleted pictures:** when a scan finds that a picture was deleted, Imagent can remember what it learned about it (its description and search data; not the picture, and not where it was). If the same picture comes back later (restored from a backup, copied, or moved into a folder you add later), it is not analysed again. Search never shows remembered pictures.
 
-Setup asks how many deleted pictures to remember: pick one of the suggested numbers or type your own (0 remembers none). When there are more than that, the oldest are forgotten first. Run `imagent setup` again to see your choice and change it. Until you have answered, nothing is remembered. To delete what is remembered now, run `imagent forget` (or choose it in the menu); your indexed pictures and your choice are not touched.
+Setup asks how many deleted pictures to remember: pick one of the suggested numbers or type your own (0 remembers none). When there are more than that, the oldest are forgotten first. Until you have answered, nothing is remembered. To delete what is remembered now, run `imagent forget` (or choose it in the menu); your indexed pictures and your choice are not touched.
 
 A description is only used again when it was made with the same models, prompt and text-reading engine as a new one would be; otherwise the picture is analysed again.
 
