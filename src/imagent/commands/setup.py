@@ -1033,6 +1033,32 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
 
 # --- Choosing models (first run only) ------------------------------------------
 
+PENDING_MODELS_KEY = "pending_models"  # in config.json: the names confirmed on the review screen, until setup finishes
+
+
+def _load_pending_models() -> tuple[str, str, str]:
+    """(vlm, embedding, text_model) confirmed in an earlier run of setup that did not finish, each "" when unknown."""
+    pending = app_config.load_config().get(PENDING_MODELS_KEY)
+    if not isinstance(pending, dict):
+        return "", "", ""
+    return tuple(pending[key].strip() if isinstance(pending.get(key), str) else "" for key in ("vlm", "embedding", "text"))
+
+
+def _store_pending_models(vlm: str, embedding: str, text_model: str) -> None:
+    """Keep the names in config.json so that a setup that stops part way can show them again. Nothing is downloaded from them."""
+    config = {key: value for key, value in app_config.load_config().items() if key != PENDING_MODELS_KEY}
+    if vlm or embedding or text_model:
+        config[PENDING_MODELS_KEY] = {"vlm": vlm, "embedding": embedding, "text": text_model}
+    app_config.save_config(config)
+
+
+def _forget_pending_models(names) -> None:
+    """Drop from the saved names the models that were not found or did not work, so they are not shown again."""
+    vlm, embedding, text_model = _load_pending_models()
+    _store_pending_models("" if vlm in names else vlm, "" if embedding in names else embedding,
+                          "" if text_model in names else text_model)
+
+
 def choose_models(saved_host: str):
     """Input boxes -> verify on ollama.com -> specs -> download -> verify.
 
@@ -1040,7 +1066,7 @@ def choose_models(saved_host: str):
     from imagent.vlm.client import is_local  # needs the packages that ensure_packages installed
     step("Models")
     host = saved_host or DEFAULT_HOST
-    vlm = embedding = text_model = ""
+    vlm, embedding, text_model = _load_pending_models()
     failed: dict = {}  # every model that was tried here and did not work, with the reason: the AI prompt tells the AI
     while True:
         vlm, embedding, text_model = ask_models(vlm, embedding, text_model, failed)
@@ -1050,13 +1076,16 @@ def choose_models(saved_host: str):
             vlm = "" if vlm in missing else vlm
             embedding = "" if embedding in missing else embedding
             text_model = "" if text_model in missing else text_model
+            _forget_pending_models(missing)
             step("Models")
             continue
+        _store_pending_models(vlm, embedding, text_model)
         step("Download")
         settings, rejected = download_and_verify(host, vlm, embedding, text_model)
         if settings is not None:
             return settings, host
         failed.update(rejected)
+        _forget_pending_models(set(rejected))
         vlm = "" if vlm in rejected else vlm
         embedding = "" if embedding in rejected else embedding
         text_model = "" if text_model in rejected else text_model

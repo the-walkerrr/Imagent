@@ -359,7 +359,7 @@ class WhenTheComputerCannotRunAModelTests(IsolatedHome):
         self.assertEqual(self.server.deleted, [])
 
 
-class ChoosingAgainAfterAFailureTests(unittest.TestCase):
+class ChoosingAgainAfterAFailureTests(IsolatedHome):
     def test_the_next_prompt_knows_every_model_that_failed_and_only_the_failed_row_is_asked_again(self):
         asked = []
 
@@ -377,6 +377,68 @@ class ChoosingAgainAfterAFailureTests(unittest.TestCase):
         self.assertEqual(asked[0], ("", "", "", {}))
         self.assertEqual(asked[1], ("", "e:1b", "t:1b", {"v:70b": "did not work."}))  # the vision model's row is cleared
         self.assertEqual(asked[2], ("v:1b", "", "t:1b", {"v:70b": "did not work.", "e:1b": "did not work either."}))
+
+
+class ResumingSetupTests(IsolatedHome):
+    """Setup that stopped part way shows the confirmed names again; it still asks, and never downloads by itself."""
+
+    def choose(self, ask_returns, review=(True, set()), outcome=({"vlm_model": "v:1b"}, {})):
+        self.asked = []
+
+        def ask(vlm, embedding, text, failed):
+            self.asked.append((vlm, embedding, text))
+            return ask_returns
+
+        patches = [mock.patch.object(setup, "ask_models", side_effect=ask),
+                   mock.patch.object(setup, "review_models", return_value=review),
+                   mock.patch.object(setup, "download_and_verify", return_value=outcome),
+                   mock.patch.object(setup, "step"), mock.patch.object(setup, "say")]
+        mocks = []
+        for patcher in patches:
+            mocks.append(patcher.start())
+            self.addCleanup(patcher.stop)
+        self.review, self.download = mocks[1], mocks[2]
+        return setup.choose_models("http://localhost:11434")
+
+    def test_the_names_are_kept_once_the_user_confirms_them_and_before_the_download(self):
+        seen = []
+        with mock.patch.object(setup, "download_and_verify", side_effect=lambda *a: seen.append(config.load_config()) or (None, {})):
+            with mock.patch.object(setup, "ask_models", side_effect=[("v:1b", "e:1b", "t:1b"), KeyboardInterrupt]), \
+                    mock.patch.object(setup, "review_models", return_value=(True, set())), \
+                    mock.patch.object(setup, "step"), mock.patch.object(setup, "say"):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup.choose_models("http://localhost:11434")
+        self.assertEqual(seen[0]["pending_models"], {"vlm": "v:1b", "embedding": "e:1b", "text": "t:1b"})
+
+    def test_the_next_run_fills_in_the_names_and_still_asks_for_confirmation(self):
+        config.save_config({"ollama_host": "http://localhost:11434",
+                            "pending_models": {"vlm": "v:1b", "embedding": "e:1b", "text": "t:1b"}})
+        self.choose(("v:1b", "e:1b", "t:1b"))
+        self.assertEqual(self.asked, [("v:1b", "e:1b", "t:1b")])
+        self.review.assert_called_once()  # the confirmation menu is still shown, and only after it is anything downloaded
+        self.download.assert_called_once_with("http://localhost:11434", "v:1b", "e:1b", "t:1b")
+
+    def test_names_that_were_not_found_or_did_not_work_are_not_shown_again(self):
+        config.save_config({"pending_models": {"vlm": "v:1b", "embedding": "e:1b", "text": "t:1b"}})
+        with mock.patch.object(setup, "ask_models", side_effect=[("v:1b", "e:1b", "t:1b"), ("v:1b", "e2:1b", "t:1b"), KeyboardInterrupt]), \
+                mock.patch.object(setup, "review_models", side_effect=[(False, {"e:1b"}), (True, set())]), \
+                mock.patch.object(setup, "download_and_verify", return_value=(None, {"t:1b": "did not work."})), \
+                mock.patch.object(setup, "step"), mock.patch.object(setup, "say"):
+            with self.assertRaises(KeyboardInterrupt):
+                setup.choose_models("http://localhost:11434")
+        self.assertEqual(config.load_config()["pending_models"], {"vlm": "v:1b", "embedding": "e2:1b", "text": ""})
+
+    def test_a_broken_saved_value_is_ignored(self):
+        config.save_config({"pending_models": ["v:1b"]})
+        self.assertEqual(setup._load_pending_models(), ("", "", ""))
+        config.save_config({"pending_models": {"vlm": 3, "embedding": " e:1b ", "text": None}})
+        self.assertEqual(setup._load_pending_models(), ("", "e:1b", ""))
+
+    def test_other_settings_in_config_json_are_kept(self):
+        config.save_config({"ollama_host": "http://localhost:11434"})
+        setup._store_pending_models("v:1b", "e:1b", "t:1b")
+        setup._store_pending_models("", "", "")
+        self.assertEqual(config.load_config(), {"ollama_host": "http://localhost:11434"})
 
 
 class MeasureAgainFailureTests(IsolatedHome):

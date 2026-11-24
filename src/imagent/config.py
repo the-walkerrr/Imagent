@@ -54,7 +54,8 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def save_config(data: dict) -> None:
-    """Write config.json (user preferences). The chosen models are not here: they are locked in the database."""
+    """Write config.json (user preferences). The chosen models are not here: they are locked in the database. Only while setup is
+    unfinished, the model names confirmed so far are kept here to fill in the screen again."""
     _write_json(CONFIG_PATH, data)
 
 
