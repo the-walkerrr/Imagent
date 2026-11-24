@@ -274,19 +274,37 @@ def find_analysis_by_pixels(conn: sqlite3.Connection, pixel_hash: str, file_path
 
 
 # ---------------------------------------------------------------------------
-# deleted_analyses, index_preferences
+# deleted_analyses, index_preferences (the user's settings)
 # ---------------------------------------------------------------------------
+
+def _get_preference(conn: sqlite3.Connection, column: str):
+    """One column of the preferences row (``column`` is always one of the names below, never typed by the user); None when it was not chosen."""
+    row = conn.execute(f"SELECT {column} FROM index_preferences WHERE id = 1").fetchone()
+    return None if row is None else row[column]
+
+
+def _set_preference(conn: sqlite3.Connection, column: str, value) -> None:
+    conn.execute(f"INSERT INTO index_preferences (id, {column}) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET {column} = excluded.{column}", (value,))
+
 
 def get_keep_deleted(conn: sqlite3.Connection) -> int | None:
     """How many deleted pictures' analyses the user chose to keep (0: none), or None when the question was not answered yet."""
-    row = conn.execute("SELECT keep_deleted FROM index_preferences WHERE id = 1").fetchone()
-    return None if row is None else row["keep_deleted"]
+    return _get_preference(conn, "keep_deleted")
 
 
 def set_keep_deleted(conn: sqlite3.Connection, keep: int) -> None:
     """Store how many deleted pictures' analyses to keep, and forget the oldest ones beyond it."""
-    conn.execute("INSERT OR REPLACE INTO index_preferences (id, keep_deleted) VALUES (1, ?)", (keep,))
+    _set_preference(conn, "keep_deleted", keep)
     _prune_deleted_analyses(conn, keep)
+
+
+def get_search_detail(conn: sqlite3.Connection) -> str | None:
+    """What a search shows for each picture by default, ``"short"`` or ``"full"``, or None when the user never chose."""
+    return _get_preference(conn, "search_detail")
+
+
+def set_search_detail(conn: sqlite3.Connection, detail: str) -> None:
+    _set_preference(conn, "search_detail", detail)
 
 
 def _prune_deleted_analyses(conn: sqlite3.Connection, keep: int) -> None:

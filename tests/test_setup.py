@@ -496,20 +496,11 @@ class KeepDeletedQuestionTests(IsolatedHome):
         finally:
             conn.close()
 
-    def test_the_choices_are_the_offered_numbers_and_one_to_type_in(self):
+    def test_the_choices_are_the_offered_numbers_with_none_among_them_and_nothing_is_typed(self):
         self.answers(500)
         self.assertEqual(setup.ask_keep_deleted(), 500)
-        self.assertEqual(setup.KEEP_DELETED_CHOICES, (100, 500, 1000, 2000))
-
-    def test_a_number_can_be_typed_in(self):
-        self.answers(setup.ENTER_A_NUMBER, " 250 ")
-        self.assertEqual(setup.ask_keep_deleted(), 250)
-        self.assertEqual(len(self.questions), 2)
-
-    def test_zero_remembers_none_and_other_text_is_refused(self):
-        self.assertTrue(setup._validate_keep_deleted("0"))
-        for refused in ("", "-1", "ten", "1.5"):
-            self.assertIsInstance(setup._validate_keep_deleted(refused), str, refused)
+        self.assertEqual(setup.KEEP_DELETED_CHOICES, (0, 100, 500, 1000, 2000, 5000))
+        self.assertEqual(len(self.questions), 1)  # one menu; no second question for a typed number
 
     def test_the_explanation_says_why_remembering_helps(self):
         self.answers(100)
@@ -531,7 +522,7 @@ class KeepDeletedQuestionTests(IsolatedHome):
         self.assertEqual((self.stored(), len(self.questions)), (2000, 0))
 
     def test_zero_is_stored_as_remembering_none(self):
-        self.answers(setup.ENTER_A_NUMBER, "0")
+        self.answers(0)
         setup.choose_keep_deleted()
         self.assertEqual(self.stored(), 0)
 

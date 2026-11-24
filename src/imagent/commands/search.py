@@ -22,7 +22,7 @@ All activity reads from the user-level database (``config.DB_PATH``).
 the models once, then keeps asking for queries until the user types ``exit`` (or presses Ctrl+C), so later searches start at once.
 
 Each result shows its one-line summary, then its date, camera and size, then the full path of the file. With ``--full`` it shows
-the full description instead of the summary. On a terminal, a line that is too long continues under its own indent.
+the full description instead of the summary, and ``--short`` the summary; with neither, what was chosen in settings (the summary until then). On a terminal, a line that is too long continues under its own indent.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from imagent.db.connection import init_db
 from imagent.db.operations import (
     count_embeddings,
     get_image_summary,
+    get_search_detail,
     iter_embedding_batches,
 )
 from imagent.pipeline.console import file_link, make_output_safe
@@ -346,11 +347,35 @@ def _answer(query: str, session: tuple, full: bool) -> None:
     _show(query, results, full, time.monotonic() - started)
 
 
-def main(query: str = "", full: bool = False) -> None:
+def _saved_detail_is_full() -> bool:
+    """True when settings (or, before any choice, ``config.SEARCH_DETAIL_DEFAULT``) say a search shows the full description."""
+    conn = init_db(str(config.DB_PATH))
+    try:
+        return (get_search_detail(conn) or config.SEARCH_DETAIL_DEFAULT) == "full"
+    finally:
+        conn.close()
+
+
+DETAIL_HINT = "Tip: add --full or --short to change how much each result shows. You can also change it in Settings."
+
+
+def _show_detail_hint() -> None:
+    """The first thing a search says, in grey, on a terminal only (it is not part of the results): how to change what each result shows."""
+    if not sys.stdout.isatty():
+        return
+    grey = os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
+    print("\n" + (f"\033[38;5;244m{DETAIL_HINT}\033[0m" if grey else DETAIL_HINT))  # a gap above, so it never touches the command typed
+
+
+def main(query: str = "", full: bool | None = None) -> None:
     """Answer ``query`` and end; with no query, keep asking for queries until the user types ``exit``.
 
-    ``full`` shows every result's full description instead of its summary."""
+    ``full`` True shows every result's full description, False its summary; None (the default) uses what was chosen in settings. A flag
+    given on the command line always wins over the setting."""
     make_output_safe()
+    _show_detail_hint()
+    if full is None:
+        full = _saved_detail_is_full()
     query = query.strip()
     session = start_session()
     if session is None:

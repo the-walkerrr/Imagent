@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from imagent import cli
-from imagent.commands import delete, failed, forget, menu, scan, search, setup, uninstall
+from imagent.commands import delete, failed, forget, menu, scan, search, settings, setup, uninstall
 from imagent.commands import help as help_command
 from imagent.db.connection import DatabaseProblem
 from imagent.pipeline.console import run_cli
@@ -88,15 +88,23 @@ class CommandLineTests(unittest.TestCase):
         with mock.patch.object(menu, "needs_setup", return_value=needs_setup), mock.patch.object(search, "main") as run_search, mock.patch.object(scan, "main") as run_scan, mock.patch.object(scan, "add") as run_scan_add, \
                 mock.patch.object(failed, "main") as run_failed, mock.patch.object(menu, "main") as run_menu, \
                 mock.patch.object(setup, "main") as run_setup, mock.patch.object(uninstall, "main") as run_uninstall, \
-                mock.patch.object(delete, "main") as run_delete, mock.patch("imagent.pipeline.folder_picker.start_listing"):
+                mock.patch.object(settings, "main") as run_settings, mock.patch.object(delete, "main") as run_delete, mock.patch("imagent.pipeline.folder_picker.start_listing"):
             cli.main(list(argv))
         return {"search": run_search, "scan": run_scan, "add": run_scan_add, "failed": run_failed, "menu": run_menu, "setup": run_setup,
-                "uninstall": run_uninstall, "delete": run_delete}
+                "uninstall": run_uninstall, "delete": run_delete, "settings": run_settings}
 
     def test_search_gets_the_words_typed_as_one_query(self):
         runs = self.run_command("search", "red", "car", "at", "night")
-        runs["search"].assert_called_once_with("red car at night", full=False)
+        runs["search"].assert_called_once_with("red car at night", full=None)
         self.assertEqual([name for name, run in runs.items() if run.called], ["search"])
+
+    def test_search_short_is_passed_on(self):
+        self.run_command("search", "--short", "red", "car")["search"].assert_called_once_with("red car", full=False)
+
+    def test_search_full_and_short_cannot_be_given_together(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stop:
+            self.run_command("search", "--full", "--short", "red car")
+        self.assertEqual(stop.exception.code, 2)
 
     def test_search_full_is_passed_on(self):
         self.run_command("search", "--full", "red", "car")["search"].assert_called_once_with("red car", full=True)
@@ -106,7 +114,7 @@ class CommandLineTests(unittest.TestCase):
         self.run_command("search", "bike", "in", "cloudy", "--full")["search"].assert_called_once_with("bike in cloudy", full=True)
 
     def test_search_with_no_words_gets_an_empty_query(self):
-        self.run_command("search")["search"].assert_called_once_with("", full=False)
+        self.run_command("search")["search"].assert_called_once_with("", full=None)
 
     def test_scan_takes_no_arguments(self):
         runs = self.run_command("scan")
@@ -210,7 +218,7 @@ class CommandLineTests(unittest.TestCase):
             self.assertGreater(sum(line.startswith(right) for line in table), len(help_command.COMMANDS))
 
     def test_every_command_the_menu_offers_exists(self):
-        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.HELP[1], menu.UNINSTALL):
+        for command in (menu.SEARCH[1], menu.SCAN[1], menu.FAILED_COMMAND, menu.SETTINGS[1], menu.HELP[1]):
             self.assertEqual(cli.build_parser().parse_args([command]).command, command)
         added = cli.build_parser().parse_args([*menu.ADD_FOLDER[1].split(), "/pictures"])
         self.assertEqual((added.command, added.folder), ("add", "/pictures"))
@@ -248,6 +256,11 @@ class CommandLineTests(unittest.TestCase):
                     run.side_effect = lambda *a, **k: order.append("command")
                 cli.main(argv)
             self.assertEqual(order, ["setup", "command"], argv)
+
+    def test_settings_runs_setup_first_when_it_has_not_been_done(self):
+        runs = self.run_command("settings", needs_setup=True)
+        self.assertTrue(runs["setup"].called)
+        self.assertTrue(runs["settings"].called)
 
     def test_setup_and_uninstall_do_not_run_setup_first(self):
         for command in ("setup", "uninstall"):
@@ -305,11 +318,12 @@ class NeedsSetupTests(IsolatedHome):
 
 
 class MenuTests(unittest.TestCase):
-    def test_the_choices_start_with_search_and_end_with_uninstall(self):
+    def test_the_choices_start_with_search_and_end_with_exit_and_uninstall_is_not_in_the_menu(self):
         for failed in (0, 3):
             values = [choice.value for choice in menu.choices(failed)]
             self.assertEqual(values[0], menu.SEARCH[1])
-            self.assertEqual(values[-1], menu.UNINSTALL)
+            self.assertEqual(values[-1], menu.EXIT)
+            self.assertNotIn("uninstall", values)
             self.assertEqual(menu.FAILED_COMMAND in values, failed > 0)
 
     def test_search_and_scan_are_only_offered_once_a_folder_has_been_added(self):
@@ -349,11 +363,12 @@ class MenuTests(unittest.TestCase):
     def test_other_choices_run_as_they_are(self):
         self.assertEqual(self._choose(menu.SCAN[1]), ["scan"])
 
-    def test_help_is_always_offered_just_before_exit(self):
+    def test_help_and_settings_are_always_offered_just_before_exit_settings_last(self):
         for failed in (0, 3):
             values = [choice.value for choice in menu.choices(failed, remembered=failed)]
-            self.assertEqual(values[-3:], [menu.HELP[1], menu.EXIT, menu.UNINSTALL])
+            self.assertEqual(values[-3:], [menu.HELP[1], menu.SETTINGS[1], menu.EXIT])
         self.assertEqual(self._choose(menu.HELP[1]), ["help"])
+        self.assertEqual(self._choose(menu.SETTINGS[1]), ["settings"])
 
     def test_exit_closes_the_menu_without_running_anything(self):
         with mock.patch.object(menu.questionary, "select") as select, mock.patch.object(menu, "failed_count", return_value=0), \
@@ -362,10 +377,6 @@ class MenuTests(unittest.TestCase):
             menu.main()
         popen.assert_not_called()
 
-    def test_exit_is_offered_just_above_uninstall(self):
-        for failed in (0, 3):
-            values = [choice.value for choice in menu.choices(failed)]
-            self.assertEqual(values[-2:], [menu.EXIT, menu.UNINSTALL])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ MORE_NOTE = "For the details of one command, run: {}"
 # (name, example of how to run it, what it does): shown as a table, the name on the left, the example and the explanation on the right
 COMMANDS = [
     ("search", 'imagent search "red car at night" --full',
-     "Show the pictures that best match a description. With no description it keeps asking until you type exit. Add --full for each picture's full description."),
+     "Show the pictures that best match a description. With no description it keeps asking until you type exit. Add --full for each picture's full description, or --short for its one-line summary; settings holds the usual choice."),
     ("add", 'imagent add "folder path"',
      "Add a folder of pictures to Imagent. You then choose what to do next, usually to scan the folder so its pictures are indexed. Leave out the folder to pick one from a list."),
     ("scan", "imagent scan",
@@ -33,6 +33,8 @@ COMMANDS = [
      "List the pictures that could not be indexed, with the reason for each."),
     ("forget", "imagent forget",
      "When you delete a picture, Imagent keeps its description, so if the picture comes back it is not analysed again. This command erases those kept descriptions, after two confirmations. Your indexed pictures are not touched."),
+    ("settings", "imagent settings",
+     "Change how many deleted pictures Imagent remembers, whether a search shows the one-line summary or the full description (add --full or --short to one search to change it just once), and how long the scan waits before it runs again by itself. Uninstall is here too."),
     ("setup", "imagent setup",
      "Check Ollama, download and lock the three models, and measure this computer. It runs by itself the first time it is needed; run it again to see or restore the models."),
     ("uninstall", "imagent uninstall",

@@ -23,7 +23,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MIN_SQLITE_VERSION = (3, 24, 0)
 
 # The version of the schema in schema.sql. Raise it, and add the steps to _MIGRATIONS, with every schema change.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Version 1 is the schema of databases made before versions were recorded (user_version 0 with tables).
 # _MIGRATIONS[n] holds the statements that turn version n - 1 into version n.
@@ -78,6 +78,18 @@ _MIGRATIONS: dict[int, list[str]] = {
             embedding_dim INTEGER,
             deleted_at DATETIME NOT NULL
         )""",
+    ],
+    # 6: the user's settings join keep_deleted in index_preferences, and keep_deleted may be unset (NULL) while the others are set: SQLite
+    # cannot drop a NOT NULL, so the table is made again.
+    6: [
+        "ALTER TABLE index_preferences RENAME TO index_preferences_old",
+        """CREATE TABLE index_preferences (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            keep_deleted INTEGER CHECK (keep_deleted IS NULL OR keep_deleted >= 0),
+            search_detail TEXT CHECK (search_detail IN ('short', 'full'))
+        )""",
+        "INSERT INTO index_preferences (id, keep_deleted) SELECT id, keep_deleted FROM index_preferences_old",
+        "DROP TABLE index_preferences_old",
     ],
 }
 

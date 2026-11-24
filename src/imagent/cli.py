@@ -24,7 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="find pictures by describing them", description="Show the pictures that best match a description.")
     search.add_argument("query", nargs="*", help="what to look for, for example: red car at night. "
                                                  "Leave it out to keep searching until you type exit")
-    search.add_argument("--full", action="store_true", help="show each picture's full description instead of its one-line summary")
+    detail = search.add_mutually_exclusive_group()
+    detail.add_argument("--full", dest="full", action="store_const", const=True, default=None,
+                        help="show each picture's full description instead of its one-line summary (for this search; the usual one is set in settings)")
+    detail.add_argument("--short", dest="full", action="store_const", const=False, default=None,
+                        help="show each picture's one-line summary instead of its full description (for this search; the usual one is set in settings)")
 
     scan = commands.add_parser("scan", help="scan the folders you added and index their pictures",
                                description="Scan every folder you added for new or changed pictures, then index them. "
@@ -43,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
                                  description="Remove folders from the scan list and delete what was indexed from them, after showing what will be lost and two questions. "
                                              "Your pictures are never touched. You can choose to keep the analysis, so adding a folder again does not analyse its pictures again.")
     delete.add_argument("folder", nargs="*", help="the folders to remove from the scan list; put a path with spaces in quotes (without any, you choose from the folders you added)")
+    commands.add_parser("settings", help="change how Imagent behaves, or uninstall it",
+                        description="Open a menu to change how many deleted pictures Imagent remembers, whether a search shows the summary or the full description, "
+                                    "and how long the scan waits before it runs again. It also holds Uninstall.")
     commands.add_parser("setup", help="choose the models and prepare this computer (once)",
                         description="Check Ollama, download and lock the three models, and measure this computer. "
                                     "Run it once after installing. Run again, it shows the models and restores a missing one.")
@@ -102,6 +109,9 @@ def _run(argv: list[str] | None = None) -> None:
     elif args.command == "forget":
         from imagent.commands import forget
         run_cli(forget.main, cancelled=forget.CANCELLED)
+    elif args.command == "settings":
+        from imagent.commands import settings
+        run_cli(settings.main, cancelled=settings.CANCELLED)
     elif args.command == "setup":
         from imagent.commands import setup
         run_cli(setup.main, cancelled=setup.CANCELLED)

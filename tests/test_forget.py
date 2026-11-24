@@ -94,7 +94,7 @@ class MenuTests(IsolatedHome):
         for remembered, offered in ((0, False), (4, True)):
             values = [choice.value for choice in menu.choices(0, remembered)]
             self.assertEqual(menu.FORGET_COMMAND in values, offered)
-            self.assertEqual(values[-2:], [menu.EXIT, menu.UNINSTALL])
+            self.assertEqual(values[-3:], [menu.HELP[1], menu.SETTINGS[1], menu.EXIT])
         self.assertIn("Forget the 4 deleted picture(s) Imagent remembers", [choice.title for choice in menu.choices(0, 4)])
 
     def test_the_menu_counts_what_is_remembered(self):

@@ -299,6 +299,8 @@ ERROR_LOG_MAX_ROWS: int = 1000  # oldest error_logs rows beyond this are deleted
 DB_BATCH_ROWS: int = 1000  # rows read from the database at a time by search: the memory it uses is about this many rows, however many images are indexed
 UNCERTAIN_TOP_K: int = 3  # results returned per search (the closest images)
 SEARCH_MAX_MISSING_SKIPPED: int = 100  # closest images skipped because their file is gone, before the search gives up looking
+SEARCH_DETAILS: tuple = ("short", "full")  # what a search shows for each picture: the one-line summary or the whole description
+SEARCH_DETAIL_DEFAULT: str = "short"  # used until the user chooses in settings
 
 # --- Versions ----------------------------------------------------------------
 APP_VERSION: str = "0.1.0"  # stored with every indexed record (pipeline/versions.py)

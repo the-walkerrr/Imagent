@@ -894,6 +894,16 @@ class RescanLoopTests(ScanBase):
         rescan.assert_called_once_with()
         menu.assert_not_called()
         self.assertNotIn("changes during the earlier scan", said)
+        self.assertIn("All images are indexed.", said)
+
+    def test_the_success_message_is_not_said_when_an_image_failed(self):
+        with mock.patch.object(scan, "get_exhausted_backlog", return_value=[{"file_path": "a.png"}]):
+            run, rescan, menu, said = self._loop([0], [])
+        self.assertNotIn("All images are indexed.", said)
+
+    def test_the_success_message_is_not_said_while_images_are_pending(self):
+        run, rescan, menu, said = self._loop([1], [False])
+        self.assertNotIn("All images are indexed.", said)
 
     def test_changes_found_by_the_rescan_are_indexed_in_another_round_until_nothing_is_pending(self):
         run, rescan, menu, said = self._loop([2, 1, 0], [True, True])

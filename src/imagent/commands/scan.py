@@ -111,6 +111,7 @@ except ImportError:
 
 # Increment this when the stored metadata schema changes incompatibly.
 METADATA_VERSION = 1
+ALL_INDEXED = "\n  ✓ All images are indexed."  # said when nothing is pending and no image failed
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +548,10 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
     total = len(backlog_rows)
 
     if total == 0:
-        print("Nothing to index.")
+        if get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS):
+            print("Nothing to index.")
+        else:
+            print(ALL_INDEXED)
         print_failed(conn)
         conn.close()
         return
@@ -1157,6 +1161,7 @@ def _scan_folders(roots: list[Path]) -> None:
 
     backlog_size = _pending_count()
     if backlog_size == 0:
+        _say_if_all_indexed()
         return
     if _ask_yes_no(
         f"{backlog_size} file(s) in the backlog are pending indexing. "
@@ -1177,6 +1182,17 @@ def _pending_count(root_ids: set[int] | None = None) -> int:
         conn.close()
     # a file left queued after its tries is failed, not pending
     return len([row for row in backlog if row["file_path"] not in failed and (root_ids is None or row["root_id"] in root_ids)])
+
+
+def _say_if_all_indexed() -> None:
+    """Say that all images are indexed, unless some image could not be indexed (it is listed as failed, so the claim would be untrue)."""
+    conn = init_db(str(config.DB_PATH))
+    try:
+        failed = get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
+    finally:
+        conn.close()
+    if not failed:
+        print(ALL_INDEXED)
 
 
 def _rescan(roots: list[Path]) -> None:
@@ -1224,6 +1240,7 @@ def _index_until_nothing_is_pending(rescan, root_ids: set[int] | None = None) ->
         rescan()
         pending = _pending_count(root_ids)
         if pending == 0:
+            _say_if_all_indexed()
             return
         print(f"\nThere were changes during the earlier scan: {pending} file(s) are pending indexing again.")
         if not _run_again_or_exit():

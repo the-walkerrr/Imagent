@@ -77,6 +77,21 @@ class SearchTests(IsolatedHome):
         self.assertEqual([call.args[0] for call in run.call_args_list], ["red car"])
         ask.assert_not_called()
 
+    def test_a_search_on_a_terminal_starts_with_a_grey_hint_about_the_detail_flags_and_settings(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        grey, plain, piped = Terminal(), Terminal(), io.StringIO()
+        for stream, env in ((grey, {"TERM": "xterm"}), (plain, {"TERM": "dumb"}), (piped, {"TERM": "xterm"})):
+            with mock.patch.dict(os.environ, env), mock.patch("builtins.input"), contextlib.redirect_stdout(stream):
+                search.main("red car")
+        self.assertTrue(grey.getvalue().lstrip("\n").startswith("\033[38;5;244m" + search.DETAIL_HINT))
+        self.assertTrue(plain.getvalue().lstrip("\n").startswith(search.DETAIL_HINT))
+        self.assertNotIn(search.DETAIL_HINT, piped.getvalue())  # not part of piped results
+        for flag in ("--full", "--short"):
+            self.assertIn(flag, search.DETAIL_HINT)
+        self.assertIn("Settings", search.DETAIL_HINT)
+
     def test_no_terminal_ends_the_session_quietly(self):
         with mock.patch("builtins.input", side_effect=EOFError):
             search.main()

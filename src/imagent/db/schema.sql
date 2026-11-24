@@ -403,13 +403,16 @@ CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
 -- ============================================================================
 -- TABLE: index_preferences
 --
--- What: What the user chose at setup about the index (a single row).
+-- What: What the user chose about the index and about how Imagent behaves (a single row); changed in settings.
 -- Why:  keep_deleted is how many deleted pictures' analyses are kept (see deleted_analyses); 0 keeps none.
--- When: Written at the end of setup. No row means the question was not answered yet, and nothing is kept.
+--       search_detail is what a search shows for each picture by default: 'short' (the one-line summary) or 'full' (the whole description).
+-- When: keep_deleted is written at the end of setup; search_detail when the user changes it in settings. A NULL (or no row) means it was
+--       not chosen: keep_deleted then keeps nothing, and search_detail uses the default in config.py.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS index_preferences (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    keep_deleted INTEGER NOT NULL CHECK (keep_deleted >= 0)
+    keep_deleted INTEGER CHECK (keep_deleted IS NULL OR keep_deleted >= 0),
+    search_detail TEXT CHECK (search_detail IN ('short', 'full'))
 );
 
 

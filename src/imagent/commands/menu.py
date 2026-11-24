@@ -7,7 +7,7 @@ It runs the chosen command and ends with that command's exit code; "Exit" just c
 offered when there are some (images are retried by themselves; this only tells the user which ones could not be indexed and why).
 "Forget the deleted pictures Imagent remembers" is only offered when it remembers some. "Scan folders and index images" and
 "Delete a folder" are only offered once a folder has been added (until then there is nothing to scan or delete). "Search your images" is only
-offered once some image is indexed (until then there is nothing to search). "Help" (``imagent help``) is always offered, just before "Exit".
+offered once some image is indexed (until then there is nothing to search). "Help" (``imagent help``) and "Settings" (``imagent settings``, which also holds Uninstall) are always offered, just before "Exit", Settings last.
 
 """
 
@@ -24,7 +24,6 @@ from imagent.db.operations import count_deleted_analyses, count_embeddings, get_
 from imagent.pipeline import console
 from imagent.pipeline.console import make_output_safe
 
-UNINSTALL = "uninstall"
 EXIT = "exit"
 
 SEARCH = ("Search your images", "search")
@@ -33,6 +32,7 @@ SCAN = ("Scan folders and index images", "scan")
 DELETE_FOLDER = ("Delete a folder", "delete")
 FAILED_COMMAND = "failed"
 FORGET_COMMAND = "forget"
+SETTINGS = ("Settings", "settings")
 HELP = ("Help: what each command does", "help")
 
 STYLE = questionary.Style([
@@ -114,7 +114,7 @@ def has_indexed_images() -> bool:
 def needs_setup() -> bool:
     """True when setup has not been completed: the models are not locked or this computer has not been measured.
 
-    False if that cannot be found out, so the menu still appears (it offers Uninstall, which a damaged database may need).
+    False if that cannot be found out, so the menu still appears (it offers Settings, which holds Uninstall, which a damaged database may need).
     """
     try:
         conn = init_db(str(config.DB_PATH))
@@ -129,9 +129,8 @@ def needs_setup() -> bool:
 def choices(failed: int = 0, remembered: int = 0, folders: bool = True, indexed: bool = True) -> list:
     shown = [(f"Show the {failed} image(s) that could not be indexed", FAILED_COMMAND)] if failed else []
     forget = [(f"Forget the {remembered} deleted picture(s) Imagent remembers", FORGET_COMMAND)] if remembered else []
-    entries = ([*([SEARCH] if indexed else []), ADD_FOLDER, SCAN, DELETE_FOLDER] if folders else [ADD_FOLDER]) + shown + forget + [HELP, ("Exit", EXIT)]
-    return [questionary.Choice(title, value=command) for title, command in entries] + [
-        questionary.Choice([("fg:ansired", "Uninstall Imagent")], value=UNINSTALL)]
+    entries = ([*([SEARCH] if indexed else []), ADD_FOLDER, SCAN, DELETE_FOLDER] if folders else [ADD_FOLDER]) + shown + forget + [HELP, SETTINGS, ("Exit", EXIT)]
+    return [questionary.Choice(title, value=command) for title, command in entries]
 
 
 def main() -> None:

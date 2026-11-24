@@ -39,9 +39,8 @@ CANCELLED = "Setup cancelled. Run it again any time."
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
 REGISTRY = "https://registry.ollama.ai/v2"
 MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
-KEEP_DELETED_CHOICES = (100, 500, 1000, 2000)  # how many deleted pictures to remember, offered at the end of setup
+KEEP_DELETED_CHOICES = (0, 100, 500, 1000, 2000, 5000)  # how many deleted pictures to remember (0: none), offered at the end of setup and in settings
 KEEP_DELETED_DEFAULT = 500
-ENTER_A_NUMBER = "enter a number"
 RED = "fg:ansibrightred"
 INDENT = "  "  # left padding for everything under a step heading
 QMARK = INDENT + "?"
@@ -1248,20 +1247,19 @@ def measure_again_if_needed(settings: dict, host: str) -> None:
         conn.close()
 
 
-def _validate_keep_deleted(value: str):
-    return True if value.strip().isdigit() else "Enter a whole number, 0 or more."
+def keep_deleted_label(number: int) -> str:
+    """How a number of remembered pictures is named in a menu."""
+    return f"{number} deleted pictures" if number else "None: forget a picture as soon as it is deleted"
 
 
 def ask_keep_deleted() -> int:
-    """Explain what remembering deleted pictures is for, and ask how many to remember: one of ``KEEP_DELETED_CHOICES``, or a number
-    typed in (0 remembers none)."""
+    """Explain what remembering deleted pictures is for, and ask how many to remember: one of ``KEEP_DELETED_CHOICES`` (0 remembers none)."""
     say("When you delete a picture, Imagent forgets it at the next scan. It can instead remember what it learned about the picture:")
     say("its description and search data (not the picture, and not where it was).")
     say("If the same picture comes back later (restored from a backup, copied, or moved into a folder you add later), Imagent")
     say("recognises it by its pixels and uses what it remembers, so it does not have to be analysed again. That saves time when")
     say("indexing. When there are more than the number you choose, the oldest are forgotten first.\n")
-    choices = [questionary.Choice(f"{number} deleted pictures", value=number) for number in KEEP_DELETED_CHOICES]
-    choices.append(questionary.Choice("Enter a number", value=ENTER_A_NUMBER))
+    choices = [questionary.Choice(keep_deleted_label(number), value=number) for number in KEEP_DELETED_CHOICES]
     question = questionary.select(
         "How many deleted pictures should Imagent remember?", choices=choices,
         default=next(c for c in choices if c.value == KEEP_DELETED_DEFAULT), qmark=QMARK, pointer=POINTER, style=STYLE,
@@ -1269,11 +1267,7 @@ def ask_keep_deleted() -> int:
     # questionary also marks the default as "selected", which the style underlines for good. Keep only the pointer on it.
     control = next(w.content for w in question.application.layout.find_all_windows() if hasattr(w.content, "selected_options"))
     control.selected_options.clear()
-    choice = ask(question)
-    if choice != ENTER_A_NUMBER:
-        return choice
-    return int(ask(questionary.text("How many deleted pictures should Imagent remember? (0 remembers none)",
-                                    validate=_validate_keep_deleted, qmark=QMARK, style=STYLE)).strip())
+    return ask(question)
 
 
 def choose_keep_deleted() -> None:

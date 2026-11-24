@@ -34,7 +34,7 @@ imagent setup
 ```bash
 imagent search "red car at night"   # show the pictures that best match a description
 imagent search                      # keep searching until you type exit
-imagent search --full "red car"     # show each result's full description instead of its one-line summary
+imagent search --full "red car"     # show each result's full description instead of its one-line summary (--short for the summary)
 imagent add ~/Pictures         # add a folder, then choose what to do next: scan and index it, add another, delete folders, search
 imagent add                    # the same, picking the folder from suggestions as you type
 imagent scan                        # scan every folder you added, then index what is pending (asks for a folder if none is added yet)
@@ -42,11 +42,22 @@ imagent delete ~/Pictures           # remove a folder from the scan list and wha
 imagent delete                      # the same, ticking the folders to remove from the scan list
 imagent failed                      # list the pictures that could not be indexed, and why
 imagent forget                      # delete what Imagent remembers about deleted pictures (two confirmations)
+imagent settings                    # change the settings below from a menu, or uninstall
 imagent help                        # explain each command briefly
 imagent                             # open a menu (arrow keys and Enter) with the common choices
 ```
 
 `imagent --help` lists the commands. To index: run `imagent add` with a folder, or without one to pick it from a list, then choose "Scan and index this folder" (the menu comes back after each choice, so you can add more folders), then `imagent search`. Run `imagent scan` later to bring all of them up to date.
+
+## Settings
+
+`imagent settings` (also in the menu) changes these, each picked from a list; they are kept in the index database:
+
+- **Deleted pictures Imagent remembers:** none, 100, 500 (the default), 1000, 2000 or 5000. Choosing fewer than are remembered now forgets the oldest ones, after asking.
+- **Search results show:** the one-line summary (the default) or the whole description. `imagent search --full` and `--short` change it for one search.
+- **Wait before the scan runs again by itself:** 30 seconds, 1 minute (the default), 2, 5 or 10 minutes. This is the wait in the menu that follows an indexing round.
+
+The models and what setup measured about your computer are not settings: they are locked at setup (see below). Uninstall is in the settings menu too.
 
 ## Pictures that come back
 
@@ -86,7 +97,7 @@ The copy has no GPU drivers, so an NVIDIA GPU is used only if its driver is alre
 ## Uninstall
 
 ```bash
-imagent uninstall      # deletes the index, the data folder and the models Imagent downloaded (three confirmations), then asks whether to remove Imagent's own Ollama too
+imagent uninstall      # (or Uninstall in `imagent settings`) deletes the index, the data folder and the models Imagent downloaded (three confirmations), then asks whether to remove Imagent's own Ollama too
 pip uninstall imagent  # removes the program itself
 ```
 
