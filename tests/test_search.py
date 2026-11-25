@@ -42,6 +42,37 @@ class SearchTests(IsolatedHome):
     def test_results_are_ranked_closest_first(self):
         self.assertEqual(self._names(search.search("anything")), ["closest", "next", "far"])
 
+    def _add_copy(self, name: str, shade: int, vector: list[float]):
+        conn = self.connect()
+        with conn:
+            root_id = get_or_add_root(conn, str(self.work))
+        self.paths[name] = self.make_image(self.work / f"{name}.png", shade)
+        add_indexed(conn, root_id, self.paths[name])
+        with conn:
+            file_id = conn.execute("SELECT file_id FROM image_data WHERE file_path = ?", (str(self.paths[name]),)).fetchone()[0]
+            upsert_text_embedding(conn, file_id, serialize_embedding(vector))
+
+    def test_copies_of_a_picture_are_one_result_that_says_where_the_others_are(self):
+        self._add_copy("copy", 0, [1, 0, 0])  # the same pixels as "closest", in another place
+        results = search.search("anything")
+        self.assertEqual(len(results), 3)  # three different pictures: closest (with its copy), next, far
+        first = results[0]
+        self.assertEqual(sorted([first["file_path"], *first["other_paths"]]), sorted([str(self.paths["closest"]), str(self.paths["copy"])]))
+        self.assertTrue(all(result["other_paths"] == [] for result in results[1:]))
+
+    def test_a_copy_that_ranks_below_the_last_result_is_still_listed_with_its_picture(self):
+        self._add_copy("copy_of_far", 2, [-0.1, 1, 0])  # "far" has shade 2; the copy ranks after it
+        results = search.search("anything")
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[-1]["other_paths"], [str(self.paths["copy_of_far"])])
+
+    def test_the_result_shows_the_places_of_the_copies(self):
+        self._add_copy("copy", 0, [1, 0, 0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search._show("q", search.search("anything"))
+        self.assertIn(f"Same picture also at: {self.paths['copy']}", out.getvalue().replace("\n   ", " "))
+
     def test_files_that_are_gone_are_skipped_not_shown(self):
         self.paths["closest"].unlink()
         results = search.search("anything")
@@ -99,7 +130,9 @@ class SearchTests(IsolatedHome):
     def test_a_search_that_cannot_start_ends_the_session(self):
         with mock.patch.object(search, "check_ready", side_effect=search.NotReady("Run the installer")), \
                 mock.patch("builtins.input") as ask:
-            search.main("anything")
+            with self.assertRaises(SystemExit) as stop:  # a failure is not a success: the exit code says so
+                search.main("anything")
+        self.assertEqual(stop.exception.code, 1)
         ask.assert_not_called()
 
     def _describe(self, name, **columns):
@@ -260,13 +293,37 @@ class SearchTests(IsolatedHome):
     def test_the_session_ends_instead_of_asking_for_a_query(self):
         with self._busy(["vision"]), mock.patch.object(search, "is_running", return_value=False), \
                 mock.patch("builtins.input") as ask:
-            search.main()
+            with self.assertRaises(SystemExit) as stop:
+                search.main()
+        self.assertEqual(stop.exception.code, 1)
         ask.assert_not_called()
 
     def test_no_other_model_lets_the_search_load_its_own(self):
         with self._busy([]), mock.patch.object(search, "load_model") as load:
             self.assertIsNotNone(search.start_session())
         self.assertEqual(load.call_count, 2)
+
+
+class EmptyIndexTests(IsolatedHome):
+    def test_with_nothing_indexed_ollama_is_not_started_and_no_model_is_loaded(self):
+        with mock.patch.object(search, "check_ready") as ready, mock.patch.object(search, "load_model") as load, \
+                mock.patch.object(search, "SearchProgress"), mock.patch.object(search, "_offer_scan") as offer:
+            self.assertIsNone(search.start_session(exit_on_failure=True))  # nothing to search is not a failure: no exit code
+        ready.assert_not_called()
+        load.assert_not_called()
+        offer.assert_called_once_with()
+
+
+class LongQueryTests(unittest.TestCase):
+    def test_a_very_long_query_is_cut_in_the_heading_of_the_results_only(self):
+        query = "word " * 200
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search._show(query, [])
+            search._show(query, [{"file_path": "/p/a.png", "description": "d", "short_description": "s", "width": None, "height": None,
+                                  "file_size": None, "taken_at": None, "modified_at": None, "camera_make": None, "camera_model": None, "other_paths": []}])
+        self.assertLess(len(out.getvalue()), 800)
+        self.assertEqual(out.getvalue().count("…"), 2)
 
 
 class NoIndexedImagesTests(unittest.TestCase):

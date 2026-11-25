@@ -80,6 +80,15 @@ def _base_url(host: str) -> str:
     return f"{parsed.scheme}://{f'[{name}]' if ':' in name else name}:{port}"
 
 
+def short_error(exc: BaseException, limit: int = 200) -> str:
+    """``exc`` in one short line, for a message to the user: the kind of error and what it said, which can be a whole web page when
+    another program answers at Ollama's address (shown as a sentence instead), or long, which is cut."""
+    text = " ".join(str(exc).split())
+    if "<html" in text.lower() or "<!doctype" in text.lower():
+        return f"{type(exc).__name__}: another program answered at this address with a web page, not Ollama"
+    return f"{type(exc).__name__}: {text if len(text) <= limit else text[:limit].rstrip() + '…'}"
+
+
 def server_version(host: str) -> tuple[int, ...] | None:
     """The version of the Ollama server at ``host`` as numbers, e.g. (0, 6, 4); None if it cannot be told.
 
@@ -202,7 +211,7 @@ def check_ready(conn, roles: tuple[str, ...]) -> tuple[ollama.Client, dict]:
     except Exception as exc:
         install_hint = (f" Ollama is not installed. Run: {config.SETUP_COMMAND}; it installs Ollama."
                         if is_local(config.OLLAMA_HOST) and not config.ollama_binary() else " Start Ollama and try again.")
-        raise NotReady(f"Cannot reach Ollama at {config.OLLAMA_HOST} ({type(exc).__name__}: {exc}).{install_hint}") from exc
+        raise NotReady(f"Cannot reach Ollama at {config.OLLAMA_HOST} ({short_error(exc)}).{install_hint}") from exc
 
     version = server_version(config.OLLAMA_HOST)
     if version is not None and version < MIN_OLLAMA_VERSION:

@@ -55,7 +55,6 @@ imagent                             # open a menu (arrow keys and Enter) with th
 
 - **Deleted pictures Imagent remembers:** none, 100, 500 (the default), 1000, 2000 or 5000. Choosing fewer than are remembered now forgets the oldest ones, after asking.
 - **Search results show:** the one-line summary (the default) or the whole description. `imagent search --full` and `--short` change it for one search.
-- **Wait before the scan runs again by itself:** 30 seconds, 1 minute (the default), 2, 5 or 10 minutes. This is the wait in the menu that follows an indexing round.
 
 The models and what setup measured about your computer are not settings: they are locked at setup (see below). Uninstall is in the settings menu too.
 
@@ -63,10 +62,14 @@ The models and what setup measured about your computer are not settings: they ar
 
 A picture is recognised by its pixels, whatever its name, folder or embedded details (EXIF) are. The vision model looks at each picture once:
 
-- **Copies and renames:** a new file with the same pixels as a picture already indexed gets that picture's description and search data again, so it is not analysed a second time. A renamed or moved file keeps its index.
+- **Copies and renames:** a new file with the same pixels as a picture already indexed gets that picture's description and search data again, so it is not analysed a second time. A renamed or moved file keeps its index, also when it was moved into another folder you added, whichever of the two folders is scanned first.
 - **Deleted pictures:** when a scan finds that a picture was deleted, Imagent can remember what it learned about it (its description and search data; not the picture, and not where it was). If the same picture comes back later (restored from a backup, copied, or moved into a folder you add later), it is not analysed again. Search never shows remembered pictures.
 
-Setup asks how many deleted pictures to remember: pick one of the suggested numbers or type your own (0 remembers none). When there are more than that, the oldest are forgotten first. Until you have answered, nothing is remembered. To delete what is remembered now, run `imagent forget` (or choose it in the menu); your indexed pictures and your choice are not touched.
+Setup asks how many deleted pictures to remember: pick one from the list (none, 100, 500, 1000, 2000 or 5000). When there are more than that, the oldest are forgotten first. Until you have answered, nothing is remembered. To delete what is remembered now, run `imagent forget` (or choose it in the menu); your indexed pictures and your choice are not touched.
+
+When copies of one picture are indexed (in one folder or several), a search shows them as one result and lists where the other copies are, so its results are different pictures. Deleting a folder does not keep the analysis of a picture whose copy is still indexed in another folder: it is still in use.
+
+A picture with transparent parts is shown to the model, and to the text reader, on a white background, as an image viewer shows it. A picture Imagent is not allowed to read (its permissions) is set aside with a message saying so, and tried again on every scan, so allowing it to be read is enough. The scan summary counts pictures that could not be indexed on a line of their own ("Failed"), not as waiting to be indexed.
 
 A description is only used again when it was made with the same models, prompt and text-reading engine as a new one would be; otherwise the picture is analysed again.
 

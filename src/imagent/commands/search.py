@@ -50,7 +50,7 @@ from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.locking import is_running
 from imagent.pipeline.progress import SearchProgress, format_duration
 from imagent.vlm.analyzer import embed_search_text, understand_query
-from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running
+from imagent.vlm.client import NotReady, check_ready, load_model, other_models_running, short_error
 
 
 # ---------------------------------------------------------------------------
@@ -135,11 +135,12 @@ def _offer_scan() -> None:
         scan.add()
 
 
-def start_session() -> tuple | None:
+def start_session(exit_on_failure: bool = False) -> tuple | None:
     """Start Ollama and load the judge and embedding models, shown as one step.
 
     Returns the client and the locked model settings to pass to ``search``, or None
-    (after saying why) if the search cannot run.
+    (after saying why) if the search cannot run. With ``exit_on_failure`` the program also ends with exit code 1 when the reason is a
+    failure (the models are not ready, or another one is running), not when there is simply nothing indexed to search.
     """
     make_output_safe()
     conn = init_db(str(config.DB_PATH))
@@ -147,14 +148,7 @@ def start_session() -> tuple | None:
     progress = SearchProgress()
     progress.step("Loading the model and starting the server")
     try:
-        try:
-            client, settings = check_ready(conn, ("judge", "embedding"))
-        except NotReady as exc:
-            progress.fail()
-            progress.say(str(exc))
-            return None
-
-        if count_embeddings(conn) == 0:
+        if count_embeddings(conn) == 0:  # said before Ollama is started and the models are loaded: with nothing to search they are not needed
             progress.fail()
             progress.say("\nNo indexed images found.\n")  # a blank line above and below
             progress.close()
@@ -162,7 +156,18 @@ def start_session() -> tuple | None:
             _offer_scan()
             return None
 
+        try:
+            client, settings = check_ready(conn, ("judge", "embedding"))
+        except NotReady as exc:
+            progress.fail()
+            progress.say(str(exc))
+            if exit_on_failure:
+                sys.exit(1)
+            return None
+
         if _another_model_is_running(client, settings, progress):
+            if exit_on_failure:
+                sys.exit(1)
             return None
         load_model(client, settings["judge_model"])
         load_model(client, settings["embedding_model"], embedding=True)
@@ -174,6 +179,9 @@ def start_session() -> tuple | None:
 
 def search(query: str, session: tuple | None = None) -> list[dict]:
     """Return the ``config.UNCERTAIN_TOP_K`` images closest to ``query``, best first.
+
+    Identical copies of a picture (the same pixel hash) are one result, in the place of the closest copy, with the paths of the
+    others in ``other_paths``; so the results are different pictures.
 
     Each result dict has: file_id, file_path, short_description, description, the file's properties
     (width, height, file_size, mime_type, modified_at, root_path) and EXIF facts (taken_at, camera_make, camera_model,
@@ -198,7 +206,7 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
         except Exception as exc:
             log_error(conn, stage="search", exc=exc, metadata={"query": query})
             progress.fail()
-            progress.say(f"Could not reach the embedding model ({type(exc).__name__}: {exc}).")
+            progress.say(f"Could not reach the embedding model ({short_error(exc)}).")
             return []
         if len(query_embedding) != settings["embedding_dim"]:
             progress.fail()
@@ -233,17 +241,24 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
         scores = similarities.mean(axis=1)
 
         results: list[dict] = []
+        by_picture: dict[str, dict] = {}  # pixel hash -> its result: copies of a picture are one result, listing every path
         missing = 0
         for row, file_id in enumerate(file_ids):
-            if len(results) >= config.UNCERTAIN_TOP_K or missing >= config.SEARCH_MAX_MISSING_SKIPPED:
+            if missing >= config.SEARCH_MAX_MISSING_SKIPPED:
                 break
             summary = get_image_summary(conn, file_id)
             if summary is None:
                 continue
             if not os.path.exists(summary["file_path"]):  # moved or deleted since the last scan, or on a drive that is not connected
-                missing += 1
+                missing += len(results) < config.UNCERTAIN_TOP_K  # only one that is closer than the last result is worth a word
                 continue
-            results.append({
+            shown = by_picture.get(summary["pixel_hash"]) if summary["pixel_hash"] else None
+            if shown is not None:  # a copy of a picture already in the results: no place of its own
+                shown["other_paths"].append(summary["file_path"])
+                continue
+            if len(results) >= config.UNCERTAIN_TOP_K:  # full: the rest are only looked at for copies of what is shown
+                continue
+            result = {
                 "file_id": file_id,
                 "file_path": summary["file_path"],
                 "short_description": summary["short_description"],
@@ -252,7 +267,11 @@ def search(query: str, session: tuple | None = None) -> list[dict]:
                 "score": float(scores[row]),
                 "query_score": float(similarities[row, 0]),
                 "hyde_score": None if hyde_embedding is None else float(similarities[row, 1]),
-            })
+                "other_paths": [],  # where identical copies of this picture are
+            }
+            results.append(result)
+            if summary["pixel_hash"]:
+                by_picture[summary["pixel_hash"]] = result
         if missing:
             progress.say(f"Skipped {missing} closer match(es) whose file is missing "
                          f"(is a drive disconnected?). Run {config.SCAN_COMMAND} to bring the index up to date.")
@@ -323,20 +342,30 @@ def _description(result: dict, full: bool) -> str:
     return _indented((result["description"] if full else result["short_description"]) or "")
 
 
+QUERY_SHOWN_CHARS = 120  # a longer query is cut in the heading of its results (it is searched in full)
+
+
+def _shortened(query: str) -> str:
+    """``query`` as it is named in the heading of the results: cut, with … , when it is very long."""
+    return query if len(query) <= QUERY_SHOWN_CHARS else query[:QUERY_SHOWN_CHARS].rstrip() + "…"
+
+
 def _show(query: str, results: list[dict], full: bool = False, seconds: float | None = None) -> None:
     """Print the results; ``seconds`` is how long the search took, shown in the heading when given."""
     took = f" in {format_duration(seconds, decimals=1)}" if seconds is not None else ""
     if not results:
-        print(f"\nNo results for: {query!r}{took}\n")
+        print(f"\nNo results for: {_shortened(query)!r}{took}\n")
         return
 
     bold = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
-    print(f"\nTop {len(results)} result(s) for: " + (f"\033[1m{query!r}\033[0m" if bold else f"{query!r}") + f"{took}\n")
+    shown = _shortened(query)
+    print(f"\nTop {len(results)} result(s) for: " + (f"\033[1m{shown!r}\033[0m" if bold else f"{shown!r}") + f"{took}\n")
     for position, result in enumerate(results, start=1):
         name = file_link(os.path.basename(result["file_path"]), result["file_path"])
         name = f"\033[1m{name}\033[0m" if bold else name
+        copies = [_indented(f"Same picture also at: {path}", break_long_words=True) for path in result.get("other_paths", ())]
         lines = [f"{position}. {name}", _description(result, full), _indented(_facts(result)),
-                 _indented(result["file_path"], break_long_words=True)]
+                 _indented(result["file_path"], break_long_words=True), *copies]
         print("\n\n".join(line for line in lines if line))  # a blank line between the lines of a result, two between results
         print("\n")
 
@@ -377,7 +406,7 @@ def main(query: str = "", full: bool | None = None) -> None:
     if full is None:
         full = _saved_detail_is_full()
     query = query.strip()
-    session = start_session()
+    session = start_session(exit_on_failure=True)
     if session is None:
         return
     if query:

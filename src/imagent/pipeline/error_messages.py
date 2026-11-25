@@ -19,6 +19,7 @@ MESSAGES: dict[str, str] = {
     "picture_too_large_memory_unknown": "The picture has {megapixels} megapixels, this computer does not say how much memory is free, "
                                         "so only a picture that is not very large can be read. "
                                         "Save a smaller copy of it from a photo app, then scan again.",
+    "no_permission": "Imagent is not allowed to read this file. Change its permissions so that you can open it, then scan again.",
     "not_downloaded": "The picture is kept in cloud storage and is not on this computer, and Imagent does not use the internet. "
                       "Make it available offline (download it), then scan again.",
     "changed_since_scan": "The file changed after it was scanned, so it may still be being written. It is tried again later.",

@@ -17,6 +17,7 @@ UNREADABLE = "unreadable"  # damaged or incomplete: it is queued again when the 
 UNSUPPORTED = "unsupported"  # no decoder for its format on this computer
 TOO_LARGE = "too_large"  # more pixels than the memory free right now can hold
 NOT_DOWNLOADED = "not_downloaded"  # kept in cloud storage and not on this computer: reading it would download it
+NO_PERMISSION = "no_permission"  # the operating system does not let Imagent read the file: tried again on every scan, as fixing it does not change the file
 OCR_FAILED = "ocr_failed"  # the text in the image could not be read, by any of the ways tried
 BUSY = "busy"  # changed since it was scanned, so perhaps still being written: tried again later, nothing is held against the file (see commands/scan.py)
 

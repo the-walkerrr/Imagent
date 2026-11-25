@@ -39,6 +39,17 @@ class ErrorMessagesTableTests(IsolatedHome):
         self.assertEqual(self.table(self.connect()), all_messages())
 
 
+class RootIdsTests(IsolatedHome):
+    def test_asking_for_a_folder_that_exists_does_not_use_up_ids(self):
+        conn = self.connect()
+        with conn:
+            first = get_or_add_root(conn, "/a")
+            for _ in range(5):
+                get_or_add_root(conn, "/a")
+            second = get_or_add_root(conn, "/b")
+        self.assertEqual(second, first + 1)
+
+
 class MigrationTests(IsolatedHome):
     def test_new_database_gets_the_latest_schema(self):
         conn = self.connect()

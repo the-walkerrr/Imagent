@@ -35,6 +35,18 @@ class RunCliTests(IsolatedHome):
     def test_database_problems_are_shown_as_their_message(self):
         self.assertIn("is damaged", str(self._ends_with(DatabaseProblem("The Imagent database is damaged.")).code))
 
+    def test_a_terminal_that_was_closed_is_not_reported_as_an_unexpected_error(self):
+        with mock.patch("imagent.pipeline.console._terminal_is_there", return_value=False):
+            message = str(self._ends_with(OSError(5, "Input/output error")).code)
+        self.assertIn("terminal is not there any more", message)
+        self.assertFalse((self.home / "last_error.log").exists())
+
+    def test_the_same_error_on_a_terminal_that_is_there_is_still_reported_as_unexpected(self):
+        with mock.patch("imagent.pipeline.console._terminal_is_there", return_value=True):
+            message = str(self._ends_with(OSError(5, "Input/output error")).code)
+        self.assertIn("Something unexpected went wrong", message)
+        self.assertTrue((self.home / "last_error.log").exists())
+
     def test_a_database_error_in_the_middle_of_work_is_explained(self):
         self.assertIn("disk is full", str(self._ends_with(sqlite3.OperationalError("database or disk is full")).code))
 
@@ -317,7 +329,7 @@ class NeedsSetupTests(IsolatedHome):
             self.assertFalse(menu.needs_setup())
 
 
-class MenuTests(unittest.TestCase):
+class MenuTests(IsolatedHome):
     def test_the_choices_start_with_search_and_end_with_exit_and_uninstall_is_not_in_the_menu(self):
         for failed in (0, 3):
             values = [choice.value for choice in menu.choices(failed)]

@@ -9,7 +9,7 @@ from unittest import mock
 from PIL import Image, PngImagePlugin
 
 from imagent.commands import scan
-from imagent.db.operations import get_backlog, get_or_add_root, images_by_path, list_roots, set_keep_deleted
+from imagent.db.operations import get_backlog, get_or_add_root, images_by_path, keep_analyses_of, list_roots, park_backlog, set_keep_deleted
 from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
 from imagent.pipeline.discovery import discover
 from tests.support import IsolatedHome, add_indexed
@@ -337,6 +337,66 @@ class MovedFileTests(PictureBase):
         self.assertIsNotNone(self._record(one / "a.png"))
 
 
+class MovedBetweenFoldersTests(PictureBase):
+    def _two_folders(self):
+        first, second = self.work / "first", self.work / "second"
+        self._index_pictures(first, {"x.png": {}, "y.png": {"shade": 1}})
+        self._index_pictures(second, {"z.png": {"shade": 2}})
+        return first, second
+
+    def test_a_picture_moved_to_another_added_folder_is_found_when_the_folder_it_left_is_scanned_first(self):
+        first, second = self._two_folders()  # no deleted analyses are kept, so a picture taken for deleted would be analysed again
+        record = self._record(first / "x.png")
+        shutil.move(first / "x.png", second / "x.png")
+        counts = scan.scan(first)
+        self.assertEqual((counts["moved_out"], counts["deleted"], counts["queued_new"]), (1, 0, 0))
+        after = self._record(second / "x.png")
+        self.assertEqual(after["file_id"], record["file_id"])
+        self.assertNotEqual(after["root_id"], record["root_id"])
+        counts = scan.scan(second)
+        self.assertEqual((counts["up_to_date"], counts["queued_new"], counts["deleted"]), (2, 0, 0))
+        self.assertEqual(self._queued(), [])
+
+    def test_a_picture_moved_to_another_added_folder_is_found_when_the_other_folder_is_scanned_first(self):
+        first, second = self._two_folders()
+        record = self._record(first / "x.png")
+        shutil.move(first / "x.png", second / "x.png")
+        self.assertEqual(scan.scan(second)["moved"], 1)
+        counts = scan.scan(first)
+        self.assertEqual((counts["moved_out"], counts["deleted"]), (0, 0))
+        self.assertEqual(self._record(second / "x.png")["file_id"], record["file_id"])
+
+    def test_a_deleted_picture_is_still_deleted_when_it_is_in_no_other_folder(self):
+        first, second = self._two_folders()
+        (first / "x.png").unlink()
+        counts = scan.scan(first)
+        self.assertEqual((counts["moved_out"], counts["deleted"]), (0, 1))
+
+    def test_an_added_folder_that_cannot_be_read_is_not_looked_in(self):
+        first, second = self._two_folders()
+        (first / "x.png").unlink()
+        shutil.rmtree(second)  # a drive that is not connected
+        counts = scan.scan(first)
+        self.assertEqual((counts["moved_out"], counts["deleted"]), (0, 1))
+        self.assertEqual(self._stored(second), 1)  # its images are unknown, not gone
+
+
+class FailedFilesInTheScanTests(ScanBase):
+    def test_a_file_that_failed_every_try_is_counted_as_failed_not_as_waiting_to_be_indexed(self):
+        root = self.work / "pictures"
+        self._index(root, ["a.png"])
+        self.make_image(root / "b.png", shade=5)
+        self.assertEqual(scan.scan(root)["queued_new"], 1)
+        with self.connect() as conn:
+            park_backlog(conn, str(root / "b.png"), "unreadable", "damaged_picture", "file_changed")
+        counts = scan.scan(root)
+        self.assertEqual((counts["queued_new"], counts["failed"]), (0, 1))
+        self.make_image(root / "b.png", shade=6)  # the file changed: it is tried again, so it is waiting to be indexed
+        os.utime(root / "b.png", (2_000_000_000, 2_000_000_000))
+        counts = scan.scan(root)
+        self.assertEqual((counts["queued_new"], counts["failed"]), (1, 0))
+
+
 class PixelHashTests(PictureBase):
     def test_it_ignores_what_surrounds_the_pixels(self):
         a = self._picture(self.work / "a.png", camera="Acme", note="one")
@@ -507,6 +567,14 @@ class ScanCommandTests(ScanBase):
                 mock.patch.object(scan.sys.stdin, "isatty", return_value=False), contextlib.redirect_stdout(out):  # no menu to answer
             function(*args)
         return out.getvalue(), run, yes_no
+
+    def test_a_scan_while_indexing_runs_elsewhere_does_not_ask_to_index(self):
+        first, second = self._scan_two_folders()
+        with mock.patch.object(scan, "is_running", return_value=True):
+            out, run, yes_no = self._call(scan.main)
+        self.assertIn("already running in another window", out)
+        yes_no.assert_not_called()
+        run.assert_not_called()
 
     def test_scan_with_no_folder_added_and_no_terminal_says_how_to_add_one(self):
         with mock.patch.object(scan.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit) as stop:
@@ -810,6 +878,29 @@ class KeepDeletedTests(ScanBase):
         self._keep(keep)
         return root, {name: compute_pixel_hash(str(root / name)) for name in ("a.png", "b.png", "c.png")}
 
+    def test_the_analysis_of_a_picture_that_is_still_indexed_in_another_folder_is_not_kept_as_deleted(self):
+        first, second = self.work / "first", self.work / "second"
+        self._index(first, ["x.png", "y.png"])
+        self._index(second, ["x.png"])  # the same pixels as first/x.png
+        self._analysed()
+        self._keep(5)
+        conn = self.connect()
+        ids = [row[0] for row in conn.execute("SELECT i.file_id FROM image_data i JOIN scan_roots r USING (root_id) WHERE r.path = ?", (str(first),))]
+        with conn:
+            keep_analyses_of(conn, ids, 5)
+        self.assertEqual(self._kept(), [compute_pixel_hash(str(first / "y.png"))])
+
+    def test_the_analysis_of_a_picture_is_kept_when_every_copy_is_deleted_together(self):
+        first, second = self.work / "first", self.work / "second"
+        self._index(first, ["x.png"])
+        self._index(second, ["x.png"])
+        self._analysed()
+        conn = self.connect()
+        ids = [row[0] for row in conn.execute("SELECT file_id FROM image_data")]
+        with conn:
+            keep_analyses_of(conn, ids, 5)
+        self.assertEqual(self._kept(), [compute_pixel_hash(str(first / "x.png"))])
+
     def test_the_analysis_of_a_deleted_picture_is_kept_by_its_pixels(self):
         root, pixels = self._pictures(keep=5)
         (root / "a.png").unlink()
@@ -893,7 +984,7 @@ class RescanLoopTests(ScanBase):
         run.assert_called_once_with({7})
         rescan.assert_called_once_with()
         menu.assert_not_called()
-        self.assertNotIn("changes during the earlier scan", said)
+        self.assertNotIn("pending indexing again", said)
         self.assertIn("All images are indexed.", said)
 
     def test_the_success_message_is_not_said_when_an_image_failed(self):
@@ -910,8 +1001,8 @@ class RescanLoopTests(ScanBase):
         self.assertEqual(run.call_count, 3)
         self.assertEqual(rescan.call_count, 3)
         self.assertEqual(menu.call_count, 2)
-        self.assertIn("There were changes during the earlier scan: 2 file(s)", said)
-        self.assertIn("There were changes during the earlier scan: 1 file(s)", said)
+        self.assertIn("2 file(s) are pending indexing again", said)
+        self.assertIn("1 file(s) are pending indexing again", said)
 
     def test_exiting_from_the_menu_leaves_the_backlog_for_later(self):
         run, rescan, menu, said = self._loop([3], [False])

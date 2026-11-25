@@ -73,6 +73,14 @@ class ReadSettingsTests(IsolatedHome):
             self.assertIsNone(settings.read_settings())
 
 
+class NoTerminalTests(unittest.TestCase):
+    def test_settings_say_they_need_a_terminal_instead_of_failing(self):
+        with mock.patch.object(settings, "make_output_safe"), mock.patch.object(settings.sys, "stdin", mock.Mock(isatty=lambda: False)):
+            with self.assertRaises(SystemExit) as stop:
+                settings.main()
+        self.assertIn("interactive terminal", str(stop.exception.code))
+
+
 class SettingsMenuTests(IsolatedHome):
     """The menu driven with the answers given in turn: the setting to change, the value, and so on, ending with Exit."""
 
@@ -93,7 +101,8 @@ class SettingsMenuTests(IsolatedHome):
 
         self.controls = []
         with mock.patch.object(settings.questionary, "select", side_effect=prompt), \
-                mock.patch.object(settings.questionary, "print"), mock.patch.object(settings, "make_output_safe"):
+                mock.patch.object(settings.questionary, "print"), mock.patch.object(settings, "make_output_safe"), \
+                mock.patch.object(settings.sys, "stdin", mock.Mock(isatty=lambda: True)):
             settings.main()
 
     def stored(self):

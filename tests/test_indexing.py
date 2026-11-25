@@ -521,19 +521,26 @@ class RunTests(IsolatedHome):
         self.assertTrue(all(r["status"] == "parked" for r in self._rows().values()))
 
     def test_files_that_cannot_be_read_one_after_another_stop_the_run_and_keep_their_attempts(self):
-        stop = self.run_with([PermissionError(13, "denied")] * 4)
+        stop = self.run_with([OSError(5, "input/output error")] * 4)
         self.assertEqual(stop.code, 1)
         rows = self._rows()
         self.assertTrue(all(r["attempts"] == 0 for r in rows.values()))  # given back: a drive that went away is not their fault
         self.assertEqual(sum(1 for r in rows.values() if r["error_id"]), config.MAX_CONSECUTIVE_SERVICE_FAILURES)
 
     def test_one_file_that_cannot_be_read_costs_an_attempt_and_the_run_goes_on(self):
-        self.assertIsNone(self.run_with([("indexed", "ok"), PermissionError(13, "denied"), ("indexed", "ok"), ("indexed", "ok")]))
-        self.assertEqual(self._attempts(), {"b.png": (1, "PermissionError: [Errno 13] denied")})
+        self.assertIsNone(self.run_with([("indexed", "ok"), OSError(5, "input/output error"), ("indexed", "ok"), ("indexed", "ok")]))
+        self.assertEqual(self._attempts(), {"b.png": (1, "OSError: [Errno 5] input/output error")})
 
     def test_a_success_ends_a_run_of_unreadable_files(self):
-        denied = PermissionError(13, "denied")
+        denied = OSError(5, "input/output error")
         self.assertIsNone(self.run_with([denied, denied, ("indexed", "ok"), denied]))
+
+    def test_a_file_the_system_does_not_let_be_read_is_set_aside_at_once_with_a_plain_message_and_tried_again_by_the_next_run(self):
+        self.assertIsNone(self.run_with([("indexed", "ok"), PermissionError(13, "denied"), ("indexed", "ok"), ("indexed", "ok")]))
+        row = self._rows()["b.png"]
+        self.assertEqual((row["status"], row["attempts"], row["park_kind"], row["error_id"]), ("parked", 0, "no_permission", "no_permission"))
+        self.run_with([("indexed", "ok")])  # allowed to be read by now: every run tries it once more
+        self.assertNotIn("b.png", self._rows())
 
     def test_a_problem_with_the_whole_setup_stops_the_run_without_touching_the_file(self):
         stop = self.run_with([RunStopped("The embedding model has changed.")])

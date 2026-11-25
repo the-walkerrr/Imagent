@@ -79,6 +79,17 @@ class CheckReplyTests(unittest.TestCase):
         self.assertTrue(check_reply('{"count": true}', schema)[1])  # a boolean is not a number
 
 
+class QueryUnderstandingTests(unittest.TestCase):
+    def test_the_reply_that_reads_a_query_has_an_output_cap_so_a_runaway_reply_cannot_last_until_the_wait_runs_out(self):
+        reply = '{"normalized_query": "q", "required_details": [], "hypothetical_description": "d"}'
+        client = mock.Mock()
+        client.chat.return_value = SimpleNamespace(message=SimpleNamespace(content=reply))
+        analyzer.understand_query(client, "m", "q")
+        options = client.chat.call_args.kwargs["options"]
+        self.assertEqual(options["num_predict"], config.QUERY_MAX_OUTPUT_TOKENS)
+        self.assertEqual(options["num_ctx"], config.LLM_OPTIONS["num_ctx"])  # the same as every other request: Ollama reloads the model when it changes
+
+
 class SchemaAndPromptTests(unittest.TestCase):
     def test_the_summary_field_is_a_required_text_field_of_the_schema(self):
         schema = config.ANALYSIS_SCHEMA

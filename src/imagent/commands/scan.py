@@ -63,6 +63,7 @@ from imagent.db.operations import (
     refresh_image_file,
     refund_backlog_attempts,
     requeue_changed_parked,
+    requeue_parked,
     update_image_location,
     update_image_modified_at,
     upsert_backlog,
@@ -74,7 +75,7 @@ from imagent.image_processing import ocr
 from imagent.image_processing.hashing import compute_hash, compute_pixel_hash
 from imagent.image_processing.memory import check_image_size
 from imagent.image_processing.metadata import extract_file_metadata, iso_utc
-from imagent.image_processing.problems import BUSY, NOT_DOWNLOADED, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
+from imagent.image_processing.problems import BUSY, NO_PERMISSION, NOT_DOWNLOADED, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
 from imagent.os_specific.files import is_not_downloaded
 from imagent.pipeline.console import file_link, make_output_safe
 from imagent.pipeline.discovery import discover
@@ -82,7 +83,7 @@ from imagent.pipeline.error_messages import describe
 from imagent.pipeline.error_logger import log_error
 from imagent.pipeline.failure import IndexingFailure, RunStopped
 from imagent.pipeline.folder_picker import ask_for_folder
-from imagent.pipeline.locking import AlreadyRunning, single_instance
+from imagent.pipeline.locking import AlreadyRunning, is_running, single_instance
 from imagent.pipeline.progress import Progress
 from imagent.pipeline.serialisation import serialize_embedding
 from imagent.pipeline.versions import collect_versions, model_versions
@@ -347,6 +348,8 @@ def _index_with_tries(conn, client: ollama.Client, settings: dict, root_id: int,
     for attempt in range(1, config.SERVICE_TRIES + 1):
         try:
             return index_image(conn, client, settings, root_id, image_path, lambda stage: on_stage(prefix + stage), on_retry)
+        except PermissionError as exc:  # not the file's content, and not something another try changes: the user has to allow reading it
+            raise problem(NO_PERMISSION, "no_permission", detail=f"{type(exc).__name__}: {exc}", retry_when="on_request") from exc
         except IndexingFailure as failure:
             if not failure.service or attempt == config.SERVICE_TRIES:
                 raise
@@ -542,6 +545,8 @@ def _index_backlog(root_ids: set[int] | None = None) -> None:
         if queued_again:
             print(f"{queued_again} file(s) set aside because of the model's replies are queued again: the model or the prompt changed.")
 
+    with conn:
+        requeue_parked(conn, kind=NO_PERMISSION)  # allowing the file to be read does not change it, so every run tries those files once more
     backlog_rows = get_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)
     if root_ids is not None:
         backlog_rows = [row for row in backlog_rows if row["root_id"] in root_ids]
@@ -896,6 +901,40 @@ def _gone_from_other_folders(conn, root_id: int) -> dict[str, StoredImage]:
             if folders.get(other) and _is_missing(path)}
 
 
+def _find_moves_out(conn, root_id: int, gone: dict[str, StoredImage], counts: dict[str, int]) -> set[str]:
+    """Which of ``gone`` (indexed images that are not at their path any more) are in another added folder now: their records are
+    pointed at their new path and folder (as ``_apply_moves`` does), and the old paths are returned.
+
+    A scan of one folder cannot tell a deleted picture from one moved into a folder that has not been scanned yet, so the other folders
+    are looked at, for files they do not have in the index. A folder that cannot be read now (a drive that is not connected) is skipped."""
+    found: set[str] = set()
+    if not gone:
+        return found
+    for other in list_roots(conn):
+        folder = Path(other["path"])
+        if other["root_id"] == root_id or len(found) == len(gone) or not folder.is_dir() or not os.access(folder, os.R_OK):
+            continue
+        known = images_by_path(conn, other["root_id"])
+        on_disk: dict[str, str] = {}
+        sizes: dict[str, int] = {}
+        for file_path in discover(folder).images:
+            path = str(file_path)
+            try:
+                status = os.stat(path)
+            except OSError:
+                continue
+            if path in known or status.st_size == 0 or is_not_downloaded(status):
+                continue
+            on_disk[path] = iso_utc(status.st_mtime)
+            sizes[path] = status.st_size
+        left = {path: image for path, image in gone.items() if path not in found}
+        file_hashes: dict[str, str | None] = {}
+        moved = _find_moves(conn, list(on_disk), left, on_disk, sizes, file_hashes, counts)
+        _apply_moves(conn, moved, left, other["root_id"], on_disk, file_hashes, counts)
+        found.update(moved.values())
+    return found
+
+
 def _apply_moves(conn, moved: dict[str, str], gone: dict[str, StoredImage], root_id: int, on_disk: dict[str, str],
                  file_hashes: dict[str, str | None], counts: dict[str, int]) -> None:
     """Point the record of each moved picture at its new path (and folder). When the file's bytes differ from before (the same
@@ -942,6 +981,10 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
       * renamed (``renamed``): the same, but the old path is in the same folder as the new one (only the name changed). The
         report shows it with the details updated;
       * new (``queued_new``): anything else (queued).
+    A changed or new file that failed to be indexed on every try (it is still in the backlog, with its reason) is counted as
+    ``failed`` instead, not as queued.
+    An indexed file that is gone from its path and was not moved here is looked for in the other added folders, among the files they
+    have not indexed yet; one found there is moved to that folder (``moved_out``), whichever folder is scanned first.
     An indexed file that is gone from its path and was not moved is removed (``deleted``).
     Three things protect the index from a scan that
     cannot see what is really there:
@@ -959,8 +1002,10 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         "scanned": 0,
         "queued_new": 0,
         "queued_modified": 0,
+        "failed": 0,
         "details_updated": 0,
         "moved": 0,
+        "moved_out": 0,
         "renamed": 0,
         "up_to_date": 0,
         "deleted": 0,
@@ -1024,6 +1069,8 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
         for new_path, old_path in {**moved, **moved_in}.items():  # same folder, other name: renamed; another folder: moved
             counts["renamed" if os.path.dirname(new_path) == os.path.dirname(old_path) else "moved"] += 1
 
+        queued: list[tuple[str, str]] = []  # (path, "queued_new" or "queued_modified") of the files put in the backlog by this scan
+
         # Files present before and now: up to date, or changed in some way. Only a file whose timestamp changed is looked at.
         for path, modified_at in on_disk.items():
             row = stored.get(path)
@@ -1047,7 +1094,7 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
             if pixel_hash is None or pixel_hash != row.pixel_hash:  # not the picture that was analysed (or not known to be)
                 with conn:
                     upsert_backlog(conn, path, root_id, modified_at)
-                counts["queued_modified"] += 1
+                queued.append((path, "queued_modified"))
                 continue
             try:  # the same picture in other bytes: the EXIF facts may differ, nothing else needs to be done about it
                 details = {**extract_file_metadata(path), "modified_at": modified_at}
@@ -1066,11 +1113,18 @@ def scan(root: Path, allow_mass_delete: bool = False) -> dict[str, int]:
             for path in new_paths:
                 if path not in moved_paths:
                     upsert_backlog(conn, path, root_id, on_disk[path])
-                    counts["queued_new"] += 1
+                    queued.append((path, "queued_new"))
+        # A file whose every try is over stays in the backlog as it is: it is failed (listed with its reason), not waiting to be indexed.
+        failed = {row["file_path"] for row in get_exhausted_backlog(conn, config.BACKLOG_MAX_ATTEMPTS)}
+        for path, state in queued:
+            counts["failed" if path in failed else state] += 1
 
         # Forget what is gone: stored images, and queued files that vanished before they were indexed.
         moved_from = set(moved.values())
-        gone = [path for path in vanished if path not in moved_from]
+        # Pictures gone from here may be in another added folder, not scanned yet: found there now, before anything is deleted, whichever folder is scanned first.
+        moved_out = _find_moves_out(conn, root_id, {path: stored[path] for path in vanished if path not in moved_from}, counts)
+        counts["moved_out"] = len(moved_out)
+        gone = [path for path in vanished if path not in moved_from and path not in moved_out]
         mass_delete = gone and (
             not on_disk
             or (len(gone) >= config.SCAN_GUARD_MIN_FILES and len(gone) > len(stored) * config.SCAN_GUARD_MAX_SHARE)
@@ -1133,6 +1187,8 @@ def _scan_and_report(root: Path) -> None:
     states = (  # what the scan found, every state always shown: the files that are fine first, then what changed, then the problems
         ("Already indexed", counts["up_to_date"] + counts["moved"] + counts["details_updated"] + counts["renamed"]),
         ("To index", counts["queued_new"] + counts["queued_modified"]),
+        ("Failed", counts["failed"]),
+        ("Moved elsewhere", counts["moved_out"]),
         ("Deleted files", counts["deleted"]),
         ("Skipped", f"{skipped} ({why})" if why else skipped),
     )  # images kept after a declined mass deletion have no row: the note below explains them
@@ -1162,6 +1218,10 @@ def _scan_folders(roots: list[Path]) -> None:
     backlog_size = _pending_count()
     if backlog_size == 0:
         _say_if_all_indexed()
+        return
+    if is_running("indexing"):  # said now, not after the question: the lock is checked again when it is taken, in case one starts meanwhile
+        print(f"{backlog_size} file(s) are pending indexing, but indexing is already running in another window. "
+              f"Wait for it to finish, then run {config.SCAN_COMMAND} again.")
         return
     if _ask_yes_no(
         f"{backlog_size} file(s) in the backlog are pending indexing. "
@@ -1242,7 +1302,7 @@ def _index_until_nothing_is_pending(rescan, root_ids: set[int] | None = None) ->
         if pending == 0:
             _say_if_all_indexed()
             return
-        print(f"\nThere were changes during the earlier scan: {pending} file(s) are pending indexing again.")
+        print(f"\n{pending} file(s) are pending indexing again: they changed during the earlier scan, or failed for a reason that may pass.")
         if not _run_again_or_exit():
             print(f"\nExiting. Run {config.SCAN_COMMAND} later to process the backlog.")
             return

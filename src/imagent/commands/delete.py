@@ -27,7 +27,7 @@ from imagent.db.operations import (
 )
 from imagent.os_specific.files import comparable_path
 from imagent.pipeline.console import make_output_safe
-from imagent.pipeline.locking import AlreadyRunning, single_instance
+from imagent.pipeline.locking import AlreadyRunning, is_running, single_instance
 from imagent.pipeline.progress import format_duration
 
 # The menu style without the highlight on a row: no underline or bold under the pointer, and no reverse video on the row a question
@@ -153,6 +153,8 @@ def main(paths: list[str] | None = None) -> None:
     make_output_safe()
     if not sys.stdin.isatty():
         sys.exit('Deleting needs an interactive terminal. Run: imagent delete "folder path"')
+    if is_running("indexing"):  # said now, not after the questions: the lock is checked again when it is taken, in case one starts meanwhile
+        sys.exit("Indexing is already running in another window. Wait for it to finish, then try again. Nothing was deleted.")
     conn = init_db(str(config.DB_PATH))
     try:
         roots = list_roots(conn)

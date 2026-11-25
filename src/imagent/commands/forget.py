@@ -15,7 +15,7 @@ from imagent import config
 from imagent.db.connection import init_db
 from imagent.db.operations import clear_deleted_analyses, count_deleted_analyses
 from imagent.pipeline.console import make_output_safe
-from imagent.pipeline.locking import AlreadyRunning, single_instance
+from imagent.pipeline.locking import AlreadyRunning, is_running, single_instance
 
 CANCELLED = "Cancelled. Nothing was deleted."
 
@@ -34,6 +34,8 @@ def main() -> None:
     make_output_safe()
     if not sys.stdin.isatty():
         sys.exit("Forgetting needs an interactive terminal. Run: imagent forget")
+    if is_running("indexing"):  # said now, not after the confirmations: the lock is checked again when it is taken, in case one starts meanwhile
+        sys.exit("Indexing is already running in another window. Wait for it to finish, then try again. Nothing was deleted.")
 
     conn = init_db(str(config.DB_PATH))
     try:

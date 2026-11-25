@@ -13,7 +13,7 @@ from PIL.PngImagePlugin import PngImageFile
 from imagent import config
 from imagent.image_processing import memory, ocr
 from imagent.image_processing.features import extract_image_features
-from imagent.image_processing.preprocess import preprocess_image
+from imagent.image_processing.preprocess import preprocess_image, to_rgb
 from imagent.os_specific import memory as os_memory
 from imagent.image_processing.problems import OCR_FAILED, TOO_LARGE, UNREADABLE, UNSUPPORTED, ImageProblem, explain, problem
 from imagent.pipeline.failure import IndexingFailure
@@ -234,6 +234,40 @@ class PreparingTests(IsolatedHome):
     def test_the_features_judge_a_picture_as_displayed(self):
         path = self.make_jpeg((3000, 2000), orientation=6)  # stored sideways: displayed as portrait
         self.assertEqual(extract_image_features(path)["orientation"], "portrait")
+
+
+class TransparencyTests(IsolatedHome):
+    def _logo(self, mode: str, path: str) -> Path:
+        """A black square on a transparent background, whose transparent pixels hold black, as many logos do."""
+        image = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+        image.paste((0, 0, 0, 255), (10, 10, 30, 30))
+        image = image.convert(mode) if mode != "P" else image.convert("P")
+        target = self.work / path
+        image.save(target)
+        return target
+
+    def test_the_transparent_parts_of_a_picture_are_white_not_black(self):
+        flat = to_rgb(Image.open(self._logo("RGBA", "logo.png")))
+        self.assertEqual((flat.getpixel((0, 0)), flat.getpixel((20, 20))), ((255, 255, 255), (0, 0, 0)))
+
+    def test_every_kind_of_transparency_is_shown_on_white(self):
+        for mode, name in (("LA", "la.png"), ("P", "palette.png")):
+            image = Image.new(mode, (4, 4), (128, 0) if mode == "LA" else 0)
+            if mode == "P":
+                image.info["transparency"] = 0
+            image.save(self.work / name)
+            self.assertEqual(to_rgb(Image.open(self.work / name)).getpixel((0, 0)), (255, 255, 255), mode)
+
+    def test_a_picture_without_transparency_is_not_changed(self):
+        grey = Image.new("L", (4, 4), 7)
+        self.assertEqual(to_rgb(grey).getpixel((0, 0)), (7, 7, 7))
+
+    def test_the_picture_sent_to_the_model_and_its_dominant_colors_see_the_logo_on_white(self):
+        path = self._logo("RGBA", "logo.png")
+        sent = Image.open(io.BytesIO(preprocess_image(str(path))))
+        self.assertGreater(sum(sent.getpixel((0, 0))), 3 * 240)
+        colors = extract_image_features(str(path))["dominant_colors"]
+        self.assertIn("white", colors)
 
 
 class FakeEngine:

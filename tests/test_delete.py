@@ -305,5 +305,13 @@ class LockTests(DeleteBase):
         self.assertEqual(self.folders(), ["pictures"])
 
 
+    def test_while_indexing_runs_nothing_is_asked(self):
+        self.add_folder("pictures", 1)
+        with mock.patch.object(delete, "is_running", return_value=True):
+            code, _, _ = MainTests.run_main(self, [str(self.work / "pictures")], answers=[])  # no answer is given: a question would fail the test
+        self.assertIn("already running in another window", code)
+        self.assertEqual(self.folders(), ["pictures"])
+
+
 if __name__ == "__main__":
     unittest.main()

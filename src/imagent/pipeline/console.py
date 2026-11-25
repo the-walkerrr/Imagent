@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import sys
@@ -83,8 +84,28 @@ def run_cli(main: Callable[[], None], cancelled: str = "Cancelled.") -> None:
         sys.exit(f"{exc}")
     except sqlite3.Error as exc:
         sys.exit(f"{describe_db_error(exc)}")
+    except OSError as exc:
+        if exc.errno in _TERMINAL_ERRORS and not _terminal_is_there():  # the window was closed (or there never was one): not a fault of Imagent's
+            sys.exit("\nThe terminal is not there any more (it was closed, or this was not run in a terminal). Nothing more was done; "
+                     "run the command again from a terminal.")
+        _exit_unexpected(exc)
     except Exception as exc:
-        saved = _save_traceback()
-        where = "Details were saved to last_error.log in Imagent's data folder." if saved else "The details could not be saved."
-        sys.exit(f"Something unexpected went wrong ({type(exc).__name__}: {exc}). {where} "
-                 "Running it again may work; if it keeps happening, please report it with that file.")
+        _exit_unexpected(exc)
+
+
+_TERMINAL_ERRORS = (errno.EIO, errno.ENOTTY, errno.EBADF, errno.EINVAL)  # what reading a closed or missing terminal fails with
+
+
+def _terminal_is_there() -> bool:
+    try:
+        return os.isatty(sys.stdin.fileno())
+    except (OSError, ValueError, AttributeError):  # the descriptor is closed, or stdin was replaced by something with none
+        return False
+
+
+def _exit_unexpected(exc: BaseException) -> None:
+    """End with the plain message for an error nobody foresaw; its traceback is saved to a file."""
+    saved = _save_traceback()
+    where = "Details were saved to last_error.log in Imagent's data folder." if saved else "The details could not be saved."
+    sys.exit(f"Something unexpected went wrong ({type(exc).__name__}: {exc}). {where} "
+             "Running it again may work; if it keeps happening, please report it with that file.")

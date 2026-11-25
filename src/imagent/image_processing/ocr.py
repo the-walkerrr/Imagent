@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from imagent import config
+from imagent.image_processing.preprocess import to_rgb
 from imagent.image_processing.problems import OCR_FAILED, TOO_LARGE, ImageProblem, explain
 from imagent.pipeline.failure import attempt_record
 
@@ -64,7 +65,7 @@ def _read(pixels_bgr: np.ndarray) -> list[str]:
 
 
 def _bgr(img: Image.Image) -> np.ndarray:
-    return np.array(img if img.mode == "RGB" else img.convert("RGB"))[:, :, ::-1]  # the engine expects BGR
+    return np.array(to_rgb(img))[:, :, ::-1]  # the engine expects BGR
 
 
 def _read_whole(image_path: str) -> list[str]:
@@ -91,7 +92,7 @@ def _read_tiled(image_path: str) -> list[str]:
     """Read the image tile by tile, from one decoded copy; only a tile is turned into an array at a time."""
     with Image.open(image_path) as img:
         orientation = img.getexif().get(_EXIF_ORIENTATION, 1)
-        rgb = img if img.mode == "RGB" else img.convert("RGB")
+        rgb = to_rgb(img)
         width, height = rgb.size
         # The engine shrinks anything above its own maximum side and, tested on images of text, finds text only when it is above about 2% of the image side;
         # so a tile is a share of that maximum, which makes smaller text readable.

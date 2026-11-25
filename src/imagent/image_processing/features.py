@@ -11,6 +11,8 @@ import colorsys
 
 from PIL import Image, ImageOps
 
+from imagent.image_processing.preprocess import to_rgb
+
 
 _COLOR_SAMPLE_SIZE = (160, 160)
 _EXIF_ORIENTATION = 0x0112
@@ -30,8 +32,7 @@ def extract_image_features(image_path: str) -> dict:
         if img.getexif().get(_EXIF_ORIENTATION, 1) in _SIDEWAYS:
             width, height = height, width
         ImageOps.exif_transpose(img, in_place=True)  # turned where it is: a copy of the whole image is not made
-        if img.mode != "RGB":
-            img = img.convert("RGB")
+        img = to_rgb(img)
         if abs(width - height) / max(width, height) < 0.05:
             orientation = "square"
         else:

@@ -94,9 +94,13 @@ def set_device_settings(conn: sqlite3.Connection, device: dict, vlm_digest: str 
 # ---------------------------------------------------------------------------
 
 def get_or_add_root(conn: sqlite3.Connection, path: str) -> int:
-    """Return the root_id of a scanned folder, adding the folder if it is new."""
-    conn.execute("INSERT OR IGNORE INTO scan_roots (path, added_at) VALUES (?, ?)", (path, _now()))
-    return conn.execute("SELECT root_id FROM scan_roots WHERE path = ?", (path,)).fetchone()["root_id"]
+    """Return the root_id of a scanned folder, adding the folder if it is new. (A folder that is there is looked up first: with
+    AUTOINCREMENT, ``INSERT OR IGNORE`` of a folder that exists still uses up an id each time.)"""
+    row = conn.execute("SELECT root_id FROM scan_roots WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        conn.execute("INSERT INTO scan_roots (path, added_at) VALUES (?, ?)", (path, _now()))
+        row = conn.execute("SELECT root_id FROM scan_roots WHERE path = ?", (path,)).fetchone()
+    return row["root_id"]
 
 
 def list_roots(conn: sqlite3.Connection) -> list[dict]:
@@ -315,12 +319,32 @@ def _prune_deleted_analyses(conn: sqlite3.Connection, keep: int) -> None:
     )
 
 
+def _without_copy_that_stays(conn: sqlite3.Connection, file_ids: list[int]) -> list[int]:
+    """The ``file_ids`` whose picture (pixel hash) is not indexed under any other image that stays: the analysis of a picture that is
+    still indexed elsewhere is not a deleted picture's, and is still in use."""
+    deleting = set(file_ids)
+    hashes: dict[int, str] = {}
+    for start in range(0, len(file_ids), _CHUNK):
+        chunk = file_ids[start:start + _CHUNK]
+        rows = conn.execute(f"SELECT file_id, pixel_hash FROM image_data WHERE pixel_hash IS NOT NULL AND file_id IN ({', '.join('?' for _ in chunk)})", chunk)
+        hashes.update({row[0]: row[1] for row in rows})
+    staying: set[str] = set()
+    distinct = sorted(set(hashes.values()))
+    for start in range(0, len(distinct), _CHUNK):
+        chunk = distinct[start:start + _CHUNK]
+        rows = conn.execute(f"SELECT file_id, pixel_hash FROM image_data WHERE pixel_hash IN ({', '.join('?' for _ in chunk)})", chunk)
+        staying.update(row[1] for row in rows if row[0] not in deleting)
+    return [file_id for file_id, pixel_hash in hashes.items() if pixel_hash not in staying]
+
+
 def keep_analyses_of(conn: sqlite3.Connection, file_ids: list[int], keep: int | None) -> None:
     """Keep the analysis of the images ``file_ids`` (about to be deleted) in ``deleted_analyses``, the newest ``keep`` deletions
     in all. Nothing is kept when ``keep`` is None (not chosen yet) or 0, and an image without a pixel hash is not kept: it could
-    not be found again. Call it before ``delete_images``, in the same transaction."""
+    not be found again. Nor is the analysis of a picture that another image, not among ``file_ids``, still has: it is in use.
+    Call it before ``delete_images``, in the same transaction."""
     if not keep:
         return
+    file_ids = _without_copy_that_stays(conn, file_ids)
     now = _now()
     columns = ", ".join(REUSED_COLUMNS)
     for start in range(0, len(file_ids), _CHUNK):
@@ -410,11 +434,14 @@ def root_stats(conn: sqlite3.Connection, root_id: int) -> dict:
 
 
 def count_keepable_analyses(conn: sqlite3.Connection, root_ids: list[int]) -> int:
-    """How many different pictures of the folders ``root_ids`` ``keep_analyses_of`` could keep (those with a pixel hash and an embedding)."""
+    """How many different pictures of the folders ``root_ids`` ``keep_analyses_of`` could keep (those with a pixel hash and an embedding,
+    that no image outside these folders has too)."""
     marks = ", ".join("?" for _ in root_ids)
     return conn.execute(
         f"SELECT COUNT(DISTINCT i.pixel_hash) FROM image_data i JOIN text_embeddings e ON e.file_id = i.file_id "
-        f"WHERE i.pixel_hash IS NOT NULL AND i.root_id IN ({marks})", root_ids).fetchone()[0]
+        f"WHERE i.pixel_hash IS NOT NULL AND i.root_id IN ({marks}) "
+        f"AND NOT EXISTS (SELECT 1 FROM image_data o WHERE o.pixel_hash = i.pixel_hash AND o.root_id NOT IN ({marks}))",
+        [*root_ids, *root_ids]).fetchone()[0]
 
 
 def image_ids_in_roots(conn: sqlite3.Connection, root_ids: list[int]) -> list[int]:
@@ -647,7 +674,7 @@ def get_image_summary(conn: sqlite3.Connection, file_id: int) -> dict | None:
         """
         SELECT i.file_id, i.file_path, i.short_description, i.description, i.vlm_metadata_json,
                i.width, i.height, i.file_size, i.mime_type, i.taken_at, i.modified_at,
-               i.camera_make, i.camera_model, i.gps_lat, i.gps_lon, r.path AS root_path
+               i.camera_make, i.camera_model, i.gps_lat, i.gps_lon, i.pixel_hash, r.path AS root_path
         FROM image_data i JOIN scan_roots r ON r.root_id = i.root_id
         WHERE i.file_id = ?
         """,

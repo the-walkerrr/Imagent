@@ -46,6 +46,16 @@ class AddressTests(unittest.TestCase):
         self.assertIsNone(server_version("127.0.0.1:1"))
 
 
+class ShortErrorTests(unittest.TestCase):
+    def test_a_web_page_from_another_program_is_a_sentence(self):
+        error = RuntimeError("<!DOCTYPE html>\n<html><body>" + "x" * 5000 + "</body></html>")
+        self.assertEqual(vlm_client.short_error(error), "RuntimeError: another program answered at this address with a web page, not Ollama")
+
+    def test_a_long_message_is_cut_and_a_short_one_is_kept(self):
+        self.assertEqual(vlm_client.short_error(ValueError("no\nroute")), "ValueError: no route")
+        self.assertLess(len(vlm_client.short_error(ValueError("y" * 5000))), 260)
+
+
 class LoadModelTests(unittest.TestCase):
     def test_a_chat_model_is_loaded_with_the_options_it_will_be_used_with(self):
         client = mock.Mock()

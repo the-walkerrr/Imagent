@@ -209,6 +209,7 @@ OLLAMA_TIMEOUT: int = 300  # seconds to wait for a reply (a cold model load coun
 OLLAMA_NUM_CTX: int = 8192
 OLLAMA_USE_MMAP: bool = False  # load each model fully into memory instead of paging it in from disk
 OLLAMA_MAX_OUTPUT_TOKENS: int = 2200  # cap on the image-analysis reply; without it a runaway reply fills the whole context window
+QUERY_MAX_OUTPUT_TOKENS: int = 600  # cap on the reply that reads a search query; at temperature 0 a runaway reply repeats on every search and would otherwise last until the wait runs out
 # What happens when the vision model's reply cannot be used. Each kind of trouble has its own steps (vlm/analyzer.py):
 #  - a reply that ended at the output cap: one retry with different sampling, then the cap is raised step by step;
 #  - a complete reply that does not fit the schema: the problems are sent back to the model and it answers again.

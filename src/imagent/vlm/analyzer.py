@@ -343,6 +343,6 @@ def understand_query(client: ollama.Client, model: str, query: str) -> QueryUnde
             {"role": "user", "content": f"User query: {query}"},
         ],
         format=QueryUnderstanding.model_json_schema(),
-        options=config.LLM_OPTIONS,
+        options={**config.LLM_OPTIONS, "num_predict": config.QUERY_MAX_OUTPUT_TOKENS},
     )
     return QueryUnderstanding.model_validate_json(response.message.content)

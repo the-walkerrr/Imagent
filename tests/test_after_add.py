@@ -7,11 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 from imagent.commands import after_add
+from tests.support import IsolatedHome
 
 FOLDER = Path("/pictures/trips")
 
 
-class MenuTests(unittest.TestCase):
+class MenuTests(IsolatedHome):
     def run_menu(self, answers, added=(str(FOLDER),), indexed=True, **patches):
         """Run the menu with ``answers`` chosen in turn; returns the mocks it used, keyed by name, and its output. ``added`` is what is added at the start."""
         answers = list(answers)

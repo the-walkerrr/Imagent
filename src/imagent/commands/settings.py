@@ -122,6 +122,8 @@ CHANGES = {KEEP_DELETED: change_keep_deleted, SEARCH_DETAIL: change_search_detai
 
 def main() -> None:
     make_output_safe()
+    if not sys.stdin.isatty():
+        sys.exit("Settings need an interactive terminal. Run: imagent settings")
     chosen = None
     while True:
         values = read_settings()

@@ -48,8 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
                                              "Your pictures are never touched. You can choose to keep the analysis, so adding a folder again does not analyse its pictures again.")
     delete.add_argument("folder", nargs="*", help="the folders to remove from the scan list; put a path with spaces in quotes (without any, you choose from the folders you added)")
     commands.add_parser("settings", help="change how Imagent behaves, or uninstall it",
-                        description="Open a menu to change how many deleted pictures Imagent remembers, whether a search shows the summary or the full description, "
-                                    "and how long the scan waits before it runs again. It also holds Uninstall.")
+                        description="Open a menu to change how many deleted pictures Imagent remembers, and whether a search shows the summary or the full description. "
+                                    "It also holds Uninstall.")
     commands.add_parser("setup", help="choose the models and prepare this computer (once)",
                         description="Check Ollama, download and lock the three models, and measure this computer. "
                                     "Run it once after installing. Run again, it shows the models and restores a missing one.")

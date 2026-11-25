@@ -82,6 +82,13 @@ class MainTests(IsolatedHome):
         self.assertIn("Nothing was deleted", str(code))
         self.assertEqual(count_deleted_analyses(self.conn), 3)
 
+    def test_while_indexing_runs_nothing_is_asked(self):
+        remember(self.conn, 3)
+        with mock.patch.object(forget, "is_running", return_value=True):
+            code, _ = self.run_main([])  # no answer is given: a question would fail the test
+        self.assertIn("already running in another window", str(code))
+        self.assertEqual(count_deleted_analyses(self.conn), 3)
+
     def test_no_terminal_stops_before_anything(self):
         stdin = mock.Mock()
         stdin.isatty.return_value = False
