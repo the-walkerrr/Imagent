@@ -252,9 +252,9 @@ class ComparablePathTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
-    def test_windows_starts_it_detached_and_the_others_in_a_session_of_their_own(self):
+    def test_windows_starts_it_in_a_process_group_with_a_hidden_console_and_the_others_in_a_session_of_their_own(self):
         with mock.patch.object(process.platform, "system", return_value="Windows"):
-            self.assertEqual(process.background_process_options(), {"creationflags": 0x00000008})
+            self.assertEqual(process.background_process_options(), {"creationflags": 0x00000200 | 0x08000000})
         for system in ("Darwin", "Linux"):
             with mock.patch.object(process.platform, "system", return_value=system):
                 self.assertEqual(process.background_process_options(), {"start_new_session": True})
