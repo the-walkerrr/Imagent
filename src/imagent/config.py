@@ -249,6 +249,7 @@ CALIBRATION_MEMORY_HEADROOM: float = 0.25  # share of the free memory that must 
 CALIBRATION_TIMEOUT_MARGIN: float = 2.0  # the wait is the measured time for the largest first reply times this
 CALIBRATION_EMBED_TOKENS: int = 500  # length, in tokens, of the text the embedding model is given to see whether it fits in memory beside the vision model: about one stored description
 CALIBRATION_TRIAL_TOKENS: int = 48  # tokens a trial reply is asked for: enough to time the model, not to finish a description
+CALIBRATION_TOP_APPS: int = 5  # programs listed, largest first, when the vision model runs out of memory, so the person can close some
 
 
 def apply_device_settings(device: dict) -> None:

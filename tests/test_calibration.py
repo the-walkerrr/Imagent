@@ -103,6 +103,54 @@ class CalibrationTests(unittest.TestCase):
         self.assertLessEqual(found["image_long_edge"], 600)
         self.assertGreaterEqual(found["image_long_edge"], config.CALIBRATION_MIN_EDGE)
 
+    def test_when_both_memory_modes_run_out_the_person_is_asked_before_the_picture_is_made_smaller(self):
+        ask = mock.Mock(return_value=False)
+        client = FakeOllama(lambda request: NO_MEMORY if edge_of(request) > 600 else reply())
+        found = calibration.calibrate(client, "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        ask.assert_called_once_with(config.IMAGE_EDGE_CEILING, 2_000_000_000, 16_000_000_000)  # asked once, at the first size that failed
+        self.assertLessEqual(found["image_long_edge"], 600)
+
+    def test_trying_again_starts_from_the_largest_picture_with_the_memory_that_is_free_then(self):
+        closed = {"yes": False}
+
+        def ask(edge, model_bytes, free_bytes):
+            closed["yes"] = True  # the person closes programs, then chooses to try again
+            return True
+        free = mock.Mock(side_effect=[1_000_000_000, 1_000_000_000, 16_000_000_000])  # read at the start, when asked, and again to try again
+        client = FakeOllama(lambda request: reply() if closed["yes"] else NO_MEMORY, size=4_000_000_000)
+        with mock.patch.object(calibration, "available_memory", free):
+            found = calibration.calibrate(client, "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        self.assertEqual(found["image_long_edge"], config.IMAGE_EDGE_CEILING)  # no smaller picture was needed
+        self.assertFalse(found["use_mmap"])  # a 4 GB model fits in the 16 GB that are free now
+        self.assertEqual(found["measurements"]["free_memory_bytes"], 16_000_000_000)
+
+    def test_going_on_with_smaller_pictures_is_not_asked_again(self):
+        ask = mock.Mock(return_value=False)
+        with self.assertRaises(calibration.NotPossible):
+            calibration.calibrate(FakeOllama(lambda request: NO_MEMORY), "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        self.assertEqual(ask.call_count, 1)
+
+    def test_a_person_who_keeps_trying_again_is_asked_each_time_it_fails(self):
+        ask = mock.Mock(side_effect=[True, True, False])
+        with self.assertRaises(calibration.NotPossible):
+            calibration.calibrate(FakeOllama(lambda request: NO_MEMORY), "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        self.assertEqual(ask.call_count, 3)
+
+    def test_the_person_is_not_asked_when_the_other_memory_mode_works(self):
+        ask = mock.Mock()
+        client = FakeOllama(lambda request: NO_MEMORY if not request["options"]["use_mmap"] else reply())
+        calibration.calibrate(client, "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        ask.assert_not_called()
+
+    def test_trouble_that_is_not_about_memory_does_not_ask_either(self):
+        ask = mock.Mock()
+        slow = httpx.ReadTimeout("slow", request=REQUEST)
+        client = FakeOllama(lambda request: slow)
+        self.make_client.return_value = client
+        with self.assertRaises(calibration.NotPossible):
+            calibration.calibrate(client, "vlm", "emb", say=lambda message: None, on_out_of_memory=ask)
+        ask.assert_not_called()
+
     def test_a_computer_that_manages_no_picture_size_is_told_the_model_does_not_run_on_it(self):
         with self.assertRaisesRegex(calibration.NotPossible, "did not work on this computer"):
             self.run_it(FakeOllama(lambda request: NO_MEMORY))

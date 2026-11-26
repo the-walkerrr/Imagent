@@ -438,7 +438,6 @@ def install_ollama() -> None:
     program, partial, manifest = root / "program", root / "program.partial", root / app_config.OLLAMA_MANIFEST
     archive = None
     loader = SearchProgress()  # the spinner for the steps that show no download percentage
-    say("Installing Ollama for this project.")
     swapped = False
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -515,9 +514,11 @@ def ensure_ollama_installed() -> None:
         if version is None or version >= MIN_OLLAMA_VERSION:
             say("✓ Ollama is installed.", "fg:green")
             return
+        say("Installing Ollama for this project.")
         say(f"Your Ollama is version {'.'.join(map(str, version))}, but Imagent needs {'.'.join(map(str, MIN_OLLAMA_VERSION))} or newer. "
             "Imagent installs its own copy and leaves yours as it is.", "fg:ansimagenta")
     else:
+        say("Installing Ollama for this project.")
         say("Ollama is the program that runs the AI models on your computer. It is not installed yet.", "fg:ansimagenta")
     install_ollama()
 
@@ -939,6 +940,33 @@ def verify_models(client, vlm: str, embedding: str, text_model: str):
     }, {}
 
 
+def _ask_about_memory(edge: int, model_bytes: int | None, free_bytes: int | None) -> bool:
+    """The vision model ran out of memory at this picture size. Shows the memory that is free and the programs using the most, since
+    closing some may be all it takes, and asks what to do. Returns True to try again from the largest size, False to go on with
+    smaller pictures; stops setup when asked to."""
+    from imagent.os_specific.memory import top_memory_users
+    say(f"⚠ The model ran out of memory with pictures up to {edge} pixels. This may only be because other programs are using the "
+        "memory right now.", "fg:ansimagenta")
+    if free_bytes is not None:
+        say(f"Free memory now: {_fmt_bytes(free_bytes)}" + (f"    The model: {_fmt_bytes(model_bytes)}" if model_bytes else ""))
+    users = top_memory_users(app_config.CALIBRATION_TOP_APPS)
+    if users:
+        say("Using the most memory right now:\n" + "\n".join(f"  {_fmt_bytes(used):>9}  {name}" for name, used in users))
+    say()
+    choice = ask(questionary.select(
+        "What would you like to do?",
+        choices=[
+            questionary.Choice("○ Try again (close some programs first)", value="again"),
+            questionary.Choice("○ Continue with smaller pictures", value="smaller"),
+            questionary.Choice("○ Stop setup", value="stop"),
+        ],
+        qmark=QMARK, pointer=POINTER, style=STYLE,
+    ))
+    if choice == "stop":
+        sys.exit(f"\n{INDENT}Setup stopped. Close programs you do not need, then run {app_config.SETUP_COMMAND} again.")
+    return choice == "again"
+
+
 def measure_computer(client, vlm_model: str, embedding_model: str):
     """Measure this computer with the vision model and the embedding model beside it (vlm/calibration.py), with no questions asked.
 
@@ -947,7 +975,7 @@ def measure_computer(client, vlm_model: str, embedding_model: str):
     from imagent.vlm.calibration import NotPossible, calibrate
     say("Measuring this computer with the vision model. This runs by itself and can take a few minutes…")
     try:
-        device = calibrate(client, vlm_model, embedding_model, lambda message: say(f"  {message}"))
+        device = calibrate(client, vlm_model, embedding_model, lambda message: say(f"  {message}"), on_out_of_memory=_ask_about_memory)
     except NotPossible as exc:
         return None, {exc.model or vlm_model: str(exc)}
     except Exception as exc:
@@ -976,17 +1004,48 @@ def _remove_failed(client, rejected: set, fixed: dict) -> None:
     removed = set()
     for typed in sorted(rejected):
         names = [name for name in (fixed.get(typed), _normalize(typed)) if name in ours and name not in kept]
-        for name in names:
-            try:
-                client.delete(name)
-                removed.add(name)
-            except Exception as exc:
-                say(f"⚠ Could not remove {name} ({type(exc).__name__}: {exc}). You can remove it with: ollama rm {name}", "fg:ansimagenta")
-        if any(name in removed for name in names):
+        deleted = _delete_models(client, names)
+        removed |= deleted
+        if deleted:
             say(f"✓ Removed {typed}, which did not work on this computer, to free its disk space.", "fg:ansigreen")
+    _forget_removed(record, removed)
+
+
+def _delete_models(client, names) -> set:
+    """Delete each model from Ollama. Returns the names that were removed; one that cannot be removed is said so and left."""
+    removed = set()
+    for name in names:
+        try:
+            client.delete(name)
+            removed.add(name)
+        except Exception as exc:
+            say(f"⚠ Could not remove {name} ({type(exc).__name__}: {exc}). You can remove it with: ollama rm {name}", "fg:ansimagenta")
+    return removed
+
+
+def _forget_removed(record: dict, removed: set) -> None:
+    """Take the removed models off the list in install_record.json that the uninstaller uses."""
     if removed:
+        pins = record["pinned_models"] if isinstance(record.get("pinned_models"), dict) else {}
         app_config.save_install_record({**record, "ollama_models": [m for m in record.get("ollama_models", []) if m not in removed],
                                         "pinned_models": {name: base for name, base in pins.items() if name not in removed}})
+
+
+def _remove_unused(client, vlm: str, embedding: str, text_model: str) -> None:
+    """Take off this computer what an earlier try of setup installed and the confirmed models do not use, to free its disk space.
+
+    Only what Imagent itself downloaded or copied (the list in install_record.json) is removed, never a model that was on the
+    computer before. A model of the confirmed set stays, with the fixed copy made from it, so nothing is downloaded twice."""
+    record = app_config.load_install_record()
+    pins = record["pinned_models"] if isinstance(record.get("pinned_models"), dict) else {}
+    needed = {_normalize(name) for name in (vlm, embedding, text_model)}
+    needed |= {pinned for pinned, base in pins.items() if base in needed}
+    unused = [m for m in record.get("ollama_models", []) if isinstance(m, str) and m not in needed]
+    installed = {_normalize(m.model) for m in client.list().models}
+    deleted = _delete_models(client, [name for name in unused if name in installed])
+    if deleted:
+        say("✓ Removed the models of an earlier try that these do not use, to free their disk space.", "fg:ansigreen")
+    _forget_removed(record, deleted | {name for name in unused if name not in installed})  # a model already gone is off the list too
 
 
 def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
@@ -997,6 +1056,7 @@ def download_and_verify(host: str, vlm: str, embedding: str, text_model: str):
         if client is None:
             return None, {}
         try:
+            _remove_unused(client, vlm, embedding, text_model)  # before the download, so the disk has room for the new models
             _pull_models(client, [vlm, embedding, text_model])
         except Exception as exc:
             print()
@@ -1296,10 +1356,9 @@ def main() -> None:
     step("Your computer")
     say(system_details())
 
-    step("Text reading")
+    step("Required tools")
     prepare_ocr()
-
-    step("Ollama")
+    say()
     ensure_ollama_installed()
 
     try:

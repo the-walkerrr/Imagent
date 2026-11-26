@@ -130,6 +130,42 @@ class AvailableMemoryTests(unittest.TestCase):
             self.assertIsNone(memory.available_memory())
 
 
+PS_OUTPUT = """ 1048576 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  524288 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper (Renderer)
+  262144 /usr/libexec/logd
+  131072 python3
+nonsense without a size
+"""
+TASKLIST_OUTPUT = ('"chrome.exe","100","Console","1","600,000 K"\n'
+                   '"chrome.exe","101","Console","1","400,000 K"\n'
+                   '"System","4","Services","0","144 K"\n'
+                   '"short","row"\n')
+
+
+class TopMemoryUsersTests(unittest.TestCase):
+    def test_the_processes_of_one_program_are_added_together_and_a_macos_app_is_named_by_its_bundle(self):
+        self.assertEqual(memory._parse_ps(PS_OUTPUT), {"Google Chrome": (1048576 + 524288) * 1024, "logd": 262144 * 1024, "python3": 131072 * 1024})
+
+    def test_tasklist_rows_are_added_up_by_program_and_short_rows_are_ignored(self):
+        self.assertEqual(memory._parse_tasklist(TASKLIST_OUTPUT), {"chrome.exe": 1_000_000 * 1024, "System": 144 * 1024})
+
+    def test_the_largest_come_first_and_only_the_count_asked_for(self):
+        run = mock.Mock(return_value=SimpleNamespace(stdout=PS_OUTPUT))
+        with mock.patch.object(memory.platform, "system", return_value="Darwin"), mock.patch.object(memory.subprocess, "run", run):
+            self.assertEqual(memory.top_memory_users(2), [("Google Chrome", (1048576 + 524288) * 1024), ("logd", 262144 * 1024)])
+        self.assertEqual(run.call_args.args[0][0], "ps")
+
+    def test_windows_asks_tasklist(self):
+        run = mock.Mock(return_value=SimpleNamespace(stdout=TASKLIST_OUTPUT))
+        with mock.patch.object(memory.platform, "system", return_value="Windows"), mock.patch.object(memory.subprocess, "run", run):
+            self.assertEqual(memory.top_memory_users(1), [("chrome.exe", 1_000_000 * 1024)])
+        self.assertEqual(run.call_args.args[0][0], "tasklist")
+
+    def test_a_computer_that_will_not_say_gives_an_empty_list(self):
+        with mock.patch.object(memory.platform, "system", return_value="Linux"), mock.patch.object(memory.subprocess, "run", side_effect=OSError("no ps")):
+            self.assertEqual(memory.top_memory_users(5), [])
+
+
 def stat_result(**fields):
     return SimpleNamespace(**fields)
 

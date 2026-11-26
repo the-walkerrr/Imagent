@@ -4,10 +4,13 @@ imagent/os_specific/memory.py — How much memory a program can use right now, a
 Linux counts what the kernel says is available (``MemAvailable``), and, when the program runs in a container or under a
 memory limit (a cgroup), also what is left of that limit: ``/proc/meminfo`` shows the whole computer, so without this a
 program in a 2 GB container would count on the free memory of a 64 GB host. The smaller of the two is used.
+
+It also says which programs use the most memory right now, so a person can close them: ``ps`` on macOS and Linux, ``tasklist`` on Windows.
 """
 
 from __future__ import annotations
 
+import csv
 import ctypes
 import platform
 import re
@@ -32,6 +35,31 @@ def _parse_vm_stat(text: str) -> int | None:
     if not size or len(pages) < 3:
         return None
     return (pages["free"] + pages["inactive"] + pages["speculative"]) * int(size.group(1))
+
+
+def _parse_ps(text: str) -> dict[str, int]:
+    """Bytes of memory by program from ``ps -axo rss=,comm=`` (rss is in KiB). The processes of one program are added together: a
+    browser runs many. A macOS app is named by its bundle (``Google Chrome``), not by each of its helpers."""
+    totals: dict[str, int] = {}
+    for line in text.splitlines():
+        size, _, command = line.strip().partition(" ")
+        command = command.strip()
+        if not size.isdigit() or not command:
+            continue
+        app = re.search(r"([^/]+)\.app/", command)
+        name = app.group(1) if app else command.rsplit("/", 1)[-1]
+        totals[name] = totals.get(name, 0) + int(size) * 1024
+    return totals
+
+
+def _parse_tasklist(text: str) -> dict[str, int]:
+    """Bytes of memory by program from ``tasklist /FO CSV /NH`` (the last column reads like ``"123,456 K"``, a count of KiB)."""
+    totals: dict[str, int] = {}
+    for row in csv.reader(text.splitlines()):
+        kib = re.sub(r"\D", "", row[4]) if len(row) >= 5 else ""
+        if kib:
+            totals[row[0]] = totals.get(row[0], 0) + int(kib) * 1024
+    return totals
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -111,3 +139,15 @@ def available_memory() -> int | None:
     except Exception:
         pass
     return None
+
+
+def top_memory_users(count: int) -> list[tuple[str, int]]:
+    """The ``count`` programs using the most memory right now, largest first, as (name, bytes); empty if this computer will not say."""
+    try:
+        if platform.system() == "Windows":
+            totals = _parse_tasklist(subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=15).stdout)
+        else:
+            totals = _parse_ps(subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, timeout=15).stdout)
+    except Exception:
+        return []
+    return sorted(totals.items(), key=lambda item: item[1], reverse=True)[:count]

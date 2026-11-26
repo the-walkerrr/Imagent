@@ -18,6 +18,9 @@ The trials are short (``config.CALIBRATION_TRIAL_TOKENS``), so one full descript
 the settings found and the steps indexing takes for a reply that is cut off or does not fit the schema: a model that cannot
 write one is not fit for the job, whatever its speed.
 
+When a size runs out of memory both ways (loaded fully and paged in), the person is asked first, through ``on_out_of_memory``, before
+the picture is made smaller: other programs may be using the memory, and closing them can bring the larger sizes back.
+
 ``calibrate`` raises ``NotPossible`` when not even the smallest size works, or the model cannot write a usable description:
 the model does not run on this computer. ``NotPossible.model`` says which model it was.
 """
@@ -191,8 +194,18 @@ def _fit_context(client: ollama.Client, model: str, edge: int, use_mmap: bool, l
         context = needed
 
 
-def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Callable[[str], None] = print) -> dict:
+def _prefers_mmap(size: int | None, available: int | None) -> bool:
+    """Paged in from disk only when the model would not fit in the free memory with headroom to spare; if that way fails, the other is tried."""
+    return bool(size and available and size > available * (1 - config.CALIBRATION_MEMORY_HEADROOM))
+
+
+def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Callable[[str], None] = print,
+              on_out_of_memory: Callable[[int, int | None, int | None], bool] | None = None) -> dict:
     """Measure this computer with the vision model ``model``, and with the embedding model ``embedding_model`` beside it.
+
+    ``on_out_of_memory(edge, model_bytes, free_bytes)`` is called when that picture size ran out of memory both ways, before a smaller
+    one is tried (the memory free now is read again for it). It returns True to try again from the largest size, False to go on with
+    smaller ones, which is not asked again.
 
     Returns the settings (see ``db.operations.set_device_settings``). Both models are unloaded afterwards. Raises
     ``NotPossible`` (naming the model) when the vision model does not run here at any size worth sending or cannot write a usable
@@ -200,14 +213,15 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
     available = available_memory()
     size = _model_bytes(client, model)
     limit = _model_context_limit(client, model)
-    # Paged in from disk only when the model would not fit in the free memory with headroom to spare; if that way fails, the other is tried.
-    prefer_mmap = bool(size and available and size > available * (1 - config.CALIBRATION_MEMORY_HEADROOM))
+    prefer_mmap = _prefers_mmap(size, available)
     start = _power_of_two_at_least(config.OLLAMA_MAX_OUTPUT_TOKENS * 2)
     trouble = ""
     edge = config.IMAGE_EDGE_CEILING
+    smaller_chosen = False  # the person chose to go on with smaller pictures, so they are not asked again
     try:
         while edge >= config.CALIBRATION_MIN_EDGE:
             say(f"Trying pictures up to {edge} pixels…")
+            ran_out = False
             for use_mmap in (prefer_mmap, not prefer_mmap):
                 try:
                     context, first, client = _fit_context(client, model, edge, use_mmap, limit, start)
@@ -220,6 +234,7 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
                 except ServiceTrouble as exc:
                     trouble = str(exc)
                     if exc.kind == OUT_OF_MEMORY:
+                        ran_out = True
                         continue
                     break  # no reply in time, or Ollama stopped: the other way would only wait as long again
                 # Measure again with the model loaded: how fast it writes once it is running. Ollama keeps what it worked
@@ -243,6 +258,7 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
                 except ServiceTrouble as exc:  # the same steps as for a trial that does not get an answer
                     trouble = str(exc)
                     if exc.kind == OUT_OF_MEMORY:
+                        ran_out = True
                         continue
                     break
                 say("Checking that the embedding model fits beside it…")
@@ -257,6 +273,13 @@ def calibrate(client: ollama.Client, model: str, embedding_model: str, say: Call
                         "model_bytes": size, "free_memory_bytes": available, "model_context_limit": limit,
                     },
                 }
+            if ran_out and on_out_of_memory and not smaller_chosen:
+                if on_out_of_memory(edge, size, available_memory()):
+                    edge = config.IMAGE_EDGE_CEILING
+                    available = available_memory()  # programs may have been closed
+                    prefer_mmap = _prefers_mmap(size, available)
+                    continue
+                smaller_chosen = True
             edge = int(edge * config.CALIBRATION_EDGE_STEP)
         raise NotPossible(f"did not work on this computer at any picture size worth using"
                           f"{f' (last problem: {trouble})' if trouble else ''}. A smaller model may.", model)

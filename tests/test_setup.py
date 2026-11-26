@@ -360,6 +360,80 @@ class WhenTheComputerCannotRunAModelTests(IsolatedHome):
         self.assertEqual(self.server.deleted, [])
 
 
+class WhenANewSetOfModelsIsConfirmedTests(IsolatedHome):
+    """A new set replaces an earlier try: what Imagent installed for the earlier try and the new set does not use is removed first."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = FakeOllama()
+        patchers = (mock.patch.object(setup, "ollama_client", side_effect=lambda host: contextlib.nullcontext(self.server)),
+                    mock.patch.object(setup, "_pull_with_progress", side_effect=lambda client, name: client.pull(name)),
+                    mock.patch.object(setup, "say"))
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_it(self, failing):
+        """An earlier try: the vision model does not run on this computer, so it is removed and the others stay."""
+        measure = lambda client, vlm_model, embedding_model: (None, {vlm_model: "did not work on this computer."})
+        with mock.patch.object(setup, "measure_computer", side_effect=measure):
+            return setup.download_and_verify("http://localhost:11434", "v:1b", "e:1b", "t:1b")
+
+    def record(self):
+        return config.load_install_record()
+
+    def confirm(self, vlm, embedding, text, server=None):
+        if server is not None:
+            self.server = server
+        with mock.patch.object(setup, "measure_computer", return_value=({**DEVICE}, None)):
+            return setup.download_and_verify("http://localhost:11434", vlm, embedding, text)
+
+    def test_an_embedding_model_that_worked_before_is_removed_when_the_new_set_has_another(self):
+        self.run_it("vlm")  # v:1b fails and goes; e:1b and t:1b stay
+        settings, _ = self.confirm("v2:1b", "e2:1b", "t:1b")
+        self.assertIsNotNone(settings)
+        self.assertEqual(sorted(name for name in self.server.models if not name.startswith("imagent-pin/")), ["e2:1b", "t:1b", "v2:1b"])
+        self.assertEqual(sum(name.startswith("imagent-pin/e") for name in self.server.models), 1)  # only the copy of e2:1b is left
+        record = self.record()
+        self.assertNotIn("e:1b", record["ollama_models"])
+        self.assertNotIn("e:1b", record["pinned_models"].values())
+
+    def test_the_old_models_go_before_the_new_ones_are_downloaded(self):
+        self.run_it("vlm")
+        order = []
+        self.server.delete = lambda name, original=self.server.delete: (order.append("delete"), original(name))[1]
+        self.server.pull = lambda name, stream=True, original=self.server.pull: (order.append("pull"), original(name, stream))[1]
+        self.confirm("v2:1b", "e2:1b", "t:1b")
+        self.assertLess(order.index("delete"), order.index("pull"))
+
+    def test_a_model_that_is_in_the_new_set_too_stays_and_is_not_downloaded_again(self):
+        self.run_it("vlm")
+        pulled = []
+        self.server.pull = lambda name, stream=True, original=self.server.pull: (pulled.append(name), original(name, stream))[1]
+        self.confirm("v2:1b", "e:1b", "t:1b")
+        self.assertEqual(pulled, ["v2:1b"])
+        self.assertIn("e:1b", self.server.models)
+        self.assertTrue(any(name.startswith("imagent-pin/e") for name in self.server.models))
+        self.assertIn("e:1b", self.record()["ollama_models"])
+
+    def test_a_model_that_was_on_the_computer_before_is_never_removed(self):
+        self.server = FakeOllama(installed=["e:1b"])  # not downloaded by Imagent
+        self.run_it("vlm")
+        self.confirm("v2:1b", "e2:1b", "t:1b")
+        self.assertIn("e:1b", self.server.models)
+
+    def test_the_first_set_removes_nothing(self):
+        self.confirm("v:1b", "e:1b", "t:1b")
+        self.assertEqual(self.server.deleted, [])
+
+    def test_a_model_that_cannot_be_removed_is_said_so_and_the_download_goes_on(self):
+        self.run_it("vlm")
+        self.server.delete = mock.Mock(side_effect=RuntimeError("busy"))
+        settings, _ = self.confirm("v2:1b", "e2:1b", "t:1b")
+        self.assertIsNotNone(settings)
+        self.assertIn("e:1b", self.record()["ollama_models"])  # still on the uninstaller's list
+
+
 class ChoosingAgainAfterAFailureTests(IsolatedHome):
     def test_the_next_prompt_knows_every_model_that_failed_and_only_the_failed_row_is_asked_again(self):
         asked = []
@@ -466,6 +540,39 @@ class MeasureComputerTests(unittest.TestCase):
         self.assertIsNone(device)
         self.assertEqual(list(problems), ["vlm"])
         self.assertIn("RuntimeError: boom", problems["vlm"])
+
+
+class AskAboutMemoryTests(unittest.TestCase):
+    """The question when the vision model runs out of memory during measuring."""
+
+    def run_it(self, answer):
+        asked = []
+        with mock.patch.object(setup, "say") as said, mock.patch.object(setup, "ask", side_effect=lambda q: asked.append(q) or answer), \
+                mock.patch("imagent.os_specific.memory.top_memory_users", return_value=[("Google Chrome", 3_000_000_000), ("Slack", 800_000_000)]):
+            result = setup._ask_about_memory(1536, 4_000_000_000, 2_500_000_000)
+        return result, "\n".join(call.args[0] for call in said.call_args_list if call.args)
+
+    def test_the_free_memory_and_the_programs_using_the_most_are_shown(self):
+        _, shown = self.run_it("again")
+        self.assertIn("1536 pixels", shown)
+        self.assertIn("Free memory now: 2.5 GB", shown)
+        self.assertIn("The model: 4.0 GB", shown)
+        self.assertIn("3.0 GB  Google Chrome", shown)
+        self.assertIn("0.8 GB  Slack", shown)
+
+    def test_trying_again_and_going_on_with_smaller_pictures_are_told_apart(self):
+        self.assertTrue(self.run_it("again")[0])
+        self.assertFalse(self.run_it("smaller")[0])
+
+    def test_stopping_ends_setup_and_says_to_close_programs(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.run_it("stop")
+        self.assertIn("Close programs you do not need", str(raised.exception))
+
+    def test_measuring_the_computer_asks_this_question_when_memory_runs_out(self):
+        with mock.patch("imagent.vlm.calibration.calibrate", return_value=DEVICE) as calibrate, mock.patch.object(setup, "say"):
+            setup.measure_computer(object(), "vlm", "emb")
+        self.assertIs(calibrate.call_args.kwargs["on_out_of_memory"], setup._ask_about_memory)
 
 
 class KeepDeletedQuestionTests(IsolatedHome):
